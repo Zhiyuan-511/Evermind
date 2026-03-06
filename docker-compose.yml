@@ -1,19 +1,9 @@
 # ═══════════════════════════════════════════
 # Evermind — Docker Compose
-# One-click deployment
+# One-click deployment: docker compose up -d
 # ═══════════════════════════════════════════
 
 services:
-  frontend:
-    build: ./frontend
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8765
-      - NEXT_PUBLIC_WS_URL=ws://localhost:8765/ws
-    depends_on:
-      - backend
-
   backend:
     build: ./backend
     ports:
@@ -21,5 +11,11 @@ services:
     env_file:
       - ./backend/.env
     volumes:
-      - ./backend:/app
+      - ./evermind_godmode_final.html:/app/../evermind_godmode_final.html:ro
       - /tmp/evermind_output:/tmp/evermind_output
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8765/api/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
