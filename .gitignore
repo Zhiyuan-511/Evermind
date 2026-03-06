@@ -1,0 +1,39 @@
+# Evermind - AI Workflow Orchestrator
+
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.next/
+.venv/
+venv/
+env/
+
+# Environment variables (API keys!)
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Build & Output
+dist/
+build/
+out/
+/tmp/evermind_output/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Docker
+docker-compose.override.yml

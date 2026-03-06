@@ -1,0 +1,25 @@
+# ═══════════════════════════════════════════
+# Evermind — Docker Compose
+# One-click deployment
+# ═══════════════════════════════════════════
+
+services:
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8765
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8765/ws
+    depends_on:
+      - backend
+
+  backend:
+    build: ./backend
+    ports:
+      - "8765:8765"
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./backend:/app
+      - /tmp/evermind_output:/tmp/evermind_output
