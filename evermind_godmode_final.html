@@ -2106,6 +2106,34 @@
         const privacyMasker = new PrivacyMasker();
         function togglePrivacy() { GM.settings.privacy.enabled = !GM.settings.privacy.enabled; updPrivBadge(); save(); syncApiKeys(); toast('Privacy: ' + (GM.settings.privacy.enabled ? 'ON' : 'OFF'), GM.settings.privacy.enabled ? 'success' : 'warn') }
         function syncApiKeys() { if (OC.connected) { OC.sendConfig(); clog('system', '\u2601\ufe0f Config synced to backend', 'c-sys'); } }
+        async function addRelay() {
+            var name = document.getElementById('relayName')?.value || '';
+            var url = document.getElementById('relayUrl')?.value || '';
+            var key = document.getElementById('relayKey')?.value || '';
+            var models = (document.getElementById('relayModels')?.value || '').split(',').map(s => s.trim()).filter(Boolean);
+            if (!name || !url) { toast('Name and URL required', 'error'); return; }
+            try {
+                var resp = await fetch('/api/relay/add', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, base_url: url, api_key: key, models }) });
+                var data = await resp.json();
+                if (data.success) { toast('Relay added: ' + name, 'success'); clog('system', '\u2705 Relay added: ' + name, 'c-ok'); switchSTab('relay'); } else { toast('Failed: ' + (data.error || ''), 'error'); }
+            } catch (e) { toast('Error: ' + e.message, 'error'); }
+        }
+        async function loadRelays() {
+            var el = document.getElementById('relayList'); if (!el) return;
+            try {
+                var resp = await fetch('/api/relay/list'); var data = await resp.json();
+                if (!data.relays || data.relays.length === 0) { el.innerHTML = '<div class="text-[var(--text3)] text-[9px]">\u6682\u65e0\u4e2d\u8f6c\u7aef\u70b9</div>'; return; }
+                el.innerHTML = data.relays.map(function (r) {
+                    return '<div style="background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);border-radius:6px;padding:6px 8px;margin-bottom:4px">' +
+                        '<div class="flex items-center gap-2"><span style="font-weight:600;font-size:10px">' + r.name + '</span><span class="text-[7px] text-[var(--text3)]">' + r.models.join(', ') + '</span></div>' +
+                        '<div class="text-[8px] text-[var(--text3)] mt-1">' + r.base_url + '</div>' +
+                        '<div class="flex gap-2 mt-1"><button class="btn text-[8px]" onclick="testRelay(\'' + r.id + '\')"><i class="fa-solid fa-bolt"></i> Test</button>' +
+                        '<button class="btn text-[8px]" style="color:var(--orange)" onclick="removeRelay(\'' + r.id + '\')"><i class="fa-solid fa-trash"></i></button></div></div>';
+                }).join('');
+            } catch (e) { el.innerHTML = '<div class="text-[var(--orange)] text-[9px]">Error loading relays</div>'; }
+        }
+        async function testRelay(id) { try { var r = await (await fetch('/api/relay/test/' + id, { method: 'POST' })).json(); toast(r.success ? '\u2705 OK (' + r.latency_ms + 'ms)' : '\u274c ' + r.error, r.success ? 'success' : 'error'); } catch (e) { toast('Error: ' + e.message, 'error'); } }
+        async function removeRelay(id) { try { await fetch('/api/relay/' + id, { method: 'DELETE' }); toast('Removed', 'success'); switchSTab('relay'); } catch (e) { toast('Error', 'error'); } }
         function updPrivBadge() { const b = document.getElementById('privacyBadge'); if (!b) return; b.textContent = GM.settings.privacy.enabled ? '\u{1f6e1}\ufe0f ON' : '\u{1f6e1}\ufe0f OFF'; b.style.background = GM.settings.privacy.enabled ? 'rgba(63,185,80,.15)' : 'rgba(255,123,114,.15)'; b.style.color = GM.settings.privacy.enabled ? 'var(--green)' : 'var(--orange)' }
 
 
@@ -2639,6 +2667,7 @@
             root.innerHTML = '<div class="modal-bg" onclick="this.remove()"><div class="modal settings-modal" onclick="event.stopPropagation()"><div class="settings-header"><h3><i class="fa-solid fa-gear mr-1"></i>' + t('settings') + '</h3><div class="settings-tabs" id="sTabs"></div></div><div class="settings-body" id="sBody"></div><div class="settings-footer"><button class="btn text-[9px]" onclick="this.closest(\'.modal-bg\').remove()">' + t('close') + '</button></div></div></div>';
             var tabs = [
                 { id: 'conn', icon: 'fa-plug', label: t('sTab_conn') },
+                { id: 'relay', icon: 'fa-server', label: '中转 API' },
                 { id: 'perm', icon: 'fa-shield-halved', label: t('sTab_perm') },
                 { id: 'ctrl', icon: 'fa-desktop', label: t('sTab_ctrl') },
                 { id: 'proj', icon: 'fa-folder-open', label: t('sTab_proj') },
@@ -2656,12 +2685,23 @@
             allTabs.forEach(function (el) { el.classList.toggle('active', el.dataset.tab === id) });
             var body = document.getElementById('sBody');
             if (id === 'conn') body.innerHTML = renderSConn();
+            else if (id === 'relay') body.innerHTML = renderSRelay();
             else if (id === 'perm') body.innerHTML = renderSPerm();
             else if (id === 'ctrl') body.innerHTML = renderSCtrl();
             else if (id === 'proj') body.innerHTML = renderSProj();
             else if (id === 'chat') body.innerHTML = renderSChat();
             else if (id === 'ui') body.innerHTML = renderSUI();
             else if (id === 'priv') body.innerHTML = renderSPriv();
+        }
+        function renderSRelay() {
+            return '<div class="s-section"><div class="s-section-title"><i class="fa-solid fa-server"></i> 中转 API 端点</div>' +
+                '<div id="relayList" style="margin-bottom:8px"><div class="text-[var(--text3)] text-[9px]">Loading...</div></div>' +
+                '<div class="s-section-title" style="margin-top:12px"><i class="fa-solid fa-plus"></i> 添加新中转</div>' +
+                '<div class="s-row"><label>名称</label><input class="input-field" id="relayName" placeholder="OpenRouter / OneAPI"></div>' +
+                '<div class="s-row"><label>Base URL</label><input class="input-field" id="relayUrl" placeholder="https://api.example.com/v1"></div>' +
+                '<div class="s-row"><label>API Key</label><input type="password" class="input-field" id="relayKey" placeholder="sk-..."></div>' +
+                '<div class="s-row"><label>模型</label><input class="input-field" id="relayModels" placeholder="gpt-4o, claude-3.5-sonnet"></div>' +
+                '<div style="margin-top:8px"><button class="btn text-[9px]" onclick="addRelay()"><i class="fa-solid fa-plus mr-1"></i>添加</button></div></div>';
         }
         function renderSConn() {
             var isConn = OC.ws && OC.ws.readyState === 1;

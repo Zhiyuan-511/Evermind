@@ -188,21 +188,58 @@ class AIBridge:
         # Resolve model info (static registry + relay)
         model_info = self._resolve_model(node_model)
 
-        # Path 1: CUA mode
-        if model_info.get("supports_cua") and any(p.name == "computer_use" for p in plugins):
-            result = await self._execute_cua_loop(node, plugins, masked_input, on_progress)
-        # Path 2: Relay endpoint
-        elif model_info.get("provider") == "relay":
-            result = await self._execute_relay(node, masked_input, model_info, on_progress)
-        # Path 3: LiteLLM with tools
-        elif self._litellm and model_info.get("supports_tools") and plugins:
-            result = await self._execute_litellm_tools(node, plugins, masked_input, model_info, on_progress)
-        # Path 4: LiteLLM direct chat
-        elif self._litellm:
-            result = await self._execute_litellm_chat(node, masked_input, model_info, on_progress)
-        # Fallback: direct OpenAI
-        else:
-            result = await self._execute_openai_direct(node, plugins, masked_input, on_progress)
+        # ── Execute with retry ──
+        max_retries = 3
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                if attempt > 0:
+                    wait = 2 ** attempt
+                    logger.info(f"Retry {attempt}/{max_retries} for {node_model}, waiting {wait}s...")
+                    if on_progress:
+                        await on_progress({"stage": "retrying", "attempt": attempt, "wait": wait})
+                    await asyncio.sleep(wait)
+
+                # Path 1: CUA mode
+                if model_info.get("supports_cua") and any(p.name == "computer_use" for p in plugins):
+                    result = await self._execute_cua_loop(node, plugins, masked_input, on_progress)
+                # Path 2: Relay endpoint
+                elif model_info.get("provider") == "relay":
+                    result = await self._execute_relay(node, masked_input, model_info, on_progress)
+                # Path 3: LiteLLM with tools
+                elif self._litellm and model_info.get("supports_tools") and plugins:
+                    result = await self._execute_litellm_tools(node, plugins, masked_input, model_info, on_progress)
+                # Path 4: LiteLLM direct chat
+                elif self._litellm:
+                    result = await self._execute_litellm_chat(node, masked_input, model_info, on_progress)
+                # Fallback: direct OpenAI
+                else:
+                    result = await self._execute_openai_direct(node, plugins, masked_input, on_progress)
+
+                if result.get("success"):
+                    # ── Track usage ──
+                    try:
+                        from settings import get_usage_tracker
+                        tracker = get_usage_tracker()
+                        usage = result.get("usage", {})
+                        tracker.record(
+                            model=result.get("model", node_model),
+                            prompt_tokens=usage.get("prompt_tokens", 0),
+                            completion_tokens=usage.get("completion_tokens", 0),
+                        )
+                    except Exception:
+                        pass
+                    break  # Success, exit retry loop
+                else:
+                    last_error = result.get("error", "Unknown error")
+                    # Don't retry on non-retryable errors
+                    if "api key" in last_error.lower() or "auth" in last_error.lower():
+                        break
+
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"Execute attempt {attempt+1} failed: {e}")
+                result = {"success": False, "output": "", "error": last_error}
 
         # ── Privacy: unmask PII in AI response ──
         if restore_map and result.get("output"):

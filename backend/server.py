@@ -220,6 +220,67 @@ async def execute_node(data: Dict = Body(...)):
 
 
 # ─────────────────────────────────────────────
+# Settings Persistence Endpoints
+# ─────────────────────────────────────────────
+from settings import load_settings, save_settings, apply_api_keys, validate_api_key, get_usage_tracker
+
+# Auto-load saved settings on startup
+_saved_settings = load_settings()
+_applied = apply_api_keys(_saved_settings)
+logger.info(f"Auto-loaded settings: {_applied} API keys applied")
+
+
+@app.get("/api/settings")
+async def get_settings():
+    """Get current saved settings (keys are masked)."""
+    settings = load_settings()
+    # Mask API keys for security
+    masked_keys = {}
+    for k, v in settings.get("api_keys", {}).items():
+        if v:
+            masked_keys[k] = v[:6] + "..." + v[-4:] if len(v) > 10 else "***"
+        else:
+            masked_keys[k] = ""
+    return {
+        "api_keys": masked_keys,
+        "workspace": settings.get("workspace", ""),
+        "default_model": settings.get("default_model", "gpt-5.4"),
+        "privacy_enabled": settings.get("privacy", {}).get("enabled", True),
+        "relay_endpoints": len(settings.get("relay_endpoints", [])),
+        "has_keys": {k: bool(v) for k, v in settings.get("api_keys", {}).items()},
+    }
+
+
+@app.post("/api/settings/save")
+async def save_user_settings(data: Dict = Body(...)):
+    """Save settings to disk and apply API keys."""
+    success = save_settings(data)
+    if success:
+        count = apply_api_keys(data)
+        return {"success": True, "keys_applied": count}
+    return {"success": False, "error": "Failed to save"}
+
+
+@app.post("/api/settings/validate")
+async def validate_keys(data: Dict = Body(...)):
+    """Validate API keys by making minimal LiteLLM requests."""
+    results = {}
+    keys = data.get("api_keys", {})
+    for provider, key in keys.items():
+        if key:
+            result = validate_api_key(provider, key)
+            results[provider] = result
+    return {"results": results}
+
+
+@app.get("/api/usage")
+async def get_usage():
+    """Get token usage stats for the current session."""
+    tracker = get_usage_tracker()
+    return tracker.get_usage()
+
+
+# ─────────────────────────────────────────────
 # WebSocket Handler
 # ─────────────────────────────────────────────
 @app.websocket("/ws")
