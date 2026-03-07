@@ -1,6 +1,6 @@
 'use client';
 
-import { ChatMessage, SubTask } from '@/lib/types';
+import { ChatMessage } from '@/lib/types';
 import { useState, useRef, useEffect } from 'react';
 
 interface ChatPanelProps {

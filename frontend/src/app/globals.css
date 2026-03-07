@@ -1,6 +1,6 @@
 /* ═══════════════════════════════════════════
    Evermind — Global Styles
-   Dark theme with glassmorphism
+   Supports dark / work themes with glassmorphism
    ═══════════════════════════════════════════ */
 
 @import "tailwindcss";
@@ -10,6 +10,7 @@
   --bg2: #12122a;
   --bg3: #1a1a3e;
   --surface: rgba(26, 26, 62, 0.7);
+  --surface-strong: rgba(18, 18, 42, 0.88);
   --glass: rgba(255, 255, 255, 0.04);
   --glass-border: rgba(255, 255, 255, 0.08);
   --text1: #e8e8f0;
@@ -28,16 +29,58 @@
   --header-h: 48px;
   --radius: 12px;
   --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+  --canvas-bg: #0a0a1a;
+  --canvas-dot: rgba(255, 255, 255, 0.05);
+  --edge-color: rgba(79, 143, 255, 0.45);
+  --minimap-mask: rgba(0, 0, 0, 0.7);
+}
+
+:root[data-theme='light'] {
+  --bg1: #f4f7fb;
+  --bg2: #e9eef7;
+  --bg3: #d9e2f2;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-strong: rgba(255, 255, 255, 0.88);
+  --glass: rgba(255, 255, 255, 0.64);
+  --glass-border: rgba(61, 95, 143, 0.14);
+  --text1: #142033;
+  --text2: #51627c;
+  --text3: #7a8aa3;
+  --blue: #356cff;
+  --green: #1f9d63;
+  --orange: #e57a0b;
+  --red: #d6455d;
+  --yellow: #d4a417;
+  --purple: #7c4dff;
+  --cyan: #0891b2;
+  --pink: #db2777;
+  --shadow: 0 12px 28px rgba(18, 39, 74, 0.08);
+  --canvas-bg: #eef3fa;
+  --canvas-dot: rgba(53, 108, 255, 0.16);
+  --edge-color: rgba(53, 108, 255, 0.34);
+  --minimap-mask: rgba(83, 109, 145, 0.12);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
+html,
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: var(--bg1);
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans), 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  background: linear-gradient(180deg, var(--bg2) 0%, var(--bg1) 100%);
   color: var(--text1);
   overflow: hidden;
   height: 100vh;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
 }
 
 /* Glass effect utility */
@@ -49,10 +92,11 @@ body {
 }
 
 .glass-strong {
-  background: rgba(26, 26, 62, 0.85);
+  background: var(--surface-strong);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow);
 }
 
 /* Button styles */
@@ -72,10 +116,10 @@ body {
 }
 
 .btn:hover {
-  background: rgba(255, 255, 255, 0.1);
-  border-color: rgba(255, 255, 255, 0.2);
+  background: color-mix(in srgb, var(--glass) 72%, white 28%);
+  border-color: color-mix(in srgb, var(--glass-border) 65%, var(--blue) 35%);
   transform: translateY(-1px);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow);
 }
 
 .btn:active {
@@ -148,7 +192,7 @@ body {
 }
 
 .node-card:hover {
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18), 0 0 0 1px var(--glass-border);
   transform: translateY(-2px);
 }
 
@@ -248,7 +292,7 @@ body {
 
 /* Console log */
 .log-line {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-family: var(--font-mono), 'JetBrains Mono', 'Fira Code', monospace;
   font-size: 10px;
   padding: 2px 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.02);
@@ -327,6 +371,30 @@ body {
   border-radius: 2px;
   background: linear-gradient(90deg, var(--blue), var(--purple));
   transition: width 0.3s ease;
+}
+
+/* React Flow chrome */
+.react-flow__controls,
+.react-flow__minimap {
+  background: var(--surface-strong) !important;
+  border: 1px solid var(--glass-border) !important;
+  border-radius: 12px !important;
+  box-shadow: var(--shadow) !important;
+}
+
+.react-flow__controls-button {
+  background: transparent !important;
+  border-bottom: 1px solid var(--glass-border) !important;
+  fill: var(--text2) !important;
+}
+
+.react-flow__controls-button:hover {
+  background: var(--glass) !important;
+}
+
+.react-flow__attribution {
+  background: transparent !important;
+  color: var(--text3) !important;
 }
 
 /* Responsive */

@@ -20,14 +20,33 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
     const [plugins, setPlugins] = useState<string[]>([]);
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
+    const connectRef = useRef<() => void>(() => undefined);
+
+    const clearReconnectTimer = useCallback(() => {
+        if (reconnectTimer.current) {
+            clearTimeout(reconnectTimer.current);
+            reconnectTimer.current = null;
+        }
+    }, []);
+
+    const scheduleReconnect = useCallback(() => {
+        clearReconnectTimer();
+        reconnectTimer.current = setTimeout(() => {
+            connectRef.current();
+        }, reconnectInterval);
+    }, [clearReconnectTimer, reconnectInterval]);
 
     const connect = useCallback(() => {
-        if (wsRef.current?.readyState === WebSocket.OPEN) return;
+        if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
+            return;
+        }
 
         try {
             const ws = new WebSocket(url);
+            wsRef.current = ws;
 
             ws.onopen = () => {
+                clearReconnectTimer();
                 setConnected(true);
                 console.log('[WS] Connected to backend');
             };
@@ -36,10 +55,9 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
                 try {
                     const msg = JSON.parse(event.data) as WSMessage;
 
-                    // Handle handshake
                     if (msg.type === 'connected') {
-                        setModels(msg.models as unknown[] || []);
-                        setPlugins(msg.plugins as string[] || []);
+                        setModels((msg.models as unknown[]) || []);
+                        setPlugins((msg.plugins as string[]) || []);
                     }
 
                     onMessage?.(msg);
@@ -51,19 +69,20 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
             ws.onclose = () => {
                 setConnected(false);
                 wsRef.current = null;
-                // Auto-reconnect
-                reconnectTimer.current = setTimeout(connect, reconnectInterval);
+                scheduleReconnect();
             };
 
             ws.onerror = () => {
                 ws.close();
             };
-
-            wsRef.current = ws;
         } catch {
-            reconnectTimer.current = setTimeout(connect, reconnectInterval);
+            scheduleReconnect();
         }
-    }, [url, onMessage, reconnectInterval]);
+    }, [url, onMessage, clearReconnectTimer, scheduleReconnect]);
+
+    useEffect(() => {
+        connectRef.current = connect;
+    }, [connect]);
 
     const send = useCallback((data: WSMessage) => {
         if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -86,10 +105,11 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
     useEffect(() => {
         connect();
         return () => {
-            reconnectTimer.current && clearTimeout(reconnectTimer.current);
+            clearReconnectTimer();
             wsRef.current?.close();
+            wsRef.current = null;
         };
-    }, [connect]);
+    }, [connect, clearReconnectTimer]);
 
     return { connected, models, plugins, send, sendGoal, runWorkflow, stop };
 }

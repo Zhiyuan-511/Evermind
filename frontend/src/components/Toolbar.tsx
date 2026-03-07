@@ -11,11 +11,13 @@ interface ToolbarProps {
     connected: boolean;
     lang: 'en' | 'zh';
     onLangToggle: () => void;
+    theme: 'dark' | 'light';
+    onThemeToggle: () => void;
 }
 
 export default function Toolbar({
     workflowName, onNameChange, onRun, onStop, onExport, onClear,
-    running, connected, lang, onLangToggle
+    running, connected, lang, onLangToggle, theme, onThemeToggle,
 }: ToolbarProps) {
     return (
         <div className="glass-strong flex items-center gap-3 px-4 border-b border-white/5" style={{ height: 'var(--header-h)' }}>
@@ -50,6 +52,13 @@ export default function Toolbar({
 
             {/* Spacer */}
             <div className="flex-1" />
+
+            {/* Theme toggle */}
+            <button onClick={onThemeToggle} className="btn text-[11px]">
+                {theme === 'dark'
+                    ? `☀️ ${lang === 'zh' ? '白天模式' : 'Work mode'}`
+                    : `🌙 ${lang === 'zh' ? '深夜模式' : 'Night mode'}`}
+            </button>
 
             {/* Lang toggle */}
             <button onClick={onLangToggle} className="btn text-[11px]">

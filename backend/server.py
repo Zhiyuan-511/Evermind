@@ -133,7 +133,9 @@ async def relay_add(data: Dict = Body(...)):
         models=data.get("models", []),
         headers=data.get("headers", {}),
     )
-    return {"success": True, "endpoint": ep.to_dict()}
+    settings = load_settings()
+    _persist_relays(settings)
+    return {"success": True, "endpoint": ep.to_dict(), "relay_count": len(mgr.list())}
 
 
 @app.get("/api/relay/list")
@@ -156,7 +158,10 @@ async def relay_remove(endpoint_id: str):
     """Remove a relay endpoint."""
     mgr = get_relay_manager()
     success = mgr.remove(endpoint_id)
-    return {"success": success}
+    if success:
+        settings = load_settings()
+        _persist_relays(settings)
+    return {"success": success, "relay_count": len(mgr.list())}
 
 
 # ─────────────────────────────────────────────
@@ -206,10 +211,21 @@ async def execute_node(data: Dict = Body(...)):
 
     node = data.get("node", {"type": "builder", "name": "Test"})
     input_text = data.get("input", "")
-    model = data.get("model", "gpt-5.4")
+    model = data.get("model") or node.get("data", {}).get("model") or node.get("model", "gpt-5.4")
 
-    bridge = AIBridge()
-    enabled_plugins = node.get("plugins", NODE_DEFAULT_PLUGINS.get(node.get("type", ""), []))
+    workspace = os.getenv("WORKSPACE", str(Path.home() / "Desktop"))
+    output_dir = os.getenv("OUTPUT_DIR", "/tmp/evermind_output")
+    allowed_dirs_env = os.getenv("ALLOWED_DIRS", "")
+    allowed_dirs = [p for p in allowed_dirs_env.split(",") if p] if allowed_dirs_env else [workspace, output_dir, "/tmp"]
+
+    bridge = AIBridge(config={
+        "workspace": workspace,
+        "output_dir": output_dir,
+        "allowed_dirs": allowed_dirs,
+        "max_timeout": int(os.getenv("SHELL_TIMEOUT", "30")),
+    })
+    node_type = node.get("data", {}).get("nodeType", node.get("type", ""))
+    enabled_plugins = node.get("plugins") or node.get("data", {}).get("plugins") or NODE_DEFAULT_PLUGINS.get(node_type, [])
     plugins = [PluginRegistry.get(p) for p in enabled_plugins if PluginRegistry.get(p)]
 
     result = await bridge.execute(
@@ -222,12 +238,23 @@ async def execute_node(data: Dict = Body(...)):
 # ─────────────────────────────────────────────
 # Settings Persistence Endpoints
 # ─────────────────────────────────────────────
-from settings import load_settings, save_settings, apply_api_keys, validate_api_key, get_usage_tracker
+from settings import load_settings, save_settings, apply_api_keys, validate_api_key, get_usage_tracker, deep_merge_dicts
+
+def _merge_settings(base: Dict, patch: Dict) -> Dict:
+    """Deep merge for partial settings updates from the frontend."""
+    return deep_merge_dicts(base, patch or {})
+
+
+def _persist_relays(settings: Dict):
+    settings["relay_endpoints"] = get_relay_manager().export()
+    save_settings(settings)
+
 
 # Auto-load saved settings on startup
 _saved_settings = load_settings()
 _applied = apply_api_keys(_saved_settings)
-logger.info(f"Auto-loaded settings: {_applied} API keys applied")
+get_relay_manager().load(_saved_settings.get("relay_endpoints", []))
+logger.info(f"Auto-loaded settings: {_applied} API keys applied, {len(get_relay_manager().list())} relays restored")
 
 
 @app.get("/api/settings")
@@ -246,7 +273,8 @@ async def get_settings():
         "workspace": settings.get("workspace", ""),
         "default_model": settings.get("default_model", "gpt-5.4"),
         "privacy_enabled": settings.get("privacy", {}).get("enabled", True),
-        "relay_endpoints": len(settings.get("relay_endpoints", [])),
+        "relay_endpoints": get_relay_manager().list(),
+        "relay_count": len(get_relay_manager().list()),
         "has_keys": {k: bool(v) for k, v in settings.get("api_keys", {}).items()},
     }
 
@@ -254,10 +282,15 @@ async def get_settings():
 @app.post("/api/settings/save")
 async def save_user_settings(data: Dict = Body(...)):
     """Save settings to disk and apply API keys."""
-    success = save_settings(data)
+    merged = _merge_settings(load_settings(), data or {})
+    if "relay_endpoints" not in (data or {}):
+        merged["relay_endpoints"] = get_relay_manager().export()
+
+    success = save_settings(merged)
     if success:
-        count = apply_api_keys(data)
-        return {"success": True, "keys_applied": count}
+        count = apply_api_keys(merged)
+        get_relay_manager().load(merged.get("relay_endpoints", []))
+        return {"success": True, "keys_applied": count, "relay_count": len(get_relay_manager().list())}
     return {"success": False, "error": "Failed to save"}
 
 
@@ -291,6 +324,10 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info(f"Client {client_id} connected. Total: {len(connected_clients)}")
 
     # Build config from env
+    workspace = os.getenv("WORKSPACE", str(Path.home() / "Desktop"))
+    output_dir = os.getenv("OUTPUT_DIR", "/tmp/evermind_output")
+    allowed_dirs_env = os.getenv("ALLOWED_DIRS", "")
+    allowed_dirs = [p for p in allowed_dirs_env.split(",") if p] if allowed_dirs_env else [workspace, output_dir, "/tmp"]
     config = {
         "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
         "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
@@ -298,10 +335,10 @@ async def websocket_endpoint(ws: WebSocket):
         "deepseek_api_key": os.getenv("DEEPSEEK_API_KEY", ""),
         "kimi_api_key": os.getenv("KIMI_API_KEY", ""),
         "qwen_api_key": os.getenv("QWEN_API_KEY", ""),
-        "workspace": os.getenv("WORKSPACE", str(Path.home() / "Desktop")),
-        "output_dir": os.getenv("OUTPUT_DIR", "/tmp/evermind_output"),
+        "workspace": workspace,
+        "output_dir": output_dir,
         "max_timeout": int(os.getenv("SHELL_TIMEOUT", "30")),
-        "allowed_dirs": os.getenv("ALLOWED_DIRS", "/tmp").split(","),
+        "allowed_dirs": allowed_dirs,
     }
 
     # Create executor for this client
@@ -350,12 +387,19 @@ async def websocket_endpoint(ws: WebSocket):
                     "qwen_api_key": "QWEN_API_KEY",
                 }
                 for config_key, env_key in key_map.items():
-                    val = new_config.get(config_key, "")
-                    if val:
+                    if config_key in new_config:
+                        val = new_config.get(config_key, "")
                         config[config_key] = val
-                        os.environ[env_key] = val  # LiteLLM reads from env
-                if new_config.get("workspace"):
+                        if val:
+                            os.environ[env_key] = val  # LiteLLM reads from env
+                        else:
+                            os.environ.pop(env_key, None)
+                if "workspace" in new_config and new_config.get("workspace"):
                     config["workspace"] = new_config["workspace"]
+                if "allowed_dirs" in new_config and isinstance(new_config.get("allowed_dirs"), list):
+                    config["allowed_dirs"] = new_config["allowed_dirs"]
+                if "max_timeout" in new_config:
+                    config["max_timeout"] = int(new_config.get("max_timeout") or config.get("max_timeout", 30))
                 # Apply privacy settings
                 if new_config.get("privacy"):
                     from privacy import update_masker_settings
@@ -386,7 +430,7 @@ async def websocket_endpoint(ws: WebSocket):
                 # Task from chat panel → find router → execute
                 task_text = msg.get("task", "")
                 nodes = msg.get("nodes", [])
-                router = next((n for n in nodes if n["type"] == "router"), None)
+                router = next((n for n in nodes if n.get("type") == "router" or n.get("data", {}).get("nodeType") == "router"), None)
                 if router:
                     router["_direct_input"] = task_text
                     result = await executor.execute_single(router, task_text)

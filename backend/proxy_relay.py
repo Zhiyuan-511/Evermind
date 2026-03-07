@@ -40,12 +40,12 @@ class RelayEndpoint:
         self.timeout = timeout
         self.last_test: Optional[Dict] = None  # last health check result
 
-    def to_dict(self) -> Dict:
+    def _serialize(self, mask_secret: bool) -> Dict:
         return {
             "id": self.id,
             "name": self.name,
             "base_url": self.base_url,
-            "api_key": self.api_key[:8] + "..." if len(self.api_key) > 8 else "***",
+            "api_key": (self.api_key[:8] + "...") if mask_secret and len(self.api_key) > 8 else ("***" if mask_secret else self.api_key),
             "models": self.models,
             "enabled": self.enabled,
             "headers": self.headers,
@@ -53,6 +53,13 @@ class RelayEndpoint:
             "timeout": self.timeout,
             "last_test": self.last_test,
         }
+
+    def to_dict(self) -> Dict:
+        return self._serialize(mask_secret=True)
+
+    def to_config(self) -> Dict:
+        """Full-fidelity settings payload used for persistence."""
+        return self._serialize(mask_secret=False)
 
     def to_model_registry_entries(self) -> Dict[str, Dict]:
         """Generate MODEL_REGISTRY-compatible entries for this relay's models."""
@@ -122,6 +129,32 @@ class RelayManager:
 
     def get(self, endpoint_id: str) -> Optional[RelayEndpoint]:
         return self._endpoints.get(endpoint_id)
+
+    def load(self, endpoints: List[Dict]):
+        """Hydrate relay endpoints from saved settings."""
+        self._endpoints = {}
+        self._counter = 0
+        for item in endpoints or []:
+            endpoint_id = item.get("id") or f"relay_{self._counter + 1}_{int(time.time())}"
+            endpoint = RelayEndpoint(
+                id=endpoint_id,
+                name=item.get("name", "Unnamed Relay"),
+                base_url=item.get("base_url", ""),
+                api_key=item.get("api_key", ""),
+                models=item.get("models", []) or ["gpt-4o"],
+                enabled=item.get("enabled", True),
+                headers=item.get("headers", {}) or {},
+                max_retries=item.get("max_retries", 2),
+                timeout=item.get("timeout", 120),
+            )
+            endpoint.last_test = item.get("last_test")
+            self._endpoints[endpoint_id] = endpoint
+            self._counter += 1
+        logger.info(f"Loaded {len(self._endpoints)} relay endpoint(s) from settings")
+
+    def export(self) -> List[Dict]:
+        """Export relay endpoints for settings persistence."""
+        return [ep.to_config() for ep in self._endpoints.values()]
 
     def list(self) -> List[Dict]:
         """List all configured relay endpoints."""
@@ -207,12 +240,17 @@ class RelayManager:
                 call_kwargs["extra_headers"] = endpoint.headers
 
             response = await asyncio.to_thread(litellm.completion, **call_kwargs)
+            try:
+                cost = float(litellm.completion_cost(completion_response=response, model=f"openai/{model}"))
+            except Exception:
+                cost = 0.0
             return {
                 "success": True,
                 "content": response.choices[0].message.content or "",
                 "model": response.model if hasattr(response, "model") else model,
                 "usage": dict(response.usage) if hasattr(response, "usage") and response.usage else {},
                 "relay": endpoint.name,
+                "cost": cost,
             }
 
         except Exception as e:
@@ -222,12 +260,18 @@ class RelayManager:
                 try:
                     await asyncio.sleep(1 * (retry + 1))
                     response = await asyncio.to_thread(litellm.completion, **call_kwargs)
+                    try:
+                        cost = float(litellm.completion_cost(completion_response=response, model=f"openai/{model}"))
+                    except Exception:
+                        cost = 0.0
                     return {
                         "success": True,
                         "content": response.choices[0].message.content or "",
                         "model": response.model if hasattr(response, "model") else model,
                         "relay": endpoint.name,
                         "retried": retry + 1,
+                        "usage": dict(response.usage) if hasattr(response, "usage") and response.usage else {},
+                        "cost": cost,
                     }
                 except Exception:
                     continue

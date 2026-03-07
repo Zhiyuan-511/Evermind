@@ -46,8 +46,9 @@ class ScreenshotPlugin(Plugin):
             b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
             # Also save to temp file
-            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False,
-                                              dir=context.get("output_dir", "/tmp"))
+            output_dir = Path((context or {}).get("output_dir", "/tmp"))
+            output_dir.mkdir(parents=True, exist_ok=True)
+            tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False, dir=str(output_dir))
             img.save(tmp.name)
 
             return PluginResult(
@@ -77,67 +78,100 @@ class ScreenshotPlugin(Plugin):
 class BrowserPlugin(Plugin):
     name = "browser"
     display_name = "Browser"
-    description = "Open web pages, click elements, fill forms, extract content"
+    description = "Open web pages, click elements, fill forms, and extract content from a persistent browser session"
     icon = "fa-globe"
     security_level = SecurityLevel.L2
 
     def __init__(self):
         self._playwright = None
         self._browser = None
+        self._context = None
+        self._page = None
 
     async def _ensure_browser(self):
         if not self._browser:
             from playwright.async_api import async_playwright
             self._playwright = await async_playwright().start()
             self._browser = await self._playwright.chromium.launch(headless=False)
+            self._context = await self._browser.new_context()
+            self._page = await self._context.new_page()
+        elif self._page is None or self._page.is_closed():
+            self._page = await self._context.new_page()
+        return self._page
+
+    async def shutdown(self):
+        """Clean up browser resources."""
+        try:
+            if self._page and not self._page.is_closed():
+                await self._page.close()
+            if self._context:
+                await self._context.close()
+            if self._browser:
+                await self._browser.close()
+            if self._playwright:
+                await self._playwright.stop()
+        except Exception as e:
+            logger.warning(f"BrowserPlugin shutdown error: {e}")
+        finally:
+            self._page = None
+            self._context = None
+            self._browser = None
+            self._playwright = None
 
     async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
         try:
             action = params.get("action", "navigate")
-            await self._ensure_browser()
+            page = await self._ensure_browser()
 
-            page = await self._browser.new_page()
+            url = params.get("url")
+            if url and url.strip():
+                await page.goto(url.strip(), wait_until="domcontentloaded")
+            elif url is not None:  # url was provided but empty/whitespace
+                url = None  # treat as no URL provided
 
             if action == "navigate":
-                url = params.get("url", "about:blank")
-                await page.goto(url, wait_until="domcontentloaded")
+                if not url:
+                    return PluginResult(success=False, error="navigate action requires a url")
                 content = await page.content()
                 title = await page.title()
-                # Take screenshot
-                screenshot_bytes = await page.screenshot()
+                screenshot_bytes = await page.screenshot(full_page=params.get("full_page", False))
                 b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-                await page.close()
                 return PluginResult(
                     success=True,
-                    data={"title": title, "url": url, "content_length": len(content)},
+                    data={"title": title, "url": page.url, "content_length": len(content)},
                     artifacts=[{"type": "image", "base64": b64}]
                 )
-            elif action == "click":
+
+            if action == "click":
                 selector = params.get("selector")
+                if not selector:
+                    return PluginResult(success=False, error="click action requires a selector")
                 await page.click(selector)
-                await page.wait_for_timeout(1000)
-                screenshot_bytes = await page.screenshot()
+                await page.wait_for_timeout(params.get("wait_ms", 800))
+                screenshot_bytes = await page.screenshot(full_page=params.get("full_page", False))
                 b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
-                await page.close()
                 return PluginResult(
                     success=True,
-                    data={"action": "click", "selector": selector},
+                    data={"action": "click", "selector": selector, "url": page.url},
                     artifacts=[{"type": "image", "base64": b64}]
                 )
-            elif action == "fill":
+
+            if action == "fill":
                 selector = params.get("selector")
                 value = params.get("value", "")
+                if not selector:
+                    return PluginResult(success=False, error="fill action requires a selector")
                 await page.fill(selector, value)
-                await page.close()
-                return PluginResult(success=True, data={"filled": selector})
-            elif action == "extract":
+                if params.get("submit"):
+                    await page.press(selector, "Enter")
+                return PluginResult(success=True, data={"filled": selector, "url": page.url})
+
+            if action == "extract":
                 selector = params.get("selector", "body")
                 text = await page.text_content(selector)
-                await page.close()
-                return PluginResult(success=True, data={"text": text[:5000]})
-            else:
-                await page.close()
-                return PluginResult(success=False, error=f"Unknown action: {action}")
+                return PluginResult(success=True, data={"text": (text or "")[:5000], "url": page.url, "selector": selector})
+
+            return PluginResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
             return PluginResult(success=False, error=str(e))
 
@@ -146,9 +180,12 @@ class BrowserPlugin(Plugin):
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["navigate", "click", "fill", "extract"]},
-                "url": {"type": "string", "description": "URL to navigate to"},
+                "url": {"type": "string", "description": "URL to navigate to before performing the action"},
                 "selector": {"type": "string", "description": "CSS selector for click/fill/extract"},
-                "value": {"type": "string", "description": "Value for fill action"}
+                "value": {"type": "string", "description": "Value for fill action"},
+                "submit": {"type": "boolean", "description": "Press Enter after filling the field"},
+                "wait_ms": {"type": "integer", "description": "Optional wait after click"},
+                "full_page": {"type": "boolean", "description": "Capture a full-page screenshot when supported"}
             },
             "required": ["action"]
         }
@@ -164,6 +201,28 @@ class FileOpsPlugin(Plugin):
     icon = "fa-file"
     security_level = SecurityLevel.L2
 
+    def _is_allowed_path(self, path: str, allowed_dirs) -> bool:
+        if not path:
+            return False
+        candidate = Path(path).expanduser()
+        # For existing paths, resolve directly; for new files, resolve parent
+        if candidate.exists():
+            resolved = candidate.resolve()
+        else:
+            try:
+                resolved = candidate.parent.resolve() / candidate.name
+            except Exception:
+                resolved = candidate.absolute()
+
+        roots = []
+        for allowed in allowed_dirs or []:
+            try:
+                roots.append(Path(allowed).expanduser().resolve())
+            except Exception:
+                continue
+
+        return any(resolved == root or root in resolved.parents or resolved.parent == root or root in resolved.parent.parents for root in roots)
+
     async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
         try:
             action = params.get("action", "read")
@@ -171,6 +230,8 @@ class FileOpsPlugin(Plugin):
 
             # Security check: validate against allowed directories
             allowed_dirs = context.get("allowed_dirs", ["/tmp"]) if context else ["/tmp"]
+            if not self._is_allowed_path(path, allowed_dirs):
+                return PluginResult(success=False, error=f"Path not allowed by security policy: {path}")
 
             if action == "read":
                 if not os.path.exists(path):

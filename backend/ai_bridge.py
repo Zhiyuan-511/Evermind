@@ -118,6 +118,7 @@ class AIBridge:
     def __init__(self, config: Dict = None):
         self.config = config or {}
         self._openai_client = None
+        self._openai_api_key = None
         self._setup_litellm()
 
     def _setup_litellm(self):
@@ -125,15 +126,23 @@ class AIBridge:
         try:
             import litellm
             litellm.set_verbose = False
-            # Set API keys
-            if self.config.get("openai_api_key") or os.getenv("OPENAI_API_KEY"):
-                os.environ.setdefault("OPENAI_API_KEY", self.config.get("openai_api_key", ""))
-            if self.config.get("anthropic_api_key") or os.getenv("ANTHROPIC_API_KEY"):
-                os.environ.setdefault("ANTHROPIC_API_KEY", self.config.get("anthropic_api_key", ""))
-            if self.config.get("gemini_api_key") or os.getenv("GEMINI_API_KEY"):
-                os.environ.setdefault("GEMINI_API_KEY", self.config.get("gemini_api_key", ""))
-            if self.config.get("deepseek_api_key") or os.getenv("DEEPSEEK_API_KEY"):
-                os.environ.setdefault("DEEPSEEK_API_KEY", self.config.get("deepseek_api_key", ""))
+            key_map = {
+                "openai_api_key": "OPENAI_API_KEY",
+                "anthropic_api_key": "ANTHROPIC_API_KEY",
+                "gemini_api_key": "GEMINI_API_KEY",
+                "deepseek_api_key": "DEEPSEEK_API_KEY",
+                "kimi_api_key": "KIMI_API_KEY",
+                "qwen_api_key": "QWEN_API_KEY",
+            }
+            for config_key, env_key in key_map.items():
+                if config_key in self.config:
+                    value = self.config.get(config_key, "")
+                    if value:
+                        os.environ[env_key] = value
+                    else:
+                        os.environ.pop(env_key, None)
+            self._openai_client = None
+            self._openai_api_key = None
             self._litellm = litellm
             logger.info("LiteLLM initialized — 100+ models available")
         except ImportError:
@@ -141,11 +150,11 @@ class AIBridge:
             logger.warning("LiteLLM not installed, falling back to direct API calls")
 
     async def _get_openai(self):
-        if not self._openai_client:
+        api_key = self.config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
+        if api_key and (not self._openai_client or api_key != self._openai_api_key):
             from openai import AsyncOpenAI
-            api_key = self.config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
-            if api_key:
-                self._openai_client = AsyncOpenAI(api_key=api_key)
+            self._openai_client = AsyncOpenAI(api_key=api_key)
+            self._openai_api_key = api_key
         return self._openai_client
 
     def get_available_models(self) -> List[Dict]:
@@ -169,6 +178,68 @@ class AIBridge:
             return relay_models[model_name]
         # Fallback — treat as raw LiteLLM model ID
         return {"litellm_id": model_name, "supports_tools": True, "supports_cua": False}
+
+    def _normalize_usage(self, usage: Any) -> Dict[str, int]:
+        if not usage:
+            return {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        if hasattr(usage, "model_dump"):
+            usage = usage.model_dump()
+        elif hasattr(usage, "dict"):
+            usage = usage.dict()
+        elif not isinstance(usage, dict):
+            usage = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+                "input_tokens": getattr(usage, "input_tokens", 0),
+                "output_tokens": getattr(usage, "output_tokens", 0),
+            }
+
+        prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
+    def _merge_usage(self, base: Dict[str, int], delta: Any) -> Dict[str, int]:
+        normalized = self._normalize_usage(delta)
+        return {
+            "prompt_tokens": base.get("prompt_tokens", 0) + normalized.get("prompt_tokens", 0),
+            "completion_tokens": base.get("completion_tokens", 0) + normalized.get("completion_tokens", 0),
+            "total_tokens": base.get("total_tokens", 0) + normalized.get("total_tokens", 0),
+        }
+
+    def _estimate_litellm_cost(self, response: Any, model: str) -> float:
+        if not self._litellm:
+            return 0.0
+        try:
+            return float(self._litellm.completion_cost(completion_response=response, model=model))
+        except Exception:
+            return 0.0
+
+    def _estimate_response_cost(self, model: str, usage: Any) -> float:
+        normalized = self._normalize_usage(usage)
+        pricing = {
+            "computer-use-preview": {
+                "input_per_million": float(os.getenv("COMPUTER_USE_INPUT_COST_PER_MILLION", "2.5")),
+                "output_per_million": float(os.getenv("COMPUTER_USE_OUTPUT_COST_PER_MILLION", "15.0")),
+            },
+            "gpt-4o": {
+                "input_per_million": 2.5,
+                "output_per_million": 10.0,
+            },
+        }
+        rates = pricing.get(model)
+        if not rates:
+            return 0.0
+        return (
+            normalized.get("prompt_tokens", 0) * rates["input_per_million"] / 1_000_000
+            + normalized.get("completion_tokens", 0) * rates["output_per_million"] / 1_000_000
+        )
 
     # ─────────────────────────────────────────
     # Main dispatch
@@ -221,11 +292,14 @@ class AIBridge:
                     try:
                         from settings import get_usage_tracker
                         tracker = get_usage_tracker()
-                        usage = result.get("usage", {})
+                        usage = self._normalize_usage(result.get("usage", {}))
                         tracker.record(
                             model=result.get("model", node_model),
                             prompt_tokens=usage.get("prompt_tokens", 0),
                             completion_tokens=usage.get("completion_tokens", 0),
+                            cost=float(result.get("cost", 0) or 0),
+                            provider=model_info.get("provider", "unknown"),
+                            mode=result.get("mode", "unknown"),
                         )
                     except Exception:
                         pass
@@ -281,6 +355,8 @@ class AIBridge:
                 "tool_results": [],
                 "mode": "relay",
                 "relay": result.get("relay", ""),
+                "usage": self._normalize_usage(result.get("usage", {})),
+                "cost": float(result.get("cost", 0) or 0),
             }
         else:
             return {"success": False, "output": "", "error": result.get("error", "Relay call failed")}
@@ -308,11 +384,13 @@ class AIBridge:
         input_messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": input_data}]
         all_artifacts, output_text, tool_results = [], "", []
         iteration, max_iterations = 0, 15
+        usage_totals = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
         try:
             response = await client.responses.create(
                 model="computer-use-preview", tools=tools, input=input_messages, truncation="auto"
             )
+            usage_totals = self._merge_usage(usage_totals, getattr(response, "usage", None))
             while iteration < max_iterations:
                 iteration += 1
                 if on_progress:
@@ -347,8 +425,10 @@ class AIBridge:
                 if not has_action:
                     break
                 response = await client.responses.create(model="computer-use-preview", tools=tools, input=new_input, truncation="auto")
+                usage_totals = self._merge_usage(usage_totals, getattr(response, "usage", None))
             return {"success": True, "output": output_text, "tool_results": tool_results, "artifacts": all_artifacts,
-                    "model": "computer-use-preview", "iterations": iteration, "mode": "cua_loop"}
+                    "model": "computer-use-preview", "iterations": iteration, "mode": "cua_loop", "usage": usage_totals,
+                    "cost": self._estimate_response_cost("computer-use-preview", usage_totals)}
         except Exception as e:
             logger.error(f"CUA loop error: {e}")
             return {"success": False, "output": output_text, "error": str(e)}
@@ -414,6 +494,8 @@ class AIBridge:
             tool_results = []
             iteration = 0
             max_iterations = 10
+            usage_totals = self._normalize_usage(getattr(response, "usage", None))
+            total_cost = self._estimate_litellm_cost(response, litellm_model)
 
             while iteration < max_iterations:
                 iteration += 1
@@ -439,9 +521,11 @@ class AIBridge:
                     await on_progress({"stage": "continuing", "iteration": iteration})
                 kwargs["messages"] = messages
                 response = await asyncio.to_thread(self._litellm.completion, **kwargs)
+                usage_totals = self._merge_usage(usage_totals, getattr(response, "usage", None))
+                total_cost += self._estimate_litellm_cost(response, litellm_model)
 
             return {"success": True, "output": output_text, "tool_results": tool_results,
-                    "model": litellm_model, "iterations": iteration, "mode": "litellm_tools"}
+                    "model": litellm_model, "iterations": iteration, "mode": "litellm_tools", "usage": usage_totals, "cost": total_cost}
         except Exception as e:
             logger.error(f"LiteLLM tools error: {e}")
             return {"success": False, "output": "", "error": str(e)}
@@ -468,7 +552,9 @@ class AIBridge:
 
             response = await asyncio.to_thread(self._litellm.completion, **kwargs)
             return {"success": True, "output": response.choices[0].message.content or "",
-                    "model": litellm_model, "tool_results": [], "mode": "litellm_chat"}
+                    "model": litellm_model, "tool_results": [], "mode": "litellm_chat",
+                    "usage": self._normalize_usage(getattr(response, "usage", None)),
+                    "cost": self._estimate_litellm_cost(response, litellm_model)}
         except Exception as e:
             logger.error(f"LiteLLM chat error: {e}")
             return {"success": False, "output": "", "error": str(e)}
@@ -489,7 +575,10 @@ class AIBridge:
                     {"role": "user", "content": input_data}
                 ]
             )
-            return {"success": True, "output": response.choices[0].message.content, "model": "gpt-4o", "tool_results": [], "mode": "openai_direct"}
+            usage = self._normalize_usage(getattr(response, "usage", None))
+            cost = self._estimate_litellm_cost(response, "gpt-4o") if self._litellm else self._estimate_response_cost("gpt-4o", usage)
+            return {"success": True, "output": response.choices[0].message.content, "model": "gpt-4o", "tool_results": [], "mode": "openai_direct",
+                    "usage": usage, "cost": cost}
         except Exception as e:
             return {"success": False, "output": "", "error": str(e)}
 

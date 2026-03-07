@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     ReactFlow, MiniMap, Controls, Background, BackgroundVariant,
     addEdge, useNodesState, useEdgesState,
@@ -16,6 +16,7 @@ import { useWebSocket } from '@/hooks/useWebSocket';
 import { NODE_TYPES, type ChatMessage } from '@/lib/types';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8765/ws';
+const THEME_STORAGE_KEY = 'evermind-theme';
 
 let nodeCounter = 0;
 function genId() { return 'n_' + (++nodeCounter) + '_' + Date.now().toString(36); }
@@ -30,8 +31,26 @@ export default function EditorPage() {
     const [messages, setMessages] = useState<ChatMessage[]>([]);
     const [workflowName, setWorkflowName] = useState('Workflow 1');
     const [lang, setLang] = useState<'en' | 'zh'>('en');
+    const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+        if (typeof window === 'undefined') return 'dark';
+        try {
+            const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY) as 'dark' | 'light' | null;
+            return savedTheme === 'light' ? 'light' : 'dark';
+        } catch {
+            return 'dark';
+        }
+    });
     const [running, setRunning] = useState(false);
     const [draggingType, setDraggingType] = useState<string | null>(null);
+
+    useEffect(() => {
+        document.documentElement.dataset.theme = theme;
+        try {
+            window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+        } catch {
+            // ignore localStorage write issues
+        }
+    }, [theme]);
 
     // ── Chat message helper ──
     const addMessage = useCallback((role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string) => {
@@ -83,7 +102,7 @@ export default function EditorPage() {
 
     // ── Connect edges ──
     const onConnect = useCallback((conn: Connection) => {
-        setEdges(eds => addEdge({ ...conn, animated: true, style: { stroke: '#4f8fff88', strokeWidth: 2 } }, eds));
+        setEdges(eds => addEdge({ ...conn, animated: true, style: { stroke: 'var(--edge-color)', strokeWidth: 2 } }, eds));
     }, [setEdges]);
 
     // ── Drag from sidebar ──
@@ -147,11 +166,12 @@ export default function EditorPage() {
         const a = document.createElement('a'); a.href = url; a.download = `${workflowName.replace(/\s+/g, '_')}.json`; a.click();
     };
     const handleClear = () => { setNodes([]); setEdges([]); };
+    const handleThemeToggle = () => setTheme(current => current === 'dark' ? 'light' : 'dark');
 
     // ── Edge style ──
     const defaultEdgeOptions = useMemo(() => ({
         animated: true,
-        style: { stroke: '#4f8fff60', strokeWidth: 2 },
+        style: { stroke: 'var(--edge-color)', strokeWidth: 2 },
     }), []);
 
     return (
@@ -163,6 +183,7 @@ export default function EditorPage() {
                     workflowName={workflowName} onNameChange={setWorkflowName}
                     onRun={handleRun} onStop={handleStop} onExport={handleExport} onClear={handleClear}
                     running={running} connected={connected} lang={lang} onLangToggle={() => setLang(l => l === 'en' ? 'zh' : 'en')}
+                    theme={theme} onThemeToggle={handleThemeToggle}
                 />
 
                 <div className="flex flex-1 overflow-hidden">
@@ -180,17 +201,16 @@ export default function EditorPage() {
                             snapGrid={[16, 16]}
                             defaultViewport={{ x: 0, y: 0, zoom: 1 }}
                             proOptions={{ hideAttribution: true }}
-                            style={{ background: '#0a0a1a' }}
+                            style={{ background: 'var(--canvas-bg)' }}
                         >
-                            <Background variant={BackgroundVariant.Dots} gap={24} size={1} color="rgba(255,255,255,0.04)" />
-                            <Controls className="!bg-gray-900/80 !border-white/10 !rounded-lg [&_button]:!bg-transparent [&_button]:!border-white/10 [&_button]:!fill-gray-400 [&_button:hover]:!bg-white/10" />
+                            <Background variant={BackgroundVariant.Dots} gap={24} size={1} color={'var(--canvas-dot)'} />
+                            <Controls />
                             <MiniMap
-                                className="!bg-gray-900/80 !border-white/10 !rounded-lg"
                                 nodeColor={(n) => {
                                     const nt = n.data?.nodeType as string;
                                     return NODE_TYPES[nt]?.color || '#666';
                                 }}
-                                maskColor="rgba(0,0,0,0.7)"
+                                maskColor="var(--minimap-mask)"
                             />
                         </ReactFlow>
                     </div>
