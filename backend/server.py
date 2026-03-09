@@ -7,15 +7,17 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Dict, Set
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 # Add current dir to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -36,18 +38,82 @@ logger = logging.getLogger("evermind.server")
 # Register all plugins
 register_plugins()
 
-app = FastAPI(title="Evermind Backend", version="1.0.0")
+app = FastAPI(title="Evermind Backend", version="2.1.0")
+
+# ─────────────────────────────────────────────
+# Security — CORS restricted to local origins only
+# ─────────────────────────────────────────────
+_ALLOWED_ORIGINS = [
+    "http://localhost",
+    "http://127.0.0.1",
+    "https://localhost",
+    "https://127.0.0.1",
+]
+# Expand with common dev ports
+for _port in (3000, 3001, 5173, 8000, 8080, 8765):
+    for _origin in ("http://localhost", "http://127.0.0.1"):
+        _ALLOWED_ORIGINS.append(f"{_origin}:{_port}")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 
+
+# ─────────────────────────────────────────────
+# Security — Response headers middleware
+# ─────────────────────────────────────────────
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+        return response
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+# ─────────────────────────────────────────────
+# Security — Request body size limit (5 MB)
+# ─────────────────────────────────────────────
+MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024  # 5 MB
+
+
+class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > MAX_REQUEST_BODY_BYTES:
+            return JSONResponse(
+                status_code=413,
+                content={"error": "Request body too large", "max_bytes": MAX_REQUEST_BODY_BYTES},
+            )
+        return await call_next(request)
+
+app.add_middleware(RequestSizeLimitMiddleware)
+
+
+# ─────────────────────────────────────────────
+# Security — Sanitize sensitive data from strings
+# ─────────────────────────────────────────────
+_API_KEY_RE = re.compile(r"(?:sk|key|token|api[_-]?key|Bearer)[-_\s]?[a-zA-Z0-9._\-]{8,}", re.IGNORECASE)
+
+
+def _sanitize_error(msg: str) -> str:
+    """Remove potential API keys / tokens from error messages before logging or returning."""
+    return _API_KEY_RE.sub("[REDACTED]", msg) if msg else msg
+
+
 # Global state
+MAX_WS_CONNECTIONS = 10
 connected_clients: Set[WebSocket] = set()
+_active_tasks: Dict[int, list] = {}  # client_id → [asyncio.Task, ...]
 
 
 # Path to the original frontend HTML (parent directory)
@@ -64,7 +130,7 @@ async def root():
 
 @app.get("/api/status")
 async def api_status():
-    return {"status": "ok", "service": "Evermind Backend", "version": "2.0.0"}
+    return {"status": "ok", "service": "Evermind Backend", "version": "2.1.0"}
 
 
 @app.get("/api/models")
@@ -125,10 +191,15 @@ async def relay_add(data: Dict = Body(...)):
     """Register a new relay endpoint."""
     if not data:
         return {"error": "No data provided"}
+    base_url = (data.get("base_url") or "").strip()
+    if not base_url:
+        return {"error": "base_url is required"}
+    if not base_url.startswith(("http://", "https://")):
+        return {"error": "base_url must start with http:// or https://"}
     mgr = get_relay_manager()
     ep = mgr.add(
         name=data.get("name", "Unnamed Relay"),
-        base_url=data.get("base_url", ""),
+        base_url=base_url,
         api_key=data.get("api_key", ""),
         models=data.get("models", []),
         headers=data.get("headers", {}),
@@ -142,7 +213,8 @@ async def relay_add(data: Dict = Body(...)):
 async def relay_list():
     """List all configured relay endpoints."""
     mgr = get_relay_manager()
-    return {"relays": mgr.list(), "total": len(mgr.list())}
+    relays = mgr.list()
+    return {"relays": relays, "total": len(relays)}
 
 
 @app.post("/api/relay/test/{endpoint_id}")
@@ -316,11 +388,39 @@ async def get_usage():
 # ─────────────────────────────────────────────
 # WebSocket Handler
 # ─────────────────────────────────────────────
+# ─────────────────────────────────────────────
+# Graceful Shutdown
+# ─────────────────────────────────────────────
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully close all WebSocket connections and cancel tasks on server shutdown."""
+    logger.info("Server shutting down — closing all connections...")
+    for client_id, tasks in _active_tasks.items():
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+    _active_tasks.clear()
+    for ws in list(connected_clients):
+        try:
+            await ws.close(code=1001, reason="Server shutting down")
+        except Exception:
+            pass
+    connected_clients.clear()
+    logger.info("Shutdown complete.")
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
+    # ── Connection limit guard ──
+    if len(connected_clients) >= MAX_WS_CONNECTIONS:
+        await ws.close(code=1013, reason="Maximum connections reached")
+        logger.warning(f"WebSocket rejected: connection limit ({MAX_WS_CONNECTIONS}) reached")
+        return
+
     await ws.accept()
     connected_clients.add(ws)
     client_id = id(ws)
+    _active_tasks[client_id] = []
     logger.info(f"Client {client_id} connected. Total: {len(connected_clients)}")
 
     # Build config from env
@@ -360,16 +460,28 @@ async def websocket_endpoint(ws: WebSocket):
         "plugins": list(PluginRegistry.get_all().keys()),
         "defaults": NODE_DEFAULT_PLUGINS,
         "models": ai_bridge.get_available_models(),
-        "version": "2.0.0"
+        "version": "2.1.0"
     })
 
     try:
         while True:
             # Receive message from frontend
             raw = await ws.receive_text()
-            msg = json.loads(raw)
-            msg_type = msg.get("type", "")
 
+            # ── Guard: message size limit (10 MB) ──
+            if len(raw) > 10 * 1024 * 1024:
+                await ws.send_json({"type": "error", "error": "Message too large"})
+                continue
+
+            # ── Guard: JSON parse safety ──
+            try:
+                msg = json.loads(raw)
+            except (json.JSONDecodeError, ValueError) as je:
+                logger.warning(f"Client {client_id}: invalid JSON — {je}")
+                await ws.send_json({"type": "error", "error": "Invalid JSON message"})
+                continue
+
+            msg_type = msg.get("type", "")
             logger.info(f"Client {client_id} → {msg_type}")
 
             if msg_type == "ping":
@@ -406,14 +518,17 @@ async def websocket_endpoint(ws: WebSocket):
                     update_masker_settings(new_config["privacy"])
                 ai_bridge.config = config
                 ai_bridge._setup_litellm()  # Re-init LiteLLM with new keys
-                logger.info(f"Config updated: {[k for k, v in new_config.items() if v and 'key' in k]}")
+                # Log only count of updated keys — never log key names or values
+                key_count = sum(1 for k, v in new_config.items() if v and 'key' in k.lower())
+                logger.info(f"Config updated: {key_count} API key(s) refreshed")
                 await ws.send_json({"type": "config_updated"})
 
             elif msg_type == "execute_workflow":
                 # Full workflow execution
                 nodes = msg.get("nodes", [])
                 edges = msg.get("edges", [])
-                asyncio.create_task(executor.execute_workflow(nodes, edges))
+                task = asyncio.create_task(executor.execute_workflow(nodes, edges))
+                _active_tasks[client_id].append(task)
 
             elif msg_type == "execute_node":
                 # Single node execution (test / step)
@@ -449,11 +564,17 @@ async def websocket_endpoint(ws: WebSocket):
                 # 🧠 Autonomous mode: user sends a goal, system does everything
                 goal = msg.get("goal", "")
                 model = msg.get("model", "gpt-5.4")
-                asyncio.create_task(orchestrator.run(goal, model))
+                task = asyncio.create_task(orchestrator.run(goal, model))
+                _active_tasks[client_id].append(task)
 
             elif msg_type == "stop":
                 executor.stop()
                 orchestrator.stop()
+                # Cancel tracked async tasks
+                for t in _active_tasks.get(client_id, []):
+                    if not t.done():
+                        t.cancel()
+                _active_tasks[client_id] = []
                 await ws.send_json({"type": "workflow_stopped"})
 
             elif msg_type == "test_plugin":
@@ -477,9 +598,13 @@ async def websocket_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         logger.info(f"Client {client_id} disconnected")
     except Exception as e:
-        logger.error(f"Client {client_id} error: {e}")
+        logger.error(f"Client {client_id} error: {_sanitize_error(str(e))}")
     finally:
         connected_clients.discard(ws)
+        # Cancel any remaining tracked tasks
+        for t in _active_tasks.pop(client_id, []):
+            if not t.done():
+                t.cancel()
         executor.stop()
         logger.info(f"Client {client_id} cleaned up. Total: {len(connected_clients)}")
 
@@ -489,9 +614,9 @@ async def websocket_endpoint(ws: WebSocket):
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     import uvicorn
-    host = os.getenv("HOST", "0.0.0.0")
+    host = os.getenv("HOST", "127.0.0.1")  # Default: local-only for security
     port = int(os.getenv("PORT", "8765"))
-    debug = os.getenv("DEBUG", "true").lower() == "true"
+    debug = os.getenv("DEBUG", "false").lower() == "true"  # Default: debug off
 
     print(f"""
 ╔══════════════════════════════════════════╗

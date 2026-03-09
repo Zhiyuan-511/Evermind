@@ -9,6 +9,7 @@ import base64
 import json
 import logging
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from plugins.base import Plugin, PluginResult, PluginRegistry
@@ -16,6 +17,19 @@ from privacy import get_masker, PrivacyMasker
 from proxy_relay import get_relay_manager
 
 logger = logging.getLogger("evermind.ai_bridge")
+
+# ─────────────────────────────────────────────
+# Security — sanitize error messages to remove API keys
+# ─────────────────────────────────────────────
+_SENSITIVE_RE = re.compile(
+    r"(?:sk|key|token|api[_-]?key|Bearer)[-_\s]?[a-zA-Z0-9._\-]{8,}",
+    re.IGNORECASE,
+)
+
+
+def _sanitize_error(msg: str) -> str:
+    """Strip potential API keys / secrets from error messages."""
+    return _SENSITIVE_RE.sub("[REDACTED]", msg) if msg else msg
 
 # ─────────────────────────────────────────────
 # Model Registry — all supported models
@@ -313,7 +327,7 @@ class AIBridge:
             except Exception as e:
                 last_error = str(e)
                 logger.warning(f"Execute attempt {attempt+1} failed: {e}")
-                result = {"success": False, "output": "", "error": last_error}
+                result = {"success": False, "output": "", "error": _sanitize_error(last_error)}
 
         # ── Privacy: unmask PII in AI response ──
         if restore_map and result.get("output"):
@@ -359,7 +373,7 @@ class AIBridge:
                 "cost": float(result.get("cost", 0) or 0),
             }
         else:
-            return {"success": False, "output": "", "error": result.get("error", "Relay call failed")}
+            return {"success": False, "output": "", "error": _sanitize_error(result.get("error", "Relay call failed"))}
 
     # ─────────────────────────────────────────
     # Path 1: CUA Responses Loop
@@ -430,8 +444,8 @@ class AIBridge:
                     "model": "computer-use-preview", "iterations": iteration, "mode": "cua_loop", "usage": usage_totals,
                     "cost": self._estimate_response_cost("computer-use-preview", usage_totals)}
         except Exception as e:
-            logger.error(f"CUA loop error: {e}")
-            return {"success": False, "output": output_text, "error": str(e)}
+            logger.error(f"CUA loop error: {_sanitize_error(str(e))}")
+            return {"success": False, "output": output_text, "error": _sanitize_error(str(e))}
 
     async def _execute_cua_action(self, action, plugins) -> Dict:
         action_type = getattr(action, "type", "unknown")
@@ -527,8 +541,8 @@ class AIBridge:
             return {"success": True, "output": output_text, "tool_results": tool_results,
                     "model": litellm_model, "iterations": iteration, "mode": "litellm_tools", "usage": usage_totals, "cost": total_cost}
         except Exception as e:
-            logger.error(f"LiteLLM tools error: {e}")
-            return {"success": False, "output": "", "error": str(e)}
+            logger.error(f"LiteLLM tools error: {_sanitize_error(str(e))}")
+            return {"success": False, "output": "", "error": _sanitize_error(str(e))}
 
     # ─────────────────────────────────────────
     # Path 3: LiteLLM Direct Chat
@@ -549,6 +563,11 @@ class AIBridge:
             ]}
             if model_info.get("api_base"):
                 kwargs["api_base"] = model_info["api_base"]
+            api_key_env = {
+                "kimi": "KIMI_API_KEY", "qwen": "QWEN_API_KEY"
+            }.get(model_info.get("provider"))
+            if api_key_env:
+                kwargs["api_key"] = self.config.get(api_key_env.lower()) or os.getenv(api_key_env)
 
             response = await asyncio.to_thread(self._litellm.completion, **kwargs)
             return {"success": True, "output": response.choices[0].message.content or "",
@@ -556,8 +575,8 @@ class AIBridge:
                     "usage": self._normalize_usage(getattr(response, "usage", None)),
                     "cost": self._estimate_litellm_cost(response, litellm_model)}
         except Exception as e:
-            logger.error(f"LiteLLM chat error: {e}")
-            return {"success": False, "output": "", "error": str(e)}
+            logger.error(f"LiteLLM chat error: {_sanitize_error(str(e))}")
+            return {"success": False, "output": "", "error": _sanitize_error(str(e))}
 
     # ─────────────────────────────────────────
     # Fallback: Direct OpenAI
@@ -580,7 +599,7 @@ class AIBridge:
             return {"success": True, "output": response.choices[0].message.content, "model": "gpt-4o", "tool_results": [], "mode": "openai_direct",
                     "usage": usage, "cost": cost}
         except Exception as e:
-            return {"success": False, "output": "", "error": str(e)}
+            return {"success": False, "output": "", "error": _sanitize_error(str(e))}
 
     # ─────────────────────────────────────────
     # Helpers

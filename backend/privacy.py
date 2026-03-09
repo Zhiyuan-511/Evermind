@@ -7,6 +7,7 @@ References: Microsoft Presidio patterns, LLM Guard by Protect AI.
 import hashlib
 import logging
 import re
+import threading
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -96,6 +97,27 @@ BUILTIN_PATTERNS = {
         "label_en": "SSH Key",
         "mask": "***SSH_KEY***",
     },
+    # Bearer tokens in HTTP Authorization headers
+    "bearer_token": {
+        "regex": r"Bearer\s+[a-zA-Z0-9._\-]{20,}",
+        "label": "Bearer令牌",
+        "label_en": "Bearer Token",
+        "mask": "***BEARER***",
+    },
+    # AWS Access Key IDs
+    "aws_key": {
+        "regex": r"AKIA[0-9A-Z]{16}",
+        "label": "AWS密钥",
+        "label_en": "AWS Key",
+        "mask": "***AWS_KEY***",
+    },
+    # GitHub/GitLab tokens
+    "github_token": {
+        "regex": r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}",
+        "label": "GitHub令牌",
+        "label_en": "GitHub Token",
+        "mask": "***GITHUB_TOKEN***",
+    },
 }
 
 
@@ -123,6 +145,8 @@ class PrivacyMasker:
         self.exclude_node_types = set(exclude_node_types or [
             "localshell", "fileread", "filewrite"
         ])
+        # Thread safety for concurrent mask/unmask operations
+        self._lock = threading.Lock()
 
         # Build active pattern list
         self._patterns: List[Dict] = []

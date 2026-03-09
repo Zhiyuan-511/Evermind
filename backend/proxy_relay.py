@@ -8,10 +8,37 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("evermind.proxy_relay")
+
+# ─────────────────────────────────────────────
+# Security — sanitize sensitive data from log messages
+# ─────────────────────────────────────────────
+_SENSITIVE_RE = re.compile(
+    r"(?:sk|key|token|api[_-]?key|Bearer)[-_\s]?[a-zA-Z0-9._\-]{8,}",
+    re.IGNORECASE,
+)
+MAX_TIMEOUT_SECS = 300  # Hard cap on endpoint timeout
+
+
+def _sanitize_log(msg: str) -> str:
+    """Strip potential API keys / secrets from log messages."""
+    return _SENSITIVE_RE.sub("[REDACTED]", msg) if msg else msg
+
+
+# ─────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────
+def _safe_cost(response, model: str) -> float:
+    """Extract cost from a LiteLLM response, returning 0.0 on any failure."""
+    try:
+        import litellm
+        return float(litellm.completion_cost(completion_response=response, model=model))
+    except Exception:
+        return 0.0
 
 
 class RelayEndpoint:
@@ -37,11 +64,47 @@ class RelayEndpoint:
         self.enabled = enabled
         self.headers = headers or {}
         self.max_retries = max_retries
-        self.timeout = timeout
+        self.timeout = min(timeout, MAX_TIMEOUT_SECS)  # hard cap
         self.last_test: Optional[Dict] = None  # last health check result
+        self._last_used: float = 0.0  # timestamp of last API call
+        # Circuit-breaker state
+        self._consecutive_failures: int = 0
+        self._circuit_open_until: float = 0.0
+        # TLS safety warning
+        if not self.base_url.startswith("https://"):
+            logger.warning(
+                f"Relay '{name}' uses non-HTTPS URL ({self.base_url}). "
+                f"API keys may be transmitted in plaintext. Consider using HTTPS."
+            )
+
+    # ── Circuit-breaker ──
+    CIRCUIT_FAILURE_THRESHOLD = 3
+    CIRCUIT_RECOVERY_SECS = 60.0
+
+    @property
+    def circuit_open(self) -> bool:
+        if self._consecutive_failures < self.CIRCUIT_FAILURE_THRESHOLD:
+            return False
+        return time.time() < self._circuit_open_until
+
+    def _record_success(self):
+        self._consecutive_failures = 0
+
+    def _record_failure(self):
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self.CIRCUIT_FAILURE_THRESHOLD:
+            self._circuit_open_until = time.time() + self.CIRCUIT_RECOVERY_SECS
+            logger.warning(
+                f"Circuit OPEN for relay '{self.name}' after {self._consecutive_failures} consecutive failures "
+                f"(recovery in {self.CIRCUIT_RECOVERY_SECS}s)"
+            )
+
+    def _touch(self):
+        """Update last-used timestamp."""
+        self._last_used = time.time()
 
     def _serialize(self, mask_secret: bool) -> Dict:
-        return {
+        result = {
             "id": self.id,
             "name": self.name,
             "base_url": self.base_url,
@@ -53,6 +116,10 @@ class RelayEndpoint:
             "timeout": self.timeout,
             "last_test": self.last_test,
         }
+        # Add TLS warning flag for frontend display
+        if not self.base_url.startswith("https://"):
+            result["tls_warning"] = True
+        return result
 
     def to_dict(self) -> Dict:
         return self._serialize(mask_secret=True)
@@ -62,7 +129,10 @@ class RelayEndpoint:
         return self._serialize(mask_secret=False)
 
     def to_model_registry_entries(self) -> Dict[str, Dict]:
-        """Generate MODEL_REGISTRY-compatible entries for this relay's models."""
+        """Generate MODEL_REGISTRY-compatible entries for this relay's models.
+        SECURITY: api_key is intentionally excluded — it is resolved at call time
+        from the endpoint object to prevent accidental exposure in model listings.
+        """
         entries = {}
         for model_name in self.models:
             relay_id = f"relay/{self.id}/{model_name}"
@@ -72,7 +142,7 @@ class RelayEndpoint:
                 "supports_tools": True,
                 "supports_cua": False,
                 "api_base": self.base_url,
-                "api_key": self.api_key,
+                # api_key intentionally omitted for security
                 "relay_id": self.id,
                 "relay_name": self.name,
             }
@@ -177,11 +247,12 @@ class RelayManager:
         try:
             import litellm
 
+            test_model = endpoint.models[0] if endpoint.models else "gpt-3.5-turbo"
             start = time.time()
             # Send a minimal request to test the connection
             response = await asyncio.to_thread(
                 litellm.completion,
-                model=f"openai/{endpoint.models[0]}" if endpoint.models else "openai/gpt-3.5-turbo",
+                model=f"openai/{test_model}",
                 api_base=endpoint.base_url,
                 api_key=endpoint.api_key,
                 messages=[{"role": "user", "content": "Hi"}],
@@ -196,6 +267,7 @@ class RelayManager:
                 "tested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             endpoint.last_test = result
+            endpoint._record_success()
             logger.info(f"Relay test passed: {endpoint.name} ({latency}ms)")
             return result
 
@@ -206,7 +278,8 @@ class RelayManager:
                 "tested_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             endpoint.last_test = result
-            logger.warning(f"Relay test failed: {endpoint.name}: {e}")
+            endpoint._record_failure()
+            logger.warning(f"Relay test failed: {endpoint.name}: {_sanitize_log(str(e))}")
             return result
 
     async def call(
@@ -222,28 +295,34 @@ class RelayManager:
             return {"success": False, "error": "Relay endpoint not found"}
         if not endpoint.enabled:
             return {"success": False, "error": "Relay endpoint is disabled"}
+        if endpoint.circuit_open:
+            return {"success": False, "error": f"Circuit breaker open for '{endpoint.name}' — retrying in {int(endpoint._circuit_open_until - time.time())}s"}
 
         try:
             import litellm
+        except Exception as import_err:
+            endpoint._record_failure()
+            return {"success": False, "error": f"LiteLLM unavailable: {import_err}", "relay": endpoint.name}
 
-            call_kwargs = {
-                "model": f"openai/{model}",
-                "api_base": endpoint.base_url,
-                "api_key": endpoint.api_key,
-                "messages": messages,
-                "timeout": endpoint.timeout,
-                **kwargs,
-            }
+        litellm_model = f"openai/{model}"
+        call_kwargs = {
+            "model": litellm_model,
+            "api_base": endpoint.base_url,
+            "api_key": endpoint.api_key,
+            "messages": messages,
+            "timeout": endpoint.timeout,
+            **kwargs,
+        }
 
-            # Add custom headers
-            if endpoint.headers:
-                call_kwargs["extra_headers"] = endpoint.headers
+        # Add custom headers
+        if endpoint.headers:
+            call_kwargs["extra_headers"] = endpoint.headers
 
+        try:
             response = await asyncio.to_thread(litellm.completion, **call_kwargs)
-            try:
-                cost = float(litellm.completion_cost(completion_response=response, model=f"openai/{model}"))
-            except Exception:
-                cost = 0.0
+            cost = _safe_cost(response, litellm_model)
+            endpoint._record_success()
+            endpoint._touch()
             return {
                 "success": True,
                 "content": response.choices[0].message.content or "",
@@ -254,16 +333,15 @@ class RelayManager:
             }
 
         except Exception as e:
-            logger.error(f"Relay call failed ({endpoint.name}): {e}")
+            last_error = _sanitize_log(str(e))
+            logger.error(f"Relay call failed ({endpoint.name}): {last_error}")
             # Retry logic
             for retry in range(endpoint.max_retries):
                 try:
                     await asyncio.sleep(1 * (retry + 1))
                     response = await asyncio.to_thread(litellm.completion, **call_kwargs)
-                    try:
-                        cost = float(litellm.completion_cost(completion_response=response, model=f"openai/{model}"))
-                    except Exception:
-                        cost = 0.0
+                    cost = _safe_cost(response, litellm_model)
+                    endpoint._record_success()
                     return {
                         "success": True,
                         "content": response.choices[0].message.content or "",
@@ -273,10 +351,12 @@ class RelayManager:
                         "usage": dict(response.usage) if hasattr(response, "usage") and response.usage else {},
                         "cost": cost,
                     }
-                except Exception:
+                except Exception as retry_err:
+                    last_error = _sanitize_log(str(retry_err))
                     continue
 
-            return {"success": False, "error": str(e), "relay": endpoint.name}
+            endpoint._record_failure()
+            return {"success": False, "error": last_error, "relay": endpoint.name}
 
 
 # ─────────────────────────────────────────────

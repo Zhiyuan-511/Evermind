@@ -5,6 +5,10 @@ with encrypted secrets at rest.
 """
 
 import base64
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # Windows: file locking not available
 import hashlib
 import json
 import logging
@@ -25,7 +29,10 @@ SETTINGS_DIR = Path.home() / ".evermind"
 SETTINGS_FILE = SETTINGS_DIR / "config.json"
 SETTINGS_KEY_FILE = SETTINGS_DIR / "settings.key"
 SETTINGS_SALT_FILE = SETTINGS_DIR / "settings.salt"
+SETTINGS_HASH_FILE = SETTINGS_DIR / "config.json.sha256"
+SETTINGS_BACKUP_FILE = SETTINGS_DIR / "config.json.bak"
 ENCRYPTED_PREFIX = "enc:v1:"
+KEY_ROTATION_DAYS = 90  # warn after this many days
 
 DEFAULT_SETTINGS = {
     "api_keys": {
@@ -114,6 +121,18 @@ def _get_cipher() -> Fernet:
             return _cached_cipher
         _cached_cipher = Fernet(key)
         _cached_cipher_token = token
+
+        # Warn if key file is older than KEY_ROTATION_DAYS
+        if SETTINGS_KEY_FILE.exists():
+            import time as _time
+            key_age_days = (_time.time() - SETTINGS_KEY_FILE.stat().st_mtime) / 86400
+            if key_age_days > KEY_ROTATION_DAYS:
+                logger.warning(
+                    f"Encryption key is {int(key_age_days)} days old. "
+                    f"Consider rotating it for better security. "
+                    f"Set EVERMIND_MASTER_KEY env variable to use a new key."
+                )
+
         return _cached_cipher
 
 
@@ -185,8 +204,19 @@ def load_settings() -> Dict:
     """Load settings from disk or return defaults, decrypting secrets in memory."""
     try:
         if SETTINGS_FILE.exists():
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                saved = json.load(f)
+            raw_bytes = SETTINGS_FILE.read_bytes()
+
+            # ── Integrity verification ──
+            if SETTINGS_HASH_FILE.exists():
+                expected_hash = SETTINGS_HASH_FILE.read_text("utf-8").strip()
+                actual_hash = hashlib.sha256(raw_bytes).hexdigest()
+                if expected_hash != actual_hash:
+                    logger.warning(
+                        "Settings file integrity check FAILED — file may have been tampered with. "
+                        "Expected hash does not match. Loading anyway, but review your config."
+                    )
+
+            saved = json.loads(raw_bytes.decode("utf-8"))
 
             merged = _merge_defaults(saved)
 
@@ -205,15 +235,47 @@ def save_settings(settings: Dict) -> bool:
     """Save settings to disk with encrypted API keys and relay secrets."""
     try:
         SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
+
+        # ── Auto-backup before overwriting ──
+        if SETTINGS_FILE.exists():
+            try:
+                import shutil
+                shutil.copy2(SETTINGS_FILE, SETTINGS_BACKUP_FILE)
+                logger.info(f"Backed up settings to {SETTINGS_BACKUP_FILE}")
+            except Exception as bak_err:
+                logger.warning(f"Failed to create settings backup: {bak_err}")
+
         payload = _merge_defaults(settings)
         decrypted_keys = deep_merge_dicts(DEFAULT_SETTINGS["api_keys"], payload.get("api_keys", {}))
         payload["api_keys_encrypted"] = _encrypt_api_keys(decrypted_keys)
         payload["api_keys"] = {name: "" for name in DEFAULT_SETTINGS["api_keys"].keys()}
         payload["relay_endpoints"] = _encrypt_relay_endpoints(payload.get("relay_endpoints", []))
 
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
+        # On POSIX, lock before truncating to avoid races where another writer
+        # opens with "w" and clears the file before acquiring the lock.
+        open_mode = "a+" if fcntl else "w"
+        with open(SETTINGS_FILE, open_mode, encoding="utf-8") as f:
+            if fcntl:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                if fcntl:
+                    f.seek(0)
+                    f.truncate()
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+                f.flush()
+            finally:
+                if fcntl:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         _chmod_600(SETTINGS_FILE)
+
+        # ── Write SHA-256 integrity hash ──
+        try:
+            file_bytes = SETTINGS_FILE.read_bytes()
+            file_hash = hashlib.sha256(file_bytes).hexdigest()
+            SETTINGS_HASH_FILE.write_text(file_hash, encoding="utf-8")
+            _chmod_600(SETTINGS_HASH_FILE)
+        except Exception as hash_err:
+            logger.warning(f"Failed to write integrity hash: {hash_err}")
 
         logger.info(
             f"Settings saved to {SETTINGS_FILE} (encrypted api keys: {sum(1 for v in decrypted_keys.values() if v)})"
