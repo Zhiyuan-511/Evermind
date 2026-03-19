@@ -21,6 +21,11 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
     const wsRef = useRef<WebSocket | null>(null);
     const reconnectTimer = useRef<NodeJS.Timeout | null>(null);
     const connectRef = useRef<() => void>(() => undefined);
+    const onMessageRef = useRef(onMessage);
+    const attemptRef = useRef(0);
+    const mountedRef = useRef(true);
+
+    useEffect(() => { onMessageRef.current = onMessage; }, [onMessage]);
 
     const clearReconnectTimer = useCallback(() => {
         if (reconnectTimer.current) {
@@ -31,15 +36,19 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
 
     const scheduleReconnect = useCallback(() => {
         clearReconnectTimer();
+        const backoff = Math.min(reconnectInterval * Math.pow(2, attemptRef.current), 30_000);
+        const jitter = Math.random() * backoff * 0.3;
+        attemptRef.current += 1;
         reconnectTimer.current = setTimeout(() => {
             connectRef.current();
-        }, reconnectInterval);
+        }, backoff + jitter);
     }, [clearReconnectTimer, reconnectInterval]);
 
     const connect = useCallback(() => {
         if (wsRef.current?.readyState === WebSocket.OPEN || wsRef.current?.readyState === WebSocket.CONNECTING) {
             return;
         }
+        if (!mountedRef.current) return;
 
         try {
             const ws = new WebSocket(url);
@@ -47,6 +56,7 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
 
             ws.onopen = () => {
                 clearReconnectTimer();
+                attemptRef.current = 0;
                 setConnected(true);
                 console.log('[WS] Connected to backend');
             };
@@ -60,7 +70,7 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
                         setPlugins((msg.plugins as string[]) || []);
                     }
 
-                    onMessage?.(msg);
+                    onMessageRef.current?.(msg);
                 } catch {
                     console.error('[WS] Parse error');
                 }
@@ -78,7 +88,7 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
         } catch {
             scheduleReconnect();
         }
-    }, [url, onMessage, clearReconnectTimer, scheduleReconnect]);
+    }, [url, clearReconnectTimer, scheduleReconnect]);
 
     useEffect(() => {
         connectRef.current = connect;
@@ -90,8 +100,8 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
         }
     }, []);
 
-    const sendGoal = useCallback((goal: string, model = 'gpt-5.4') => {
-        send({ type: 'run_goal', goal, model });
+    const sendGoal = useCallback((goal: string, model = 'gpt-5.4', chatHistory?: Array<{role: string; content: string}>, difficulty = 'standard') => {
+        send({ type: 'run_goal', goal, model, chat_history: chatHistory || [], difficulty });
     }, [send]);
 
     const runWorkflow = useCallback((nodes: unknown[], edges: unknown[]) => {
@@ -103,13 +113,15 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
     }, [send]);
 
     useEffect(() => {
+        mountedRef.current = true;
         connect();
         return () => {
+            mountedRef.current = false;
             clearReconnectTimer();
             wsRef.current?.close();
             wsRef.current = null;
         };
     }, [connect, clearReconnectTimer]);
 
-    return { connected, models, plugins, send, sendGoal, runWorkflow, stop };
+    return { connected, models, plugins, send, sendGoal, runWorkflow, stop, wsRef };
 }

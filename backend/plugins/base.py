@@ -5,6 +5,7 @@ Each plugin represents a capability that can be attached to AI agent nodes.
 
 import asyncio
 import logging
+import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from enum import Enum
@@ -86,17 +87,18 @@ class PluginRegistry:
     @classmethod
     def get_for_node(cls, node_type: str) -> List[Plugin]:
         """Return recommended plugins for a given node type."""
-        defaults = NODE_DEFAULT_PLUGINS.get(node_type, [])
+        defaults = get_default_plugins_for_node(node_type)
         return [cls._plugins[n] for n in defaults if n in cls._plugins]
 
 
 # Default plugin assignments per node type
 NODE_DEFAULT_PLUGINS = {
-    "builder":   ["file_ops", "shell", "git", "computer_use"],
-    "tester":    ["screenshot", "browser", "shell", "computer_use"],
-    "reviewer":  ["screenshot", "browser", "computer_use"],
-    "deployer":  ["shell", "git", "browser"],
-    "debugger":  ["screenshot", "file_ops", "shell", "computer_use"],
+    # Keep autonomous web pipeline stable: prioritize deterministic local file ops.
+    "builder":   ["file_ops"],
+    "tester":    ["file_ops", "screenshot", "browser"],
+    "reviewer":  ["file_ops", "screenshot", "browser"],
+    "deployer":  ["file_ops"],
+    "debugger":  ["file_ops", "shell"],
     "analyst":   ["file_ops", "browser"],
     "scribe":    ["file_ops"],
     "planner":   [],
@@ -117,3 +119,41 @@ NODE_DEFAULT_PLUGINS = {
     "spritesheet": ["file_ops"],
     "assetimport": ["file_ops"],
 }
+
+
+def _is_truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def is_builder_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Feature flag for letting builder use the browser plugin for style/web research.
+    Default is OFF to keep the local pipeline deterministic.
+    """
+    if isinstance(config, dict):
+        for key in ("builder_enable_browser", "builder_browser_enabled", "enable_builder_browser"):
+            if key in config:
+                return _is_truthy(config.get(key))
+        nested_builder = config.get("builder")
+        if isinstance(nested_builder, dict) and "enable_browser_search" in nested_builder:
+            return _is_truthy(nested_builder.get("enable_browser_search"))
+    return _is_truthy(os.getenv("EVERMIND_BUILDER_ENABLE_BROWSER", "0"))
+
+
+def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]] = None) -> List[str]:
+    defaults = list(NODE_DEFAULT_PLUGINS.get(node_type, []))
+    if node_type == "builder" and is_builder_browser_enabled(config=config):
+        if "browser" not in defaults:
+            defaults.append("browser")
+    return defaults
+
+
+def get_effective_default_plugins(config: Optional[Dict[str, Any]] = None) -> Dict[str, List[str]]:
+    return {
+        node_type: get_default_plugins_for_node(node_type, config=config)
+        for node_type in NODE_DEFAULT_PLUGINS.keys()
+    }

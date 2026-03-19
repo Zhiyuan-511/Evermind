@@ -1,0 +1,91 @@
+{
+    "name": "evermind-desktop",
+    "version": "2.0.0",
+    "description": "Evermind — AI Workflow Orchestrator Desktop App",
+    "main": "main.js",
+    "author": "Evermind Team",
+    "license": "MIT",
+    "scripts": {
+        "start": "electron .",
+        "build:frontend": "cd ../frontend && npm run build",
+        "pack": "electron-builder --dir",
+        "dist": "electron-builder",
+        "build": "npm run build:frontend && npm run dist"
+    },
+    "dependencies": {
+        "electron-is-dev": "^2.0.0",
+        "tree-kill": "^1.2.2"
+    },
+    "devDependencies": {
+        "electron": "^33.0.0",
+        "electron-builder": "^25.0.0"
+    },
+    "build": {
+        "appId": "com.evermind.desktop",
+        "productName": "Evermind",
+        "asar": true,
+        "mac": {
+            "category": "public.app-category.developer-tools",
+            "target": [
+                {
+                    "target": "dir",
+                    "arch": [
+                        "arm64"
+                    ]
+                }
+            ],
+            "darkModeSupport": true
+        },
+        "files": [
+            "main.js",
+            "preload.js",
+            "splash.html",
+            "package.json",
+            "node_modules/**/*"
+        ],
+        "extraResources": [
+            {
+                "from": "../backend",
+                "to": "backend",
+                "filter": [
+                    "**/*.py",
+                    "requirements.txt",
+                    ".env.example",
+                    "plugins/**"
+                ]
+            },
+            {
+                "from": "../frontend/.next/standalone",
+                "to": "frontend-standalone"
+            },
+            {
+                "from": "../frontend/.next/static",
+                "to": "frontend-standalone/.next/static"
+            },
+            {
+                "from": "../frontend/public",
+                "to": "frontend-standalone/public"
+            },
+            {
+                "from": "../evermind_godmode_final.html",
+                "to": "evermind_godmode_final.html"
+            }
+        ],
+        "dmg": {
+            "title": "Evermind Installer",
+            "backgroundColor": "#0f1117",
+            "contents": [
+                {
+                    "x": 130,
+                    "y": 220
+                },
+                {
+                    "x": 410,
+                    "y": 220,
+                    "type": "link",
+                    "path": "/Applications"
+                }
+            ]
+        }
+    }
+}

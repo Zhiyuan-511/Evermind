@@ -60,7 +60,13 @@ DEFAULT_SETTINGS = {
     },
     "default_model": "gpt-5.4",
     "max_retries": 3,
+    "tester_run_smoke": True,
+    "browser_headful": False,
+    "reviewer_tester_force_headful": True,
     "shell_timeout": 30,
+    "builder": {
+        "enable_browser_search": False,
+    },
 }
 
 _cached_cipher: Optional[Fernet] = None
@@ -336,7 +342,7 @@ def validate_api_key(provider: str, key: str) -> Dict:
             "anthropic": "claude-3-haiku-20240307",
             "gemini": "gemini/gemini-2.0-flash",
             "deepseek": "deepseek/deepseek-chat",
-            "kimi": "openai/moonshot-v1-8k",
+            "kimi": "openai/kimi-k2.5",
             "qwen": "openai/qwen-turbo",
         }
         model = model_map.get(provider, "gpt-4o-mini")
@@ -350,7 +356,17 @@ def validate_api_key(provider: str, key: str) -> Dict:
         }.get(provider)
 
         if provider == "kimi":
-            kwargs["api_base"] = "https://api.moonshot.cn/v1"
+            # Support both new Kimi Coding keys (sk-kimi-*) and legacy Moonshot keys.
+            if key.startswith("sk-kimi-"):
+                kwargs["model"] = "openai/kimi-k2.5"
+                kwargs["api_base"] = "https://api.kimi.com/coding/v1"
+                kwargs["extra_headers"] = {
+                    "User-Agent": "claude-code/1.0",
+                    "X-Client-Name": "claude-code",
+                }
+            else:
+                kwargs["model"] = "openai/moonshot-v1-8k"
+                kwargs["api_base"] = "https://api.moonshot.cn/v1"
             kwargs["api_key"] = key
             context = _temporary_env(None, None)
         elif provider == "qwen":

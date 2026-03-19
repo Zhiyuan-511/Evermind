@@ -87,16 +87,50 @@ class BrowserPlugin(Plugin):
         self._browser = None
         self._context = None
         self._page = None
+        self._headless = True
+        self._requested_headless = True
+        self._launch_note = ""
 
-    async def _ensure_browser(self):
+    def _resolve_headless(self, context: Dict[str, Any] | None = None) -> bool:
+        if isinstance(context, dict) and "browser_headful" in context:
+            return not bool(context.get("browser_headful"))
+        env_headful = str(os.getenv("EVERMIND_BROWSER_HEADFUL", "0")).strip().lower() in ("1", "true", "yes", "on")
+        return not env_headful
+
+    async def _ensure_browser(self, context: Dict[str, Any] | None = None):
+        requested_headless = self._resolve_headless(context)
+        headless = requested_headless
+
+        # Recreate browser when mode switches between headless/headful.
+        if self._browser and self._headless != headless:
+            await self.shutdown()
+
         if not self._browser:
             from playwright.async_api import async_playwright
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(headless=False)
-            self._context = await self._browser.new_context()
+            if not self._playwright:
+                self._playwright = await async_playwright().start()
+            try:
+                self._browser = await self._playwright.chromium.launch(headless=headless)
+                self._launch_note = ""
+            except Exception as launch_err:
+                if headless:
+                    raise
+                # Fall back so workflow can continue even if GUI launch is blocked.
+                logger.warning("BrowserPlugin headful launch failed; falling back to headless: %s", launch_err)
+                self._browser = await self._playwright.chromium.launch(headless=True)
+                headless = True
+                self._launch_note = f"requested headful, fallback to headless: {launch_err}"
+            self._context = await self._browser.new_context(viewport={"width": 1280, "height": 800})
             self._page = await self._context.new_page()
+            self._headless = headless
+            self._requested_headless = requested_headless
         elif self._page is None or self._page.is_closed():
             self._page = await self._context.new_page()
+        if not self._headless:
+            try:
+                await self._page.bring_to_front()
+            except Exception:
+                pass
         return self._page
 
     async def shutdown(self):
@@ -117,11 +151,21 @@ class BrowserPlugin(Plugin):
             self._context = None
             self._browser = None
             self._playwright = None
+            self._headless = True
+            self._requested_headless = True
+            self._launch_note = ""
 
     async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
         try:
             action = params.get("action", "navigate")
-            page = await self._ensure_browser()
+            page = await self._ensure_browser(context=context)
+            browser_mode = "headless" if self._headless else "headful"
+            requested_mode = "headless" if self._requested_headless else "headful"
+            mode_data = {
+                "browser_mode": browser_mode,
+                "requested_mode": requested_mode,
+                "launch_note": self._launch_note,
+            }
 
             url = params.get("url")
             if url and url.strip():
@@ -138,7 +182,7 @@ class BrowserPlugin(Plugin):
                 b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
                 return PluginResult(
                     success=True,
-                    data={"title": title, "url": page.url, "content_length": len(content)},
+                    data={"title": title, "url": page.url, "content_length": len(content), **mode_data},
                     artifacts=[{"type": "image", "base64": b64}]
                 )
 
@@ -152,7 +196,7 @@ class BrowserPlugin(Plugin):
                 b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
                 return PluginResult(
                     success=True,
-                    data={"action": "click", "selector": selector, "url": page.url},
+                    data={"action": "click", "selector": selector, "url": page.url, **mode_data},
                     artifacts=[{"type": "image", "base64": b64}]
                 )
 
@@ -164,12 +208,26 @@ class BrowserPlugin(Plugin):
                 await page.fill(selector, value)
                 if params.get("submit"):
                     await page.press(selector, "Enter")
-                return PluginResult(success=True, data={"filled": selector, "url": page.url})
+                return PluginResult(success=True, data={"filled": selector, "url": page.url, **mode_data})
 
             if action == "extract":
                 selector = params.get("selector", "body")
                 text = await page.text_content(selector)
-                return PluginResult(success=True, data={"text": (text or "")[:5000], "url": page.url, "selector": selector})
+                return PluginResult(success=True, data={"text": (text or "")[:5000], "url": page.url, "selector": selector, **mode_data})
+
+            if action == "scroll":
+                direction = params.get("direction", "down")
+                amount = int(params.get("amount", 500))
+                delta = amount if direction == "down" else -amount
+                await page.mouse.wheel(0, delta)
+                await page.wait_for_timeout(600)
+                screenshot_bytes = await page.screenshot(full_page=False)
+                b64 = base64.b64encode(screenshot_bytes).decode("utf-8")
+                return PluginResult(
+                    success=True,
+                    data={"action": "scroll", "direction": direction, "amount": amount, "url": page.url, **mode_data},
+                    artifacts=[{"type": "image", "base64": b64}]
+                )
 
             return PluginResult(success=False, error=f"Unknown action: {action}")
         except Exception as e:
@@ -179,7 +237,7 @@ class BrowserPlugin(Plugin):
         return {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["navigate", "click", "fill", "extract"]},
+                "action": {"type": "string", "enum": ["navigate", "click", "fill", "extract", "scroll"]},
                 "url": {"type": "string", "description": "URL to navigate to before performing the action"},
                 "selector": {"type": "string", "description": "CSS selector for click/fill/extract"},
                 "value": {"type": "string", "description": "Value for fill action"},

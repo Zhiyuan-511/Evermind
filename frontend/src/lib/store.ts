@@ -1,7 +1,7 @@
 /* Evermind — Zustand Store (same pattern as Dify/Flowise) */
 
 import { create } from 'zustand';
-import { ChatMessage, NodeData, Edge } from '@/lib/types';
+import { ChatMessage, NodeData, Edge, TaskCard } from '@/lib/types';
 
 interface WorkflowState {
     // Workflow
@@ -19,6 +19,10 @@ interface WorkflowState {
     connected: boolean;
     models: unknown[];
     plugins: string[];
+
+    // Tasks (Kanban)
+    tasks: TaskCard[];
+    activeTaskId: string | null;
 
     // Actions — Workflow
     setNodes: (nodes: NodeData[]) => void;
@@ -41,6 +45,13 @@ interface WorkflowState {
     setConnected: (connected: boolean) => void;
     setModels: (models: unknown[]) => void;
     setPlugins: (plugins: string[]) => void;
+
+    // Actions — Tasks
+    setTasks: (tasks: TaskCard[]) => void;
+    addTask: (task: TaskCard) => void;
+    updateTask: (id: string, data: Partial<TaskCard>) => void;
+    removeTask: (id: string) => void;
+    setActiveTaskId: (id: string | null) => void;
 }
 
 export const useWorkflowStore = create<WorkflowState>((set) => ({
@@ -54,17 +65,23 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
     connected: false,
     models: [],
     plugins: [],
+    tasks: [],
+    activeTaskId: null,
 
     setNodes: (nodes) => set({ nodes }),
     addNode: (node) => set((s) => ({ nodes: [...s.nodes, node] })),
     updateNode: (id, data) => set((s) => ({
         nodes: s.nodes.map((n) => (n.id === id ? { ...n, ...data } : n)),
     })),
-    removeNode: (id) => set((s) => ({
-        nodes: s.nodes.filter((n) => n.id !== id),
-        edges: s.edges.filter((e) => !e.from.startsWith(id) && !e.to.startsWith(id)),
-        selected: s.selected === id ? null : s.selected,
-    })),
+    removeNode: (id) => set((s) => {
+        const matchesNode = (port: string) =>
+            port === id || (port.length > id.length && port.startsWith(id) && '_-:.'.includes(port[id.length]));
+        return {
+            nodes: s.nodes.filter((n) => n.id !== id),
+            edges: s.edges.filter((e) => !matchesNode(e.from) && !matchesNode(e.to)),
+            selected: s.selected === id ? null : s.selected,
+        };
+    }),
     setEdges: (edges) => set({ edges }),
     addEdge: (edge) => set((s) => ({ edges: [...s.edges, edge] })),
     removeEdge: (from, to) => set((s) => ({
@@ -79,11 +96,24 @@ export const useWorkflowStore = create<WorkflowState>((set) => ({
     addMessage: (msg) => set((s) => ({
         messages: [...s.messages, {
             ...msg,
-            id: Date.now().toString(36) + Math.random().toString(36).slice(2),
+            id: crypto.randomUUID(),
         }],
     })),
 
     setConnected: (connected) => set({ connected }),
     setModels: (models) => set({ models }),
     setPlugins: (plugins) => set({ plugins }),
+
+    // Task actions
+    setTasks: (tasks) => set({ tasks }),
+    addTask: (task) => set((s) => ({ tasks: [...s.tasks, task] })),
+    updateTask: (id, data) => set((s) => ({
+        tasks: s.tasks.map((t) => (t.id === id ? { ...t, ...data, updatedAt: Date.now() } : t)),
+    })),
+    removeTask: (id) => set((s) => ({
+        tasks: s.tasks.filter((t) => t.id !== id),
+        activeTaskId: s.activeTaskId === id ? null : s.activeTaskId,
+    })),
+    setActiveTaskId: (activeTaskId) => set({ activeTaskId }),
 }));
+

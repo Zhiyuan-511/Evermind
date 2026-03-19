@@ -49,6 +49,18 @@ ai智能体合作/
 - **安全等级** — L1-L4 权限控制，L3 确认弹窗，L4 密码+倒计时
 - **中英文** — 完整 i18n 支持
 
+## 🎨 网站生成质量模式
+
+- 默认稳态模式（推荐）：`EVERMIND_BUILDER_ENABLE_BROWSER=0`
+  - Builder 仅使用本地 `file_ops`，更稳定
+  - 已内置更严格审美规则：禁用 emoji 图标，优先 inline SVG，商业级布局规范
+- 增强模式（可选）：`EVERMIND_BUILDER_ENABLE_BROWSER=1`
+  - Builder 可额外调用 `browser` 做少量网页风格参考（仍输出本地单文件 HTML）
+  - 适合追求更强视觉灵感，但速度会略慢、运行波动会更大
+
+可用质量阈值：
+- `EVERMIND_MAX_EMOJI_GLYPHS=0`（默认）禁止生成 emoji 图标
+
 ## 🔌 API
 
 | Endpoint | Method | 说明 |

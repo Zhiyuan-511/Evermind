@@ -1,6 +1,8 @@
 # ═══════════════════════════════════════════
 # Evermind — Docker Compose
-# One-click deployment: docker compose up -d
+# 一键部署: docker compose up --build
+# 前端: http://localhost:3000/editor
+# 后端: http://localhost:8765
 # ═══════════════════════════════════════════
 
 services:
@@ -8,14 +10,36 @@ services:
     build: ./backend
     ports:
       - "8765:8765"
-    env_file:
-      - ./backend/.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8765
+      - WORKSPACE=/workspace
+      - OUTPUT_DIR=/tmp/evermind_output
+      - ALLOWED_DIRS=/workspace,/tmp/evermind_output,/tmp
+      - SHELL_TIMEOUT=30
     volumes:
-      - ./evermind_godmode_final.html:/app/../evermind_godmode_final.html:ro
+      - ./evermind_godmode_final.html:/evermind_godmode_final.html:ro
       - /tmp/evermind_output:/tmp/evermind_output
+      - evermind_settings:/app/data
     restart: unless-stopped
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:8765/api/health" ]
       interval: 30s
       timeout: 5s
       retries: 3
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  evermind_settings:

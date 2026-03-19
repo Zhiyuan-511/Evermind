@@ -7,7 +7,7 @@ import asyncio
 import logging
 from typing import Callable, Dict, List, Optional, Set
 
-from plugins.base import Plugin, PluginRegistry, NODE_DEFAULT_PLUGINS
+from plugins.base import Plugin, PluginRegistry, get_default_plugins_for_node
 from ai_bridge import AIBridge, HandoffManager
 
 logger = logging.getLogger("evermind.executor")
@@ -159,7 +159,7 @@ class NodeExecutor:
         """Core node execution: resolve plugins → call AI bridge."""
         node_type = node.get("type", "")
 
-        enabled_plugins = node.get("plugins") or NODE_DEFAULT_PLUGINS.get(node_type, [])
+        enabled_plugins = node.get("plugins") or get_default_plugins_for_node(node_type, config=self.ai_bridge.config)
         plugins = [PluginRegistry.get(p) for p in enabled_plugins if PluginRegistry.get(p)]
 
         async def on_progress(data):
