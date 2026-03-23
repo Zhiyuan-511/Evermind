@@ -1,15 +1,16 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { type TaskCard, type TaskStatus, type TaskPriority, type TaskMode, TASK_COLUMNS, type RunReportRecord, type RunRecord, type RunStatus } from '@/lib/types';
-import { listRuns } from '@/lib/api';
-import { useTaskContext } from '@/contexts/TaskRunProvider';
+import { type TaskCard, type TaskStatus, type TaskPriority, type TaskMode, BOARD_COLUMNS, type RunReportRecord, type RunRecord, type RunStatus, type NodeExecutionRecord } from '@/lib/types';
+import { getBoardSummary } from '@/lib/api';
+import { useTaskContext, useRunContext } from '@/contexts/TaskRunProvider';
 import TaskDetailPanel from './TaskDetailPanel';
 
 interface TaskBoardModalProps {
     open: boolean;
     onClose: () => void;
     lang: 'en' | 'zh';
+    sessionId?: string;
     runReports?: RunReportRecord[];
 }
 
@@ -20,25 +21,24 @@ const PRIORITY_COLORS: Record<TaskPriority, string> = {
     low: '#64748b',
 };
 
-const PRIORITY_LABELS: Record<string, Record<TaskPriority, string>> = {
-    en: { urgent: 'Urgent', high: 'High', medium: 'Medium', low: 'Low' },
-    zh: { urgent: '紧急', high: '高', medium: '中', low: '低' },
+const SUB_STATUS_LABELS: Record<string, Record<string, string>> = {
+    en: { review: '🔍 Under Review', selfcheck: '🧪 Self-Checking', executing: '⚡ Executing' },
+    zh: { review: '🔍 审核中', selfcheck: '🧪 自检中', executing: '⚡ 执行中' },
 };
 
-const MODE_LABELS: Record<string, Record<TaskMode, string>> = {
-    en: { standard: 'Standard', pro: 'Pro', debug: 'Debug', review: 'Review' },
-    zh: { standard: '标准', pro: '专业', debug: '调试', review: '审核' },
+
+
+const RUN_STATUS_META: Record<RunStatus, { color: string; label_en: string; label_zh: string }> = {
+    queued:             { color: '#64748b', label_en: 'Queued', label_zh: '排队中' },
+    running:            { color: '#3b82f6', label_en: 'Running', label_zh: '运行中' },
+    waiting_review:     { color: '#f59e0b', label_en: 'Review', label_zh: '待审核' },
+    waiting_selfcheck:  { color: '#06b6d4', label_en: 'Self-check', label_zh: '待自检' },
+    failed:             { color: '#ef4444', label_en: 'Failed', label_zh: '失败' },
+    done:               { color: '#22c55e', label_en: 'Done', label_zh: '已完成' },
+    cancelled:          { color: '#6b7280', label_en: 'Cancelled', label_zh: '已取消' },
 };
 
-const RUN_STATUS_ICONS: Record<RunStatus, { icon: string; color: string }> = {
-    queued:             { icon: '⏳', color: '#64748b' },
-    running:            { icon: '⚡', color: '#3b82f6' },
-    waiting_review:     { icon: '👁', color: '#f59e0b' },
-    waiting_selfcheck:  { icon: '🧪', color: '#06b6d4' },
-    failed:             { icon: '❌', color: '#ef4444' },
-    done:               { icon: '✅', color: '#22c55e' },
-    cancelled:          { icon: '🚫', color: '#6b7280' },
-};
+const ACTIVE_RUN_STATUSES: RunStatus[] = ['running', 'waiting_review', 'waiting_selfcheck'];
 
 function timeAgo(timestamp: number, lang: string): string {
     const diff = Date.now() - timestamp;
@@ -55,10 +55,9 @@ function normalizeUiTimestamp(timestamp: number): number {
     return timestamp < 10_000_000_000 ? timestamp * 1000 : timestamp;
 }
 
-export default function TaskBoardModal({ open, onClose, lang, runReports }: TaskBoardModalProps) {
-    const [showCreate, setShowCreate] = useState(false);
-    const [dragId, setDragId] = useState<string | null>(null);
+export default function TaskBoardModal({ open, onClose, lang, sessionId, runReports }: TaskBoardModalProps) {
     const [latestRuns, setLatestRuns] = useState<Record<string, RunRecord>>({});
+    const [activeNodeLabelsByTask, setActiveNodeLabelsByTask] = useState<Record<string, string[]>>({});
     const {
         tasks,
         selectedTask,
@@ -71,108 +70,123 @@ export default function TaskBoardModal({ open, onClose, lang, runReports }: Task
         tasksByStatus,
         refreshTask,
     } = useTaskContext();
+    const { runs, nodeExecutions } = useRunContext();
 
-    // Create form state
-    const [newTitle, setNewTitle] = useState('');
-    const [newDesc, setNewDesc] = useState('');
-    const [newMode, setNewMode] = useState<TaskMode>('standard');
-    const [newPriority, setNewPriority] = useState<TaskPriority>('medium');
+    // Remove create form — tasks are created automatically via run_goal
 
-    const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
-
-    const refreshLatestRunForTask = useCallback(async (taskId: string) => {
+    const refreshBoardSummary = useCallback(async () => {
         try {
-            const { runs } = await listRuns(taskId);
-            setLatestRuns((prev) => {
-                const next = { ...prev };
-                if (runs?.[0]) next[taskId] = runs[0];
-                else delete next[taskId];
-                return next;
-            });
+            const { tasks: summaryTasks } = await getBoardSummary({ sessionId: sessionId || undefined });
+            const nextRuns: Record<string, RunRecord> = {};
+            const nextLabels: Record<string, string[]> = {};
+            for (const task of summaryTasks) {
+                if (task.latestRun) {
+                    nextRuns[task.id] = task.latestRun;
+                }
+                const labels = Array.isArray(task.activeNodeLabels) && task.activeNodeLabels.length > 0
+                    ? task.activeNodeLabels
+                    : (task.activeNodeLabel ? [task.activeNodeLabel] : []);
+                if (labels.length > 0) {
+                    nextLabels[task.id] = labels.slice(0, 3);
+                }
+            }
+            setLatestRuns(nextRuns);
+            setActiveNodeLabelsByTask(nextLabels);
         } catch {
-            // ignore refresh errors
+            // Ignore transient board summary failures; canonical task state still renders.
         }
+    }, [sessionId]);
+
+    // P1-2: Inject pulse keyframes once
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const STYLE_ID = 'evermind-task-board-pulse';
+        if (document.getElementById(STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+        style.textContent = `
+            @keyframes executingPulse {
+                0%, 100% { box-shadow: 0 0 12px rgba(79, 143, 255, 0.15); }
+                50% { box-shadow: 0 0 20px rgba(79, 143, 255, 0.25); }
+            }
+        `;
+        document.head.appendChild(style);
     }, []);
+
+    // P1-2: Helper to get active node labels for a task
+    const getActiveNodeLabels = useCallback((taskId: string): string[] => {
+        const selectedTaskLabels = runs
+            .filter((run) => run.task_id === taskId && run.status === 'running')
+            .flatMap((run) => (run.active_node_execution_ids || [])
+                .map((id) => nodeExecutions.find((ne) => ne.id === id))
+                .filter((ne): ne is NodeExecutionRecord => Boolean(ne))
+                .map((ne) => ne.node_label || ne.node_key))
+            .filter(Boolean)
+            .slice(0, 2);
+        if (selectedTaskLabels.length > 0) {
+            return selectedTaskLabels;
+        }
+        return activeNodeLabelsByTask[taskId] || [];
+    }, [activeNodeLabelsByTask, nodeExecutions, runs]);
 
     useEffect(() => {
         if (open) {
             void fetchTasks();
+            void refreshBoardSummary();
         }
-    }, [open, fetchTasks]);
+    }, [open, fetchTasks, refreshBoardSummary]);
 
     useEffect(() => {
         if (!open) {
             selectTask(null);
             setLatestRuns({});
+            setActiveNodeLabelsByTask({});
         }
     }, [open, selectTask]);
 
-    // Fetch latest run for each task that has run_ids
+    // B-4: Auto-select the latest executing task when board opens
     useEffect(() => {
-        const tasksWithRuns = tasks.filter((task) => task.runIds?.length > 0);
-        if (tasksWithRuns.length === 0) {
+        if (!open || selectedTask || tasks.length === 0) return;
+        const executing = tasks.filter(t => t.status === 'executing');
+        if (executing.length > 0) {
+            // Pick the most recently updated executing task
+            const latest = executing.reduce((a, b) =>
+                (b.updatedAt || 0) > (a.updatedAt || 0) ? b : a
+            );
+            selectTask(latest.id);
+        }
+    }, [open, selectedTask, tasks, selectTask]);
+
+    useEffect(() => {
+        if (!open) return;
+        if (tasks.length === 0) {
             setLatestRuns({});
+            setActiveNodeLabelsByTask({});
             return;
         }
-        let cancelled = false;
-        (async () => {
-            const resolved = await Promise.all(tasksWithRuns.map(async (task) => {
-                try {
-                    const { runs } = await listRuns(task.id);
-                    return [task.id, runs?.[0] || null] as const;
-                } catch {
-                    return [task.id, null] as const;
-                }
-            }));
-            if (cancelled) return;
-            const nextLatestRuns: Record<string, RunRecord> = {};
-            resolved.forEach(([taskId, run]) => {
-                if (run) nextLatestRuns[taskId] = run;
-            });
-            setLatestRuns(nextLatestRuns);
-        })();
-        return () => {
-            cancelled = true;
-        };
-    }, [tasks]);
+        void refreshBoardSummary();
+    }, [open, refreshBoardSummary, tasks.length]);
 
-    const handleCreate = async () => {
-        if (!newTitle.trim()) return;
-        const created = await createTask({
-            title: newTitle.trim(),
-            description: newDesc.trim(),
-            mode: newMode,
-            priority: newPriority,
+    useEffect(() => {
+        if (!open) return;
+        const hasActiveTask = tasks.some((task) => {
+            const latestRun = latestRuns[task.id];
+            return task.status === 'executing' || Boolean(latestRun && ACTIVE_RUN_STATUSES.includes(latestRun.status));
         });
-        if (created) {
-            setNewTitle('');
-            setNewDesc('');
-            setNewMode('standard');
-            setNewPriority('medium');
-            setShowCreate(false);
+        if (!hasActiveTask && tasks.length > 0) {
+            return;
         }
-    };
 
-    const handleTransition = async (taskId: string, newStatus: TaskStatus) => {
-        await transitionTask(taskId, newStatus);
-    };
+        void refreshBoardSummary();
+        const timer = window.setInterval(() => {
+            void refreshBoardSummary();
+        }, 3000);
+        return () => {
+            window.clearInterval(timer);
+        };
+    }, [latestRuns, open, refreshBoardSummary, tasks]);
 
-    const handleUpdateTask = async (taskId: string, data: Partial<TaskCard>) => {
-        await updateTask(taskId, data);
-    };
-
-    const handleDragStart = (taskId: string) => {
-        setDragId(taskId);
-    };
-
-    const handleDrop = (targetStatus: TaskStatus) => {
-        if (!dragId) return;
-        const task = tasks.find((t) => t.id === dragId);
-        if (task && task.status !== targetStatus) {
-            handleTransition(dragId, targetStatus);
-        }
-        setDragId(null);
-    };
+    const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
 
     if (!open) return null;
 
@@ -186,7 +200,6 @@ export default function TaskBoardModal({ open, onClose, lang, runReports }: Task
                 {/* Header */}
                 <div className="modal-header" style={{ borderBottom: '1px solid var(--glass-border)' }}>
                     <h3 style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span style={{ fontSize: 18 }}>📋</span>
                         {tr('任务看板', 'Task Board')}
                         <span style={{ fontSize: 11, color: 'var(--text3)', fontWeight: 400, marginLeft: 8 }}>
                             {tasks.length} {tr('个任务', 'tasks')}
@@ -194,132 +207,100 @@ export default function TaskBoardModal({ open, onClose, lang, runReports }: Task
                     </h3>
                     <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                         <button
-                            className="btn btn-primary"
-                            onClick={() => setShowCreate(true)}
-                            style={{ fontSize: 11, padding: '5px 12px' }}
-                        >
-                            + {tr('新建任务', 'New Task')}
-                        </button>
-                        <button
                             className="btn"
-                            onClick={() => void fetchTasks()}
+                            onClick={() => {
+                                void fetchTasks();
+                                void refreshBoardSummary();
+                            }}
                             style={{ fontSize: 11, padding: '5px 10px' }}
                             title={tr('刷新', 'Refresh')}
                         >
-                            🔄
+                            🔄 {tr('刷新', 'Refresh')}
                         </button>
                         <button className="modal-close" onClick={onClose}>✕</button>
                     </div>
                 </div>
 
-                {/* Create Task Inline Form */}
-                {showCreate && (
-                    <div style={{
-                        padding: '12px 16px',
-                        borderBottom: '1px solid var(--glass-border)',
-                        background: 'rgba(79, 143, 255, 0.04)',
-                        animation: 'fadeIn 0.15s ease-out',
-                    }}>
-                        <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-                            <input
-                                className="s-input"
-                                placeholder={tr('任务标题...', 'Task title...')}
-                                value={newTitle}
-                                onChange={(e) => setNewTitle(e.target.value)}
-                                onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-                                style={{ flex: '1 1 200px', minWidth: 200 }}
-                                autoFocus
-                            />
-                            <input
-                                className="s-input"
-                                placeholder={tr('描述（可选）', 'Description (optional)')}
-                                value={newDesc}
-                                onChange={(e) => setNewDesc(e.target.value)}
-                                style={{ flex: '2 1 300px', minWidth: 200 }}
-                            />
-                            <select
-                                className="s-input"
-                                value={newMode}
-                                onChange={(e) => setNewMode(e.target.value as TaskMode)}
-                                style={{ flex: '0 0 100px' }}
-                            >
-                                {(['standard', 'pro', 'debug', 'review'] as TaskMode[]).map((m) => (
-                                    <option key={m} value={m}>{MODE_LABELS[lang][m]}</option>
-                                ))}
-                            </select>
-                            <select
-                                className="s-input"
-                                value={newPriority}
-                                onChange={(e) => setNewPriority(e.target.value as TaskPriority)}
-                                style={{ flex: '0 0 80px' }}
-                            >
-                                {(['low', 'medium', 'high', 'urgent'] as TaskPriority[]).map((p) => (
-                                    <option key={p} value={p}>{PRIORITY_LABELS[lang][p]}</option>
-                                ))}
-                            </select>
-                            <button className="btn btn-success" onClick={handleCreate} style={{ fontSize: 11 }}>
-                                {tr('创建', 'Create')}
-                            </button>
-                            <button className="btn" onClick={() => setShowCreate(false)} style={{ fontSize: 11 }}>
-                                {tr('取消', 'Cancel')}
-                            </button>
-                        </div>
-                    </div>
-                )}
-
-                {/* Board */}
+                {/* Board — 3 columns */}
                 <div style={{
                     flex: 1,
                     overflow: 'auto',
                     padding: 12,
                     display: 'flex',
-                    gap: 10,
+                    gap: 12,
                     minHeight: 0,
                 }}>
-                    {loading && tasks.length === 0 ? (
+                    {(() => {
+                        // Filter tasks by session
+                        const filteredTasks = sessionId
+                            ? tasks.filter(t => t.sessionId === sessionId)
+                            : tasks;
+                        if (filteredTasks.length === 0) return (
+                        /* Empty state guidance */
                         <div style={{
-                            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                            color: 'var(--text3)', fontSize: 13,
+                            flex: 1, display: 'flex', flexDirection: 'column',
+                            alignItems: 'center', justifyContent: 'center',
+                            gap: 12, padding: '40px 20px',
                         }}>
-                            {tr('加载中...', 'Loading...')}
+                            <div style={{ fontSize: 40, opacity: 0.6 }}>📋</div>
+                            <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text1)' }}>
+                                {tr('还没有任务记录', 'No tasks yet')}
+                            </div>
+                            <div style={{
+                                fontSize: 12, color: 'var(--text3)', textAlign: 'center',
+                                maxWidth: 400, lineHeight: 1.8,
+                            }}>
+                                {tr(
+                                    '看板会自动记录每次任务的执行过程和结果。\n\n' +
+                                    '💬 在聊天窗口发送任务目标（如「做一个卖衣服的网站」）\n' +
+                                    '☁️ 或通过 OpenClaw 发送任务\n\n' +
+                                    '任务开始后，看板会实时显示：\n' +
+                                    '• 哪些节点正在执行\n' +
+                                    '• 当前进度和状态\n' +
+                                    '• 完成后的结果和报告',
+                                    'The board automatically records each task\'s execution and results.\n\n' +
+                                    '💬 Send a goal in the chat (e.g. "Build a clothing website")\n' +
+                                    '☁️ Or send a task via OpenClaw\n\n' +
+                                    'Once a task starts, the board shows:\n' +
+                                    '• Which nodes are executing\n' +
+                                    '• Current progress and status\n' +
+                                    '• Results and reports when done'
+                                )}
+                            </div>
                         </div>
-                    ) : (
-                        TASK_COLUMNS.map((col) => {
-                            const colTasks = tasksByStatus(col.key);
+                        );
+                        return BOARD_COLUMNS.map((col) => {
+                            const colTasks = filteredTasks.filter(t => col.statuses.includes(t.status))
+                                .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
                             return (
                                 <div
                                     key={col.key}
-                                    className="task-column"
-                                    onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over'); }}
-                                    onDragLeave={(e) => e.currentTarget.classList.remove('drag-over')}
-                                    onDrop={(e) => { e.preventDefault(); e.currentTarget.classList.remove('drag-over'); handleDrop(col.key); }}
                                     style={{
                                         flex: '1 1 0',
-                                        minWidth: 180,
-                                        maxWidth: 260,
+                                        minWidth: 240,
                                         display: 'flex',
                                         flexDirection: 'column',
                                         gap: 8,
                                         background: 'var(--glass)',
                                         borderRadius: 12,
                                         border: '1px solid var(--glass-border)',
-                                        padding: '8px 6px',
+                                        padding: '8px 8px',
                                     }}
                                 >
                                     {/* Column header */}
                                     <div style={{
                                         display: 'flex', alignItems: 'center', gap: 6,
-                                        padding: '4px 8px', borderRadius: 8,
+                                        padding: '6px 10px', borderRadius: 8,
                                         background: `${col.color}12`,
+                                        fontWeight: 700,
                                     }}>
-                                        <span>{col.icon}</span>
-                                        <span style={{ fontSize: 11, fontWeight: 700, color: col.color }}>
+                                        <span style={{ fontSize: 13, color: col.color }}>
                                             {lang === 'zh' ? col.label_zh : col.label_en}
                                         </span>
                                         <span style={{
-                                            fontSize: 10, color: 'var(--text3)',
+                                            fontSize: 11, color: 'var(--text3)',
                                             background: 'var(--glass)', borderRadius: 10,
-                                            padding: '1px 6px', marginLeft: 'auto',
+                                            padding: '1px 8px', marginLeft: 'auto',
                                         }}>
                                             {colTasks.length}
                                         </span>
@@ -330,128 +311,138 @@ export default function TaskBoardModal({ open, onClose, lang, runReports }: Task
                                         flex: 1, overflow: 'auto', display: 'flex',
                                         flexDirection: 'column', gap: 6, minHeight: 60,
                                     }}>
-                                        {colTasks.map((task) => (
-                                            <div
-                                                key={task.id}
-                                                draggable
-                                                onDragStart={() => handleDragStart(task.id)}
-                                                onClick={() => selectTask(task.id)}
-                                                className="task-card-item"
-                                                style={{
-                                                    padding: '8px 10px',
-                                                    borderRadius: 8,
-                                                    background: 'var(--surface)',
-                                                    border: '1px solid var(--glass-border)',
-                                                    cursor: 'pointer',
-                                                    transition: 'all 0.15s',
-                                                    opacity: dragId === task.id ? 0.5 : 1,
-                                                }}
-                                            >
-                                                {/* Priority dot + Title */}
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                                                    <span style={{
-                                                        width: 6, height: 6, borderRadius: '50%',
-                                                        background: PRIORITY_COLORS[task.priority] || '#64748b',
-                                                        flexShrink: 0,
-                                                    }} />
-                                                    <span style={{
-                                                        fontSize: 11, fontWeight: 600, color: 'var(--text1)',
+                                        {colTasks.map((task) => {
+                                            const isSelected = selectedTask?.id === task.id;
+                                            const isExecuting = ['executing', 'review', 'selfcheck'].includes(task.status);
+                                            const nodeLabels = isExecuting ? getActiveNodeLabels(task.id) : [];
+                                            const lr = latestRuns[task.id];
+                                            const lrMeta = lr ? (RUN_STATUS_META[lr.status] || RUN_STATUS_META.queued) : null;
+                                            return (
+                                                <div
+                                                    key={task.id}
+                                                    onClick={() => selectTask(task.id)}
+                                                    style={{
+                                                        padding: '10px 12px',
+                                                        borderRadius: 10,
+                                                        background: isExecuting ? 'rgba(79, 143, 255, 0.04)' : 'var(--surface)',
+                                                        border: isSelected
+                                                            ? '1.5px solid rgba(168, 85, 247, 0.5)'
+                                                            : isExecuting
+                                                                ? '1px solid rgba(79, 143, 255, 0.35)'
+                                                                : '1px solid var(--glass-border)',
+                                                        cursor: 'pointer',
+                                                        transition: 'all 0.15s',
+                                                        ...(isExecuting ? {
+                                                            animation: 'executingPulse 2s ease-in-out infinite',
+                                                        } : {}),
+                                                    }}
+                                                >
+                                                    {/* Title */}
+                                                    <div style={{
+                                                        fontSize: 12, fontWeight: 600, color: 'var(--text1)',
                                                         overflow: 'hidden', textOverflow: 'ellipsis',
-                                                        whiteSpace: 'nowrap', flex: 1,
+                                                        whiteSpace: 'nowrap', marginBottom: 4,
                                                     }}>
                                                         {task.title}
-                                                    </span>
-                                                </div>
-
-                                                {/* Meta row */}
-                                                <div style={{
-                                                    display: 'flex', alignItems: 'center', gap: 4,
-                                                    fontSize: 9, color: 'var(--text3)', flexWrap: 'wrap',
-                                                }}>
-                                                    {/* Mode badge */}
-                                                    <span style={{
-                                                        padding: '1px 5px', borderRadius: 4,
-                                                        background: task.mode === 'pro' ? 'rgba(168, 85, 247, 0.12)' : 'var(--glass)',
-                                                        color: task.mode === 'pro' ? '#a855f7' : 'var(--text3)',
-                                                        border: '1px solid ' + (task.mode === 'pro' ? 'rgba(168, 85, 247, 0.2)' : 'var(--glass-border)'),
-                                                    }}>
-                                                        {MODE_LABELS[lang][task.mode] || task.mode}
-                                                    </span>
-                                                    {/* Owner */}
-                                                    {task.owner && (
-                                                        <span style={{
-                                                            padding: '1px 5px', borderRadius: 4,
-                                                            background: 'var(--glass)',
-                                                            border: '1px solid var(--glass-border)',
-                                                        }}>
-                                                            {task.owner}
-                                                        </span>
-                                                    )}
-                                                    {/* Run count */}
-                                                    {task.runIds?.length > 0 && (
-                                                        <span style={{ marginLeft: 'auto' }}>
-                                                            🔄 {task.runIds.length}
-                                                        </span>
-                                                    )}
-                                                </div>
-
-                                                {/* Progress bar */}
-                                                {task.progress > 0 && task.progress < 100 && (
-                                                    <div className="progress-bar" style={{ marginTop: 6, height: 2 }}>
-                                                        <div className="fill" style={{ width: `${task.progress}%` }} />
                                                     </div>
-                                                )}
 
-                                                {/* Latest run status */}
-                                                {latestRuns[task.id] && (() => {
-                                                    const lr = latestRuns[task.id];
-                                                    const rMeta = RUN_STATUS_ICONS[lr.status] || RUN_STATUS_ICONS.queued;
-                                                    return (
+                                                    {/* Sub-status badge for active column (review/selfcheck) */}
+                                                    {isExecuting && task.status !== 'executing' && (
                                                         <div style={{
-                                                            marginTop: 5, padding: '3px 6px', borderRadius: 5,
-                                                            background: `${rMeta.color}08`,
-                                                            border: `1px solid ${rMeta.color}18`,
-                                                            display: 'flex', alignItems: 'center', gap: 4,
+                                                            fontSize: 9, fontWeight: 600,
+                                                            color: task.status === 'review' ? '#f59e0b' : '#06b6d4',
+                                                            marginBottom: 4,
                                                         }}>
-                                                            <span style={{ fontSize: 9 }}>{rMeta.icon}</span>
+                                                            {SUB_STATUS_LABELS[lang]?.[task.status] || task.status}
+                                                        </div>
+                                                    )}
+
+                                                    {/* Active node labels */}
+                                                    {nodeLabels.length > 0 && (
+                                                        <div style={{
+                                                            display: 'flex', alignItems: 'center',
+                                                            gap: 4, marginBottom: 4,
+                                                            fontSize: 10, color: '#3b82f6',
+                                                        }}>
                                                             <span style={{
-                                                                fontSize: 8, fontWeight: 600, color: rMeta.color,
+                                                                width: 5, height: 5, borderRadius: '50%',
+                                                                background: '#3b82f6',
+                                                                animation: 'executingPulse 1.5s ease-in-out infinite',
+                                                                flexShrink: 0,
+                                                            }} />
+                                                            <span style={{
+                                                                overflow: 'hidden', textOverflow: 'ellipsis',
+                                                                whiteSpace: 'nowrap',
+                                                            }}>
+                                                                {nodeLabels.join(' → ')}
+                                                            </span>
+                                                        </div>
+                                                    )}
+
+                                                    {/* Progress bar */}
+                                                    {task.progress > 0 && task.progress < 100 && (
+                                                        <div className="progress-bar" style={{ marginBottom: 4, height: 3 }}>
+                                                            <div className="fill" style={{ width: `${task.progress}%` }} />
+                                                        </div>
+                                                    )}
+
+                                                    {/* Latest run status */}
+                                                    {lr && lrMeta && (
+                                                        <div style={{
+                                                            padding: '3px 6px', borderRadius: 5,
+                                                            background: `${lrMeta.color}08`,
+                                                            border: `1px solid ${lrMeta.color}18`,
+                                                            display: 'flex', alignItems: 'center', gap: 4,
+                                                            marginBottom: 4,
+                                                        }}>
+                                                            <span style={{
+                                                                width: 6, height: 6, borderRadius: '50%',
+                                                                background: lrMeta.color, flexShrink: 0,
+                                                            }} />
+                                                            <span style={{
+                                                                fontSize: 9, fontWeight: 600, color: lrMeta.color,
                                                                 flex: 1, overflow: 'hidden',
                                                                 textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                                                             }}>
                                                                 {lr.summary
                                                                     ? (lr.summary.length > 40 ? lr.summary.slice(0, 40) + '…' : lr.summary)
-                                                                    : lr.status.replace(/_/g, ' ')}
+                                                                    : (lang === 'zh' ? lrMeta.label_zh : lrMeta.label_en)}
                                                             </span>
-                                                            {(lr.node_execution_ids?.length || 0) > 0 && (
-                                                                <span style={{ fontSize: 7, color: 'var(--text3)' }}>
-                                                                    {lr.node_execution_ids.length} nodes
-                                                                </span>
-                                                            )}
                                                         </div>
-                                                    );
-                                                })()}
+                                                    )}
 
-                                                {/* Timestamp */}
-                                                <div style={{ fontSize: 8, color: 'var(--text3)', marginTop: 4, textAlign: 'right' }}>
-                                                    {timeAgo(normalizeUiTimestamp(task.updatedAt), lang)}
+                                                    {/* Footer: time + mode */}
+                                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 9, color: 'var(--text3)' }}>
+                                                        <span>{timeAgo(normalizeUiTimestamp(task.updatedAt), lang)}</span>
+                                                        {task.mode === 'pro' && (
+                                                            <span style={{
+                                                                padding: '0px 4px', borderRadius: 3,
+                                                                background: 'rgba(168, 85, 247, 0.12)',
+                                                                color: '#a855f7', fontSize: 8, fontWeight: 600,
+                                                                marginLeft: 'auto',
+                                                            }}>Pro</span>
+                                                        )}
+                                                    </div>
                                                 </div>
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
 
                                         {colTasks.length === 0 && (
                                             <div style={{
-                                                flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                                color: 'var(--text3)', fontSize: 10, opacity: 0.6, minHeight: 40,
+                                                flex: 1, display: 'flex', alignItems: 'center',
+                                                justifyContent: 'center', color: 'var(--text3)',
+                                                fontSize: 11, opacity: 0.5, minHeight: 60,
                                             }}>
-                                                {tr('拖拽任务到这里', 'Drop tasks here')}
+                                                {col.key === 'pending' ? tr('暂无待执行任务', 'No pending tasks')
+                                                    : col.key === 'active' ? tr('暂无执行中任务', 'No active tasks')
+                                                    : tr('暂无已完成任务', 'No completed tasks')}
                                             </div>
                                         )}
                                     </div>
                                 </div>
                             );
-                        })
-                    )}
+                        });
+                    })()}
                 </div>
 
                 {/* Task Detail Panel */}
@@ -461,13 +452,18 @@ export default function TaskBoardModal({ open, onClose, lang, runReports }: Task
                         task={selectedTask}
                         lang={lang}
                         onClose={() => selectTask(null)}
-                        onTransition={(newStatus) => handleTransition(selectedTask.id, newStatus)}
-                        onUpdate={(data) => handleUpdateTask(selectedTask.id, data)}
+                        onBoardClose={onClose}
+                        onTransition={(newStatus) => { void transitionTask(selectedTask.id, newStatus); }}
+                        onUpdate={(data) => { void updateTask(selectedTask.id, data); }}
                         onRunActivity={async () => {
-                            await refreshLatestRunForTask(selectedTask.id);
+                            await refreshBoardSummary();
                             await refreshTask(selectedTask.id);
                         }}
-                        runReports={runReports?.filter((r) => selectedTask.runIds?.includes(r.id)) || []}
+                        runReports={runReports?.filter((report) =>
+                            report.taskId === selectedTask.id
+                            || Boolean(report.runId && selectedTask.runIds?.includes(report.runId))
+                            || selectedTask.runIds?.includes(report.id)
+                        ) || []}
                     />
                 )}
             </div>

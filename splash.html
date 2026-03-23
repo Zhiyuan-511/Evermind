@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="utf-8">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            width: 420px;
+            height: 320px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(145deg, #0f1117 0%, #1a1d2e 50%, #0f1117 100%);
+            border-radius: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, 'SF Pro', 'Inter', sans-serif;
+            color: #e0e0e0;
+            overflow: hidden;
+            -webkit-app-region: drag;
+        }
+
+        /* P0-1: Branded monogram instead of emoji */
+        .logo {
+            width: 72px;
+            height: 72px;
+            border-radius: 18px;
+            background: linear-gradient(135deg, #6366f1 0%, #a855f7 50%, #ec4899 100%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 16px;
+            box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.08);
+            animation: logoPulse 2.4s ease-in-out infinite;
+        }
+
+        .logo-letter {
+            font-size: 36px;
+            font-weight: 800;
+            color: #fff;
+            letter-spacing: -1px;
+            text-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+
+        @keyframes logoPulse {
+            0%, 100% {
+                transform: scale(1);
+                box-shadow: 0 8px 32px rgba(99, 102, 241, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.08);
+            }
+            50% {
+                transform: scale(1.04);
+                box-shadow: 0 12px 40px rgba(168, 85, 247, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.12);
+            }
+        }
+
+        .title {
+            font-size: 22px;
+            font-weight: 700;
+            background: linear-gradient(135deg, #6366f1, #a855f7, #ec4899);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 4px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+        }
+
+        .version {
+            font-size: 11px;
+            color: #555;
+            margin-bottom: 24px;
+            letter-spacing: 1px;
+        }
+
+        .status {
+            font-size: 12px;
+            color: #888;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 20px;
+        }
+
+        .spinner {
+            width: 14px;
+            height: 14px;
+            border: 2px solid #222;
+            border-top: 2px solid #6366f1;
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .bar-container {
+            width: 200px;
+            height: 3px;
+            background: #1e2030;
+            border-radius: 2px;
+            margin-top: 16px;
+            overflow: hidden;
+        }
+
+        .bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #6366f1, #a855f7);
+            border-radius: 2px;
+            transition: width 0.6s ease-out;
+        }
+
+    </style>
+</head>
+
+<body>
+    <div class="logo">
+        <span class="logo-letter">E</span>
+    </div>
+    <div class="title">Evermind</div>
+    <div class="version">v2.0 · Desktop</div>
+    <div class="status">
+        <div class="spinner"></div>
+        <span id="status-text">Initializing...</span>
+    </div>
+    <div class="bar-container">
+        <div class="bar" id="progress-bar" style="width: 6%;"></div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('status-text');
+        const barEl = document.getElementById('progress-bar');
+        statusEl.textContent = 'Initializing...';
+        barEl.style.width = '6%';
+    </script>
+</body>
+
+</html>

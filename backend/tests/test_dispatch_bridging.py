@@ -47,9 +47,14 @@ def ws_env(tmp_path, monkeypatch):
     connector_idempotency.clear()
     server.connected_clients.clear()
     server._active_tasks.clear()
+    server._openclaw_dispatch_watchdogs.clear()
     yield
     server.connected_clients.clear()
     server._active_tasks.clear()
+    for task in list(server._openclaw_dispatch_watchdogs.values()):
+        if not task.done():
+            task.cancel()
+    server._openclaw_dispatch_watchdogs.clear()
     connector_idempotency.clear()
     task_store._task_store = None
     task_store._report_store = None
@@ -313,6 +318,6 @@ class TestDispatchBridgingIntegration:
                 assert run["summary"] == "Auto-complete summary"
                 assert run["current_node_execution_id"] == ""
                 assert run["active_node_execution_ids"] == []
-                assert task["status"] == "review"
+                assert task["status"] == "done"
                 assert task["latest_summary"] == "Auto-complete summary"
                 assert task["latest_risk"] == "Minor residual risk"

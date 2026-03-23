@@ -26,6 +26,7 @@ MIN_CSS_RULES = int(os.getenv("EVERMIND_MIN_CSS_RULES", "10"))
 MIN_SEMANTIC_BLOCKS = int(os.getenv("EVERMIND_MIN_SEMANTIC_BLOCKS", "4"))
 PLAYWRIGHT_STATUS_CACHE_TTL_SEC = int(os.getenv("EVERMIND_PLAYWRIGHT_STATUS_TTL_SEC", "30"))
 _PLAYWRIGHT_STATUS_CACHE: Dict[str, object] = {"ts": 0.0, "value": {"available": False, "reason": "not_checked"}}
+_PARTIAL_HTML_RE = re.compile(r"^index_part\d+\.html?$", re.IGNORECASE)
 
 
 def _normalize_preview_rel_path(preview_url: str) -> Optional[str]:
@@ -69,6 +70,11 @@ def build_preview_url_for_file(html_file: Path, output_dir: Optional[Path] = Non
     html_file = html_file.resolve()
     rel = html_file.relative_to(out).as_posix()
     return f"http://127.0.0.1:{port or DEFAULT_PORT}/preview/{rel}"
+
+
+def is_partial_html_artifact(artifact: Path | str) -> bool:
+    path = artifact if isinstance(artifact, Path) else Path(str(artifact))
+    return bool(_PARTIAL_HTML_RE.match(path.name))
 
 
 def validate_html_content(html: str) -> Dict:
@@ -230,10 +236,127 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
             has_head = await page.evaluate("Boolean(document.head)")
             has_body = await page.evaluate("Boolean(document.body)")
             body_text_len = await page.evaluate("document.body ? document.body.innerText.length : 0")
+            render_summary = await page.evaluate(
+                """
+() => {
+  const isVisible = (el) => {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    const rect = el.getBoundingClientRect();
+    return style.visibility !== 'hidden'
+      && style.display !== 'none'
+      && Number(style.opacity || '1') > 0.02
+      && rect.width > 1
+      && rect.height > 1;
+  };
+  const parseColor = (value) => {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return null;
+    const m = raw.match(/rgba?\\((\\d+),\\s*(\\d+),\\s*(\\d+)(?:,\\s*([\\d.]+))?\\)/);
+    if (!m) return null;
+    return {
+      r: Number(m[1]),
+      g: Number(m[2]),
+      b: Number(m[3]),
+      a: m[4] == null ? 1 : Number(m[4]),
+    };
+  };
+  const luminance = (rgb) => {
+    const convert = (channel) => {
+      const c = channel / 255;
+      return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    };
+    return 0.2126 * convert(rgb.r) + 0.7152 * convert(rgb.g) + 0.0722 * convert(rgb.b);
+  };
+  const contrast = (fg, bg) => {
+    if (!fg || !bg) return 1;
+    const l1 = luminance(fg);
+    const l2 = luminance(bg);
+    const bright = Math.max(l1, l2);
+    const dark = Math.min(l1, l2);
+    return Number(((bright + 0.05) / (dark + 0.05)).toFixed(2));
+  };
+  const backgroundFor = (el) => {
+    let node = el;
+    while (node) {
+      const bg = parseColor(window.getComputedStyle(node).backgroundColor);
+      if (bg && bg.a > 0.03) return bg;
+      node = node.parentElement;
+    }
+    const bodyBg = parseColor(window.getComputedStyle(document.body || document.documentElement).backgroundColor);
+    if (bodyBg && bodyBg.a > 0.03) return bodyBg;
+    return { r: 255, g: 255, b: 255, a: 1 };
+  };
+  const textCandidates = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,a,button,label,span,div'))
+    .filter((el) => isVisible(el) && String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().length >= 3)
+    .slice(0, 140)
+    .map((el) => {
+      const style = window.getComputedStyle(el);
+      const fg = parseColor(style.color);
+      const bg = backgroundFor(el);
+      return {
+        text: String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
+        contrast: contrast(fg, bg),
+      };
+    });
+  const readableTextCount = textCandidates.filter((item) => item.contrast >= 2.4).length;
+  const veryLowContrastTextCount = textCandidates.filter((item) => item.contrast < 1.35).length;
+  return {
+    body_child_count: document.body ? document.body.children.length : 0,
+    heading_count: document.querySelectorAll('h1,h2,h3').length,
+    interactive_count: document.querySelectorAll('button,a,input,textarea,select,summary,[role="button"],[role="link"],[role="tab"]').length,
+    image_count: document.querySelectorAll('img,picture,svg').length,
+    canvas_count: document.querySelectorAll('canvas').length,
+    landmark_count: document.querySelectorAll('main,section,header,footer,nav,article').length,
+    viewport_height: window.innerHeight || 0,
+    scroll_height: Math.max(
+      document.body ? document.body.scrollHeight : 0,
+      document.documentElement ? document.documentElement.scrollHeight : 0
+    ),
+    text_candidate_count: textCandidates.length,
+    readable_text_count: readableTextCount,
+    very_low_contrast_text_count: veryLowContrastTextCount,
+    sample_text: textCandidates.slice(0, 6).map((item) => item.text),
+  };
+}
+                """
+            )
             status = response.status if response else None
             await browser.close()
 
-        ok = bool(status and 200 <= status < 400 and has_head and has_body and body_text_len > 20)
+        render_errors: List[str] = []
+        if not isinstance(render_summary, dict):
+            render_summary = {}
+
+        readable_text_count = int(render_summary.get("readable_text_count", 0) or 0)
+        text_candidate_count = int(render_summary.get("text_candidate_count", 0) or 0)
+        heading_count = int(render_summary.get("heading_count", 0) or 0)
+        interactive_count = int(render_summary.get("interactive_count", 0) or 0)
+        image_count = int(render_summary.get("image_count", 0) or 0)
+        canvas_count = int(render_summary.get("canvas_count", 0) or 0)
+        landmark_count = int(render_summary.get("landmark_count", 0) or 0)
+        scroll_height = int(render_summary.get("scroll_height", 0) or 0)
+        viewport_height = int(render_summary.get("viewport_height", 0) or 0)
+
+        if body_text_len <= 20 and interactive_count == 0 and image_count == 0 and canvas_count == 0:
+            render_errors.append("Preview appears blank or near-empty: almost no visible content rendered")
+        if text_candidate_count > 0 and readable_text_count == 0 and canvas_count == 0:
+            render_errors.append("No readable visible text detected: page may be white-on-white or fully hidden")
+        if scroll_height <= max(240, viewport_height // 2) and heading_count == 0 and interactive_count == 0 and image_count == 0 and canvas_count == 0:
+            render_errors.append("Rendered page is too thin and lacks visible structure")
+        if landmark_count == 0 and body_text_len < 60 and image_count == 0 and canvas_count == 0:
+            render_errors.append("Rendered page lacks meaningful sections or visible content blocks")
+        if page_errors:
+            render_errors.append("Browser runtime errors detected during preview render")
+
+        ok = bool(
+            status
+            and 200 <= status < 400
+            and has_head
+            and has_body
+            and body_text_len > 20
+            and not render_errors
+        )
         return {
             "status": "pass" if ok else "fail",
             "engine": "playwright",
@@ -242,6 +365,8 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
             "has_head": bool(has_head),
             "has_body": bool(has_body),
             "body_text_len": int(body_text_len),
+            "render_errors": render_errors[:6],
+            "render_summary": render_summary,
             "page_errors": page_errors[:6],
             "console_errors": console_errors[:8],
         }
@@ -300,6 +425,8 @@ def latest_preview_artifact(output_dir: Optional[Path] = None) -> Tuple[Optional
     Priority is newest mtime across:
     1) task_xxx/*.html artifacts
     2) output root *.html artifacts (fallback when builder writes to /tmp/evermind_output/index.html directly)
+    Parallel-builder partials like index_part1.html are ignored because they are not
+    directly previewable final artifacts.
     Returns (task_id, html_file), where task_id can be "root".
     """
     out = output_dir or OUTPUT_DIR
@@ -314,7 +441,9 @@ def latest_preview_artifact(output_dir: Optional[Path] = None) -> Tuple[Optional
         html_files = sorted([p for p in task_dir.iterdir() if p.suffix.lower() in (".html", ".htm")])
         if not html_files:
             continue
-        html = html_files[0]
+        html = next((p for p in html_files if not is_partial_html_artifact(p)), None)
+        if html is None:
+            continue
         try:
             mtime = html.stat().st_mtime
         except Exception:
@@ -324,6 +453,8 @@ def latest_preview_artifact(output_dir: Optional[Path] = None) -> Tuple[Optional
     # root-level artifacts (builder/file_ops direct writes)
     for html in out.iterdir():
         if not html.is_file() or html.suffix.lower() not in (".html", ".htm"):
+            continue
+        if is_partial_html_artifact(html):
             continue
         try:
             mtime = html.stat().st_mtime

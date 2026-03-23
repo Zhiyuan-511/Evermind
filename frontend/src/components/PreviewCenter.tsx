@@ -135,8 +135,21 @@ function PreviewCenter({
                     fontSize: 16,
                     fontWeight: 600,
                     color: 'var(--text2)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
                 }}>
-                    {tr('暂无预览', 'No preview yet')}
+                    {running && (
+                        <span style={{
+                            width: 8, height: 8, borderRadius: '50%',
+                            background: 'var(--blue)',
+                            boxShadow: '0 0 8px rgba(79,143,255,0.45)',
+                            animation: 'previewPulse 1.5s infinite',
+                        }} />
+                    )}
+                    {running
+                        ? tr('正在执行任务...', 'Task in progress...')
+                        : tr('暂无预览', 'No preview yet')}
                 </div>
                 <div style={{
                     marginTop: 8,
@@ -145,10 +158,15 @@ function PreviewCenter({
                     lineHeight: 1.6,
                     fontSize: 12,
                 }}>
-                    {tr(
-                        '运行一个任务后，这里会显示生成结果。预览准备完成时会自动切换到这个视图。',
-                        'Run a task to generate output. This view switches in automatically once the preview is ready.',
-                    )}
+                    {running
+                        ? tr(
+                            '任务正在执行中，构建完成后预览会自动出现。',
+                            'Task is running. Preview will appear automatically once the build is complete.',
+                          )
+                        : tr(
+                            '发送一个任务后，这里会显示生成结果。预览准备完成时会自动切换到这个视图。',
+                            'Send a task to generate output. This view switches in automatically once the preview is ready.',
+                          )}
                 </div>
                 <button
                     onClick={onClose}
@@ -157,6 +175,12 @@ function PreviewCenter({
                 >
                     {tr('返回编辑器', 'Back to editor')}
                 </button>
+                <style>{`
+                    @keyframes previewPulse {
+                        0%, 100% { opacity: 1; }
+                        50% { opacity: 0.35; }
+                    }
+                `}</style>
             </div>
         );
     }

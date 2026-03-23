@@ -100,8 +100,15 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
         }
     }, []);
 
-    const sendGoal = useCallback((goal: string, model = 'gpt-5.4', chatHistory?: Array<{role: string; content: string}>, difficulty = 'standard') => {
-        send({ type: 'run_goal', goal, model, chat_history: chatHistory || [], difficulty });
+    const sendGoal = useCallback((
+        goal: string,
+        model = 'gpt-5.4',
+        chatHistory?: Array<{role: string; content: string}>,
+        difficulty = 'standard',
+        runtime: 'local' | 'openclaw' = 'local',
+        sessionId = '',
+    ) => {
+        send({ type: 'run_goal', goal, model, chat_history: chatHistory || [], difficulty, runtime, session_id: sessionId });
     }, [send]);
 
     const runWorkflow = useCallback((nodes: unknown[], edges: unknown[]) => {
@@ -111,6 +118,24 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
     const stop = useCallback(() => {
         send({ type: 'stop' });
     }, [send]);
+
+    const reconnect = useCallback(() => {
+        clearReconnectTimer();
+        const current = wsRef.current;
+        if (current) {
+            try {
+                current.onclose = null;
+                current.close();
+            } catch {
+                /* ignore */
+            }
+            wsRef.current = null;
+        }
+        setConnected(false);
+        setTimeout(() => {
+            if (mountedRef.current) connectRef.current();
+        }, 50);
+    }, [clearReconnectTimer]);
 
     useEffect(() => {
         mountedRef.current = true;
@@ -123,5 +148,5 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
         };
     }, [connect, clearReconnectTimer]);
 
-    return { connected, models, plugins, send, sendGoal, runWorkflow, stop, wsRef };
+    return { connected, models, plugins, send, sendGoal, runWorkflow, stop, reconnect, wsRef };
 }

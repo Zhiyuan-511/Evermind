@@ -215,6 +215,19 @@ class TestSettingsIntegrity(unittest.TestCase):
             loaded = settings.load_settings()
         self.assertTrue(any("integrity" in msg.lower() for msg in cm.output))
 
+    def test_hash_mismatch_self_heals_after_load(self):
+        sample = settings.load_settings()
+        sample["api_keys"]["openai"] = "sk-integrity-test-key"
+        settings.save_settings(sample)
+        settings.SETTINGS_HASH_FILE.write_text("stale-hash", encoding="utf-8")
+        with self.assertLogs("evermind.settings", level="WARNING") as cm:
+            settings.load_settings()
+        self.assertTrue(any("refreshing the local hash" in msg.lower() for msg in cm.output))
+        file_bytes = settings.SETTINGS_FILE.read_bytes()
+        expected_hash = hashlib.sha256(file_bytes).hexdigest()
+        actual_hash = settings.SETTINGS_HASH_FILE.read_text("utf-8").strip()
+        self.assertEqual(expected_hash, actual_hash)
+
 
 # ─────────────────────────────────────────────
 # 6. Privacy — New Patterns (Bearer, AWS, GitHub)

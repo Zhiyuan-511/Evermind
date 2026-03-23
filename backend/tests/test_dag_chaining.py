@@ -5,6 +5,7 @@ import asyncio
 import pytest
 import sys
 import os
+from pathlib import Path
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -31,9 +32,14 @@ def ws_env(tmp_path, monkeypatch):
     connector_idempotency.clear()
     server.connected_clients.clear()
     server._active_tasks.clear()
+    server._openclaw_dispatch_watchdogs.clear()
     yield
     server.connected_clients.clear()
     server._active_tasks.clear()
+    for task in list(server._openclaw_dispatch_watchdogs.values()):
+        if not task.done():
+            task.cancel()
+    server._openclaw_dispatch_watchdogs.clear()
     connector_idempotency.clear()
     task_store._task_store = None
     task_store._report_store = None
@@ -183,8 +189,10 @@ class TestDAGChaining:
         result = server._auto_chain_next_node(run_id)
         assert result == "__ALL_DONE__"
 
-    def test_failed_dep_blocks_downstream(self, ws_env):
-        """If a dep failed, downstream stays blocked (no __ALL_DONE__ either)."""
+    def test_failed_dep_terminalizes_downstream_without_dispatch(self, ws_env):
+        """If a dep failed and no safe preview exists, downstream nodes should not dispatch.
+
+        Instead, they should be terminalized so the run can finish cleanly without hanging."""
         run_id, nes = self._create_run_with_nodes(ws_env, "simple")
         nes_store = task_store.get_node_execution_store()
         builder = [ne for ne in nes if ne["node_key"] == "builder"][0]
@@ -192,9 +200,43 @@ class TestDAGChaining:
         nes_store.transition_node(builder["id"], "failed")
 
         result = server._auto_chain_next_node(run_id)
-        # deployer depends on builder which failed → nothing ready
-        # Not ALL_DONE because deployer and tester are queued but blocked
-        assert result is None
+        assert result == "__ALL_DONE__"
+        deployer = [ne for ne in nes_store.list_node_executions(run_id=run_id) if ne["node_key"] == "deployer"][0]
+        tester = [ne for ne in nes_store.list_node_executions(run_id=run_id) if ne["node_key"] == "tester"][0]
+        assert deployer["status"] == "cancelled"
+        assert tester["status"] == "cancelled"
+
+    def test_failed_builder_can_still_unblock_join_nodes_when_preview_exists(self, ws_env, tmp_path):
+        """If one parallel builder failed but a real preview exists, reviewer/deployer may proceed."""
+        run_id, nes = self._create_run_with_nodes(ws_env, "pro")
+        nes_store = task_store.get_node_execution_store()
+
+        out_dir = tmp_path / "preview"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        preview = out_dir / "index.html"
+        preview.write_text(
+            "<!doctype html><html><head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><style>body{margin:0}main{display:grid}@media(max-width:700px){main{display:block}}</style></head><body><header>Ready</header><main><section>Preview</section><section>More</section><footer>Done</footer></main><script>1</script></body></html>",
+            encoding="utf-8",
+        )
+
+        original_output = server.OUTPUT_DIR
+        try:
+            server.OUTPUT_DIR = Path(out_dir)
+            for key in ["analyst", "builder1"]:
+                ne = [n for n in nes if n["node_key"] == key][0]
+                nes_store.transition_node(ne["id"], "running")
+                nes_store.transition_node(ne["id"], "passed")
+            builder2 = [n for n in nes if n["node_key"] == "builder2"][0]
+            nes_store.transition_node(builder2["id"], "running")
+            nes_store.transition_node(builder2["id"], "failed")
+
+            result = server._auto_chain_next_node(run_id)
+        finally:
+            server.OUTPUT_DIR = original_output
+
+        assert isinstance(result, list)
+        ready_keys = {nes_store.get_node_execution(ne_id)["node_key"] for ne_id in result}
+        assert ready_keys == {"reviewer", "deployer"}
 
     def test_standard_template_linear_chain(self, ws_env):
         """Standard: builder (root) → reviewer+deployer → tester."""

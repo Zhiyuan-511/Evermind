@@ -1,8 +1,8 @@
 /* Evermind — REST API Client */
 
-import type { RunReportRecord, RunSubtaskReport, SelfCheckItem, TaskCard, TaskMode, TaskPriority, TaskStatus } from '@/lib/types';
+import type { RunReportRecord, RunSubtaskReport, SelfCheckItem, SkillLibraryRecord, TaskCard, TaskMode, TaskPriority, TaskStatus } from '@/lib/types';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8765';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
 const DEFAULT_TIMEOUT_MS = 15_000;
 
 const TASK_STATUSES: TaskStatus[] = ['backlog', 'planned', 'executing', 'review', 'selfcheck', 'done'];
@@ -122,6 +122,7 @@ function normalizeRunReport(raw: unknown): RunReportRecord | null {
     return {
         id,
         taskId: taskId || undefined,
+        runId: String(value.runId ?? value.run_id ?? '').trim() || undefined,
         createdAt: normalizeEpochMs(value.createdAt ?? value.created_at),
         goal: goal.slice(0, 1200),
         difficulty,
@@ -168,6 +169,7 @@ function normalizeTaskCard(raw: unknown): TaskCard | null {
         reviewVerdict: String(value.reviewVerdict ?? value.review_verdict ?? '').slice(0, 40),
         reviewIssues: normalizeStringList(value.reviewIssues ?? value.review_issues, 500),
         selfcheckItems: normalizeSelfcheckItems(value.selfcheckItems ?? value.selfcheck_items),
+        sessionId: String(value.sessionId ?? value.session_id ?? ''),
         reports: reportsRaw
             .map((item) => normalizeRunReport(item))
             .filter((item): item is RunReportRecord => !!item),
@@ -191,6 +193,7 @@ function serializeTaskPayload(data: Partial<TaskCard>): Record<string, unknown> 
 function serializeReportPayload(data: Record<string, unknown>): Record<string, unknown> {
     const payload: Record<string, unknown> = { ...data };
     if ('taskId' in data) payload.task_id = data.taskId;
+    if ('runId' in data) payload.run_id = data.runId;
     if ('createdAt' in data) payload.created_at = toEpochSeconds(data.createdAt);
     if ('totalSubtasks' in data) payload.total_subtasks = data.totalSubtasks;
     if ('totalRetries' in data) payload.total_retries = data.totalRetries;
@@ -254,6 +257,44 @@ interface ApiRequestOptions {
 // Health
 export const getHealth = () => apiFetch<{ status: string; plugins_loaded: number; clients_connected: number }>('/api/health');
 
+// Skills
+export const listSkills = () => apiFetch<{
+    skills: SkillLibraryRecord[];
+    counts: { total: number; builtin: number; community: number };
+    community_install_enabled: boolean;
+}>('/api/skills');
+
+export const installSkill = (data: {
+    source_url: string;
+    name?: string;
+    title?: string;
+    summary?: string;
+    category?: string;
+    node_types?: string[];
+    keywords?: string[];
+    tags?: string[];
+}) => apiFetch<{ skill: SkillLibraryRecord }>('/api/skills/install', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+});
+
+export const deleteSkill = (name: string) => apiFetch<{ success: boolean; skill_name: string }>(`/api/skills/${encodeURIComponent(name)}`, {
+    method: 'DELETE',
+});
+
+export const getOpenClawGuide = () => apiFetch<{
+    guide: string;
+    mcp_config: Record<string, unknown>;
+    ws_url: string;
+    api_base: string;
+    guide_url?: string;
+    deep_links?: {
+        open_app?: string;
+        run_goal_template?: string;
+    };
+}>('/api/openclaw-guide');
+
 // Models
 export const getModels = () => apiFetch<{ models: Array<{ id: string; provider: string; supports_tools: boolean }> }>('/api/models');
 
@@ -269,13 +310,47 @@ export const updateWorkflow = (id: string, data: unknown) => apiFetch(`/api/work
 export const deleteWorkflow = (id: string) => apiFetch(`/api/workflows/${id}`, { method: 'DELETE' });
 
 // Tasks
-export const getTasks = async (options?: ApiRequestOptions) => {
-    const result = await apiFetch<{ tasks: unknown[] }>('/api/tasks', { signal: options?.signal });
+export const getTasks = async (options?: ApiRequestOptions & { sessionId?: string }) => {
+    const url = options?.sessionId ? `/api/tasks?sessionId=${encodeURIComponent(options.sessionId)}` : '/api/tasks';
+    const result = await apiFetch<{ tasks: unknown[] }>(url, { signal: options?.signal });
     return {
         tasks: (Array.isArray(result.tasks) ? result.tasks : [])
             .map((item) => normalizeTaskCard(item))
             .filter((item): item is TaskCard => !!item),
     };
+};
+
+// G4: Board summary — tasks pre-joined with latest run + active node label
+export interface BoardSummaryTask extends TaskCard {
+    latestRun?: RunRecord | null;
+    activeNodeLabel?: string;
+    activeNodeLabels?: string[];
+}
+export const getBoardSummary = async (options?: ApiRequestOptions & { sessionId?: string }): Promise<{ tasks: BoardSummaryTask[] }> => {
+    const url = options?.sessionId ? `/api/board-summary?sessionId=${encodeURIComponent(options.sessionId)}` : '/api/board-summary';
+    const result = await apiFetch<{ tasks: unknown[] }>(url, { signal: options?.signal });
+    return {
+        tasks: (Array.isArray(result.tasks) ? result.tasks : []).reduce<BoardSummaryTask[]>((acc, item) => {
+            const task = normalizeTaskCard(item);
+            if (!task) return acc;
+            const raw = asRecord(item) || {};
+            acc.push({
+                ...task,
+                latestRun: asRecord(raw.latestRun) as unknown as RunRecord | null,
+                activeNodeLabel: String(raw.activeNodeLabel || ''),
+                activeNodeLabels: Array.isArray(raw.activeNodeLabels)
+                    ? raw.activeNodeLabels.map(String).filter(Boolean)
+                    : [],
+            });
+            return acc;
+        }, []),
+    };
+};
+
+export const deleteTasksBySession = async (sessionId: string): Promise<{ success: boolean; deleted: number }> => {
+    return apiFetch<{ success: boolean; deleted: number }>(`/api/tasks/session/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+    });
 };
 
 export const createTask = async (data: Partial<TaskCard>) => {

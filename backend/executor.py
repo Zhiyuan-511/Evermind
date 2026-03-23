@@ -129,26 +129,38 @@ class NodeExecutor:
             "node_name": normalized_node.get("name", normalized_node["type"])
         })
 
+        # P0-2: Emit phase heartbeat so frontend knows this node is alive
+        await self.emit("node_phase", {
+            "node_id": node_id,
+            "phase": "starting",
+            "node_name": normalized_node.get("name", normalized_node["type"]),
+        })
+        self._set_node_state(node, status="running", progress=5)
+
         try:
             result = await self._execute_node_core(normalized_node, input_data, normalized_nodes)
+            success = result.get("success", False)
             self._set_node_state(
                 node,
-                status="done" if result.get("success") else "error",
+                status="done" if success else "error",
                 progress=100,
                 output=result.get("output", ""),
             )
+            # Always add to done — even on failure — so downstream nodes aren't stuck forever
             done.add(node_id)
 
             await self.emit("node_complete", {
                 "node_id": node_id,
-                "success": result.get("success", False),
+                "success": success,
                 "output_preview": str(result.get("output", ""))[:500],
                 "tool_results": result.get("tool_results", [])
             })
             return result
 
         except Exception as e:
-            self._set_node_state(node, status="error", progress=100, output="")
+            self._set_node_state(node, status="error", progress=100, output=str(e))
+            # Must add to done even on exception — otherwise downstream nodes wait forever
+            done.add(node_id)
             await self.emit("node_error", {
                 "node_id": node_id,
                 "error": str(e)
@@ -156,7 +168,8 @@ class NodeExecutor:
             return {"success": False, "error": str(e)}
 
     async def _execute_node_core(self, node: Dict, input_data: str, all_nodes: Optional[List[Dict]] = None) -> Dict:
-        """Core node execution: resolve plugins → call AI bridge."""
+        """Core node execution: resolve plugins → call AI bridge.
+        For planner nodes: auto-retries with degraded prompt on failure."""
         node_type = node.get("type", "")
 
         enabled_plugins = node.get("plugins") or get_default_plugins_for_node(node_type, config=self.ai_bridge.config)
@@ -178,6 +191,42 @@ class NodeExecutor:
             model=node.get("model", "gpt-5.4"),
             on_progress=on_progress
         )
+
+        # P0-4: Planner auto-retry with degraded prompt on failure
+        if node_type == "planner" and not result.get("success"):
+            logger.warning(
+                f"[P0-4] Planner failed (error={result.get('error', '')[:100]}), "
+                f"retrying with degraded planner preset..."
+            )
+            await self.emit("node_phase", {
+                "node_id": node.get("id"),
+                "phase": "retrying_degraded",
+                "node_name": node.get("name", "planner"),
+            })
+
+            # Create a degraded copy of the node that uses the emergency planner preset
+            degraded_node = dict(node)
+            degraded_node["type"] = "planner_degraded"
+
+            degraded_result = await self.ai_bridge.execute(
+                node=degraded_node,
+                plugins=[],  # No plugins needed for pure JSON skeleton
+                input_data=input_data,
+                model=node.get("model", "gpt-5.4"),
+                on_progress=on_progress
+            )
+
+            if degraded_result.get("success"):
+                logger.info("[P0-4] Degraded planner succeeded!")
+                degraded_result["mode"] = "planner_degraded_retry"
+                return degraded_result
+            else:
+                logger.error(f"[P0-4] Degraded planner also failed: {degraded_result.get('error', '')[:100]}")
+                # Return original error for clarity
+                result["error"] = (
+                    f"Planner failed (original: {result.get('error', 'unknown')}). "
+                    f"Degraded retry also failed: {degraded_result.get('error', 'unknown')}"
+                )
 
         if node_type == "router" and result.get("success") and result.get("output") and all_nodes:
             try:

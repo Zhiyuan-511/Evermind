@@ -194,6 +194,13 @@ class TestRunStoreTransitions(_TempDirMixin, unittest.TestCase):
         result = self.store.transition_run(run["id"], "running")
         self.assertTrue(result["success"])
 
+    def test_waiting_selfcheck_to_done(self):
+        run = self.store.create_run({"task_id": "t1"})
+        self.store.transition_run(run["id"], "running")
+        self.store.transition_run(run["id"], "waiting_selfcheck")
+        result = self.store.transition_run(run["id"], "done")
+        self.assertTrue(result["success"])
+
 
 # ── RunStore persistence ──
 
@@ -273,6 +280,25 @@ class TestNodeExecutionStoreCRUD(_TempDirMixin, unittest.TestCase):
 
     def test_update_nonexistent(self):
         self.assertIsNone(self.store.update_node_execution("nope", {}))
+
+    def test_update_persists_loaded_skills_and_activity_log(self):
+        ne = self.store.create_node_execution({
+            "run_id": "r1",
+            "node_key": "builder",
+            "loaded_skills": ["gameplay-foundation", "pixel-asset-pipeline"],
+        })
+        updated = self.store.update_node_execution(ne["id"], {
+            "activity_log_append": [
+                {"ts": 1000, "msg": "已加载技能：gameplay-foundation, pixel-asset-pipeline", "type": "sys"},
+                {"ts": 2000, "msg": "生成文件：index.html", "type": "ok"},
+                {"ts": 2000, "msg": "生成文件：index.html", "type": "ok"},
+            ],
+            "reference_urls_append": ["https://example.com/a", "https://example.com/a", "https://example.com/b"],
+        })
+        self.assertEqual(updated["loaded_skills"], ["gameplay-foundation", "pixel-asset-pipeline"])
+        self.assertEqual(len(updated["activity_log"]), 2)
+        self.assertEqual(updated["activity_log"][0]["type"], "sys")
+        self.assertEqual(updated["reference_urls"], ["https://example.com/a", "https://example.com/b"])
 
 
 # ── NodeExecutionStore transitions ──

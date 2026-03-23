@@ -213,6 +213,9 @@ export function useRunManager({
     // Track taskId to reset on change
     const prevTaskIdRef = useRef<string | null>(null);
 
+    // §FIX-4: Track known run IDs so mergeNodeExecution can validate NEs without runs in closure
+    const knownRunIdsRef = useRef<Set<string>>(new Set());
+
     // Cleanup on unmount
     useEffect(() => {
         return () => {
@@ -257,7 +260,10 @@ export function useRunManager({
         try {
             const { runs: fetched } = await listRuns(taskId, { signal: controller.signal });
             if (controller.signal.aborted) return;
-            setRuns(sortRunsDesc(fetched || []));
+            const sorted = sortRunsDesc(fetched || []);
+            setRuns(sorted);
+            // §FIX-4: Track fetched run IDs so mergeNodeExecution can validate against them
+            for (const r of sorted) knownRunIdsRef.current.add(r.id);
         } catch (err: unknown) {
             if (controller.signal.aborted) return;
             if (err instanceof Error && err.name === 'AbortError') return;
@@ -279,6 +285,7 @@ export function useRunManager({
             // Reset state when task scope changes
             setSelectedRunId(null);
             setNodeExecutions([]);
+            knownRunIdsRef.current.clear();
             setError(null);
             if (taskId) {
                 fetchRuns();
@@ -317,8 +324,11 @@ export function useRunManager({
             const { nodeExecutions: fetched } = await listNodeExecutions(runId, { signal: controller.signal });
             if (controller.signal.aborted) return [];
             const sorted = sortNodeExecutionsAsc(fetched || []);
-            const merged = sortNodeExecutionsAsc(preserveEphemeralNodeFields(sorted, nodeExecutions));
-            setNodeExecutions(merged);
+            let merged: NodeExecutionRecord[] = sorted;
+            setNodeExecutions((prev) => {
+                merged = sortNodeExecutionsAsc(preserveEphemeralNodeFields(sorted, prev));
+                return merged;
+            });
             return merged;
         } catch (err: unknown) {
             if (controller.signal.aborted) return [];
@@ -330,7 +340,7 @@ export function useRunManager({
                 setNodesLoading(false);
             }
         }
-    }, [nodeExecutions]);
+    }, []);
 
     // ── Auto-poll ──
 
@@ -480,6 +490,7 @@ export function useRunManager({
     // ── Merge from external source (WS) ──
 
     const mergeRun = useCallback((run: RunMergePatch) => {
+        let shouldAutoSelect = false;
         setRuns((prev) => {
             const idx = prev.findIndex((r) => r.id === run.id);
             if (idx >= 0) {
@@ -501,14 +512,35 @@ export function useRunManager({
                 }
                 return prev;
             }
+            // §FIX-1: Accept runs even when no task is selected (taskId is null).
+            // Only reject if we HAVE a selected task AND the incoming run belongs
+            // to a different task.
             const inferredTaskId = run.task_id || taskId || '';
-            if (taskId && inferredTaskId !== taskId) return prev;
+            if (taskId && inferredTaskId && inferredTaskId !== taskId) return prev;
+            shouldAutoSelect = true;
             return sortRunsDesc([buildRunFromPatch(run, taskId), ...prev]);
         });
+        // §FIX-4: Track the newly inserted run so mergeNodeExecution can validate it
+        knownRunIdsRef.current.add(run.id);
+        // §FIX-2: Auto-select the newly merged run if nothing is currently selected.
+        if (shouldAutoSelect) {
+            setSelectedRunId((prev) => {
+                if (prev) return prev; // keep existing selection
+                return run.id;
+            });
+        }
     }, [taskId]);
 
+    // §FIX-3: Accept NEs for the selected run OR any known run when nothing is selected.
+    // During run_goal_ack, NEs arrive in the same tick as the run merge,
+    // before React re-renders the auto-select effects. Without this fix,
+    // all NEs are silently dropped and the canvas stays blank.
     const mergeNodeExecution = useCallback((ne: NodeExecutionMergePatch) => {
-        if (!selectedRunId || ne.run_id !== selectedRunId) return;
+        const matchesSelected = selectedRunId && ne.run_id === selectedRunId;
+        // When no run is selected yet, accept NEs only from runs we know about
+        // (§FIX-4: uses knownRunIdsRef to prevent leaks from unrelated runs)
+        const matchesKnownRun = !selectedRunId && knownRunIdsRef.current.has(ne.run_id);
+        if (!matchesSelected && !matchesKnownRun) return;
         setNodeExecutions((prev) => {
             const idx = prev.findIndex((n) => n.id === ne.id);
             if (idx >= 0) {

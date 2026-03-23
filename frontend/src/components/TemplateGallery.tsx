@@ -14,7 +14,7 @@ export interface TemplateDef {
 
 export const TEMPLATES: TemplateDef[] = [
     {
-        key: 'webdev', icon: '🌐',
+        key: 'webdev', icon: 'WEB',
         title_en: 'Web Development', title_zh: 'Web开发',
         desc_en: 'Full-stack web app with auto-testing and deployment.',
         desc_zh: '全栈Web应用，含自动测试和部署。',
@@ -28,7 +28,7 @@ export const TEMPLATES: TemplateDef[] = [
         edges: [[0, 1], [1, 2], [2, 3], [2, 4], [3, 5], [4, 5], [5, 6]],
     },
     {
-        key: 'artpipe', icon: '🎨',
+        key: 'artpipe', icon: 'ART',
         title_en: 'Art Asset Pipeline', title_zh: '美术管线',
         desc_en: 'Complete game art pipeline from generation to import.',
         desc_zh: '完整的游戏美术管线，从生成到导入。',
@@ -42,7 +42,7 @@ export const TEMPLATES: TemplateDef[] = [
         edges: [[0, 1], [0, 2], [0, 3], [1, 4], [2, 4], [3, 4], [4, 5], [5, 6]],
     },
     {
-        key: 'bugfix', icon: '🔧',
+        key: 'bugfix', icon: 'BUG',
         title_en: 'Automated Bug Fix', title_zh: '自动修Bug',
         desc_en: 'Auto-detect, analyze, fix, test, and commit bugs.',
         desc_zh: '自动检测、分析、修复、测试和提交Bug。',
@@ -56,7 +56,7 @@ export const TEMPLATES: TemplateDef[] = [
         edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [4, 6], [5, 7], [6, 7]],
     },
     {
-        key: 'vidprod', icon: '🎬',
+        key: 'vidprod', icon: 'VID',
         title_en: 'Video Production', title_zh: '视频制作',
         desc_en: 'Automated video editing workflow.',
         desc_zh: '自动化视频编辑工作流。',
@@ -69,7 +69,7 @@ export const TEMPLATES: TemplateDef[] = [
         edges: [[0, 1], [0, 2], [1, 3], [2, 3], [3, 4]],
     },
     {
-        key: 'fullstack', icon: '⭐',
+        key: 'fullstack', icon: 'PRO',
         title_en: 'Full Stack Pro', title_zh: '全栈Pro',
         desc_en: 'Enterprise full-stack with analysis and documentation.',
         desc_zh: '企业级全栈项目，含分析和文档。',
@@ -99,7 +99,7 @@ export default function TemplateGallery({ open, onClose, onLoadTemplate, lang }:
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-container modal-wide" onClick={e => e.stopPropagation()}>
                 <div className="modal-header">
-                    <h3>📂 {lang === 'zh' ? '模板库' : 'Template Gallery'}</h3>
+                    <h3>{lang === 'zh' ? '模板库' : 'Template Gallery'}</h3>
                     <button className="modal-close" onClick={onClose}>✕</button>
                 </div>
                 <div className="modal-body">

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useMemo, type CSSProperties } from 'react';
+import { useEffect, useState, useMemo, useCallback, type CSSProperties } from 'react';
 import { type TaskCard, type TaskStatus, type RunReportRecord, type NodeExecutionRecord, type RunRecord, type RunStatus, type SelfCheckItem, type ArtifactRecord, type ReviewDecisionRecord, type ValidationResultRecord, TASK_COLUMNS } from '@/lib/types';
 import RunTimeline from './RunTimeline';
 import NodeInspectorPanel from './NodeInspectorPanel';
@@ -11,6 +11,7 @@ interface TaskDetailPanelProps {
     task: TaskCard;
     lang: 'en' | 'zh';
     onClose: () => void;
+    onBoardClose?: () => void;
     onTransition: (newStatus: TaskStatus) => void;
     onUpdate: (data: Partial<TaskCard>) => Promise<void> | void;
     onRunActivity?: () => Promise<void> | void;
@@ -174,12 +175,13 @@ const FALLBACK_TEMPLATES: WorkflowTemplateSummary[] = [
     { id: 'pro', label: 'Pro (7 nodes)', description: '', nodeCount: 7 },
 ];
 
-export default function TaskDetailPanel({ task, lang, onClose, onTransition, onUpdate, onRunActivity, runReports }: TaskDetailPanelProps) {
+export default function TaskDetailPanel({ task, lang, onClose, onBoardClose, onTransition, onUpdate, onRunActivity, runReports }: TaskDetailPanelProps) {
     const [editingTitle, setEditingTitle] = useState(false);
     const [titleDraft, setTitleDraft] = useState(task.title);
     const [activeTab, setActiveTab] = useState<'overview' | 'runs' | 'review' | 'selfcheck' | 'agents'>('overview');
     const [inspectorNode, setInspectorNode] = useState<NodeExecutionRecord | null>(null);
     const [startingRun, setStartingRun] = useState(false);
+    const [inlineActionPending, setInlineActionPending] = useState<string | null>(null);
     const [selectedTemplate, setSelectedTemplate] = useState('standard');
     const [workflowTemplates, setWorkflowTemplates] = useState<WorkflowTemplateSummary[]>(FALLBACK_TEMPLATES);
     const [actionError, setActionError] = useState('');
@@ -187,7 +189,7 @@ export default function TaskDetailPanel({ task, lang, onClose, onTransition, onU
     const [tabArtifactsLoading, setTabArtifactsLoading] = useState(false);
     const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
 
-    const { runs, latestRun, fetchRuns, fetchNodeExecutions } = useRunContext();
+    const { runs, latestRun, fetchRuns, fetchNodeExecutions, transitionRun } = useRunContext();
     const runCount = Math.max(task.runIds?.length || 0, runs.length);
 
     // ── Run stats ──
@@ -212,6 +214,24 @@ export default function TaskDetailPanel({ task, lang, onClose, onTransition, onU
         setStartingRun(false);
         setActionError('');
     }, [task.id]);
+
+    // Escape key closes the board entirely
+    useEffect(() => {
+        const handleKeyDown = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.preventDefault();
+                if (inspectorNode) {
+                    setInspectorNode(null);
+                } else if (onBoardClose) {
+                    onBoardClose();
+                } else {
+                    onClose();
+                }
+            }
+        };
+        window.addEventListener('keydown', handleKeyDown);
+        return () => window.removeEventListener('keydown', handleKeyDown);
+    }, [inspectorNode, onBoardClose, onClose]);
 
     useEffect(() => {
         const controller = new AbortController();
@@ -324,6 +344,35 @@ export default function TaskDetailPanel({ task, lang, onClose, onTransition, onU
         return { total, passed, allPassed: total > 0 && passed === total };
     }, [effectiveSelfcheckItems]);
 
+    const handleInlineAction = useCallback(async (
+        actionKey: string,
+        nextTaskStatus: TaskStatus,
+        nextRunStatus?: RunStatus,
+    ) => {
+        try {
+            setInlineActionPending(actionKey);
+            setActionError('');
+            if (latestRun?.id && nextRunStatus && latestRun.status !== nextRunStatus) {
+                const updatedRun = await transitionRun(latestRun.id, nextRunStatus);
+                if (!updatedRun) {
+                    throw new Error(tr('运行状态更新失败，请稍后重试', 'Failed to update run state. Please try again.'));
+                }
+            }
+            await Promise.resolve(onTransition(nextTaskStatus));
+            await onRunActivity?.();
+            await fetchRuns();
+            if (latestRun?.id) {
+                await fetchNodeExecutions(latestRun.id);
+            }
+        } catch (e) {
+            setActionError(e instanceof Error
+                ? e.message
+                : tr('操作失败，请稍后重试', 'Action failed. Please try again.'));
+        } finally {
+            setInlineActionPending(null);
+        }
+    }, [fetchNodeExecutions, fetchRuns, latestRun?.id, latestRun?.status, onRunActivity, onTransition, transitionRun, tr]);
+
     return (
         <div
             style={{
@@ -409,7 +458,19 @@ export default function TaskDetailPanel({ task, lang, onClose, onTransition, onU
                     {task.relatedFiles?.length > 0 && <span>{task.relatedFiles.length} {tr('个文件', 'files')}</span>}
                     </div>
                 </div>
-                <button className="modal-close" onClick={onClose} style={{ marginTop: 2 }}>✕</button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                    {onBoardClose && (
+                        <button
+                            className="btn"
+                            onClick={onBoardClose}
+                            style={{ fontSize: 9, padding: '3px 8px' }}
+                            title={tr('关闭看板', 'Close Board')}
+                        >
+                            {tr('关闭看板', 'Close Board')}
+                        </button>
+                    )}
+                    <button className="modal-close" onClick={onClose} style={{ marginTop: 2 }}>✕</button>
+                </div>
             </div>
 
             {/* Progress */}
@@ -551,6 +612,33 @@ export default function TaskDetailPanel({ task, lang, onClose, onTransition, onU
                                             ))}
                                         </div>
                                     )}
+                                    {/* §2.6: Prominent Results CTA */}
+                                    <button
+                                        onClick={() => setActiveTab('runs')}
+                                        style={{
+                                            marginTop: 10,
+                                            width: '100%',
+                                            padding: '8px 0',
+                                            borderRadius: 8,
+                                            border: '1px solid rgba(34, 197, 94, 0.3)',
+                                            background: 'linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(34, 197, 94, 0.06))',
+                                            color: '#22c55e',
+                                            fontSize: 12,
+                                            fontWeight: 700,
+                                            cursor: 'pointer',
+                                            transition: 'all 0.2s ease',
+                                        }}
+                                        onMouseEnter={e => {
+                                            (e.target as HTMLElement).style.background = 'linear-gradient(135deg, rgba(34, 197, 94, 0.2), rgba(34, 197, 94, 0.1))';
+                                            (e.target as HTMLElement).style.transform = 'scale(1.02)';
+                                        }}
+                                        onMouseLeave={e => {
+                                            (e.target as HTMLElement).style.background = 'linear-gradient(135deg, rgba(34, 197, 94, 0.12), rgba(34, 197, 94, 0.06))';
+                                            (e.target as HTMLElement).style.transform = 'scale(1)';
+                                        }}
+                                    >
+                                        {tr('📦 查看运行详情', '📦 View Run Details')}
+                                    </button>
                                 </div>
                             </div>
                         )}
@@ -667,6 +755,63 @@ export default function TaskDetailPanel({ task, lang, onClose, onTransition, onU
 
                 {activeTab === 'review' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                        {/* P1-3: Inline Review Action Banner */}
+                        {latestRun?.status === 'waiting_review' && task.status === 'review' && (
+                            <div style={{
+                                padding: '10px 14px', borderRadius: 10,
+                                background: 'linear-gradient(135deg, rgba(245, 158, 11, 0.08), rgba(245, 158, 11, 0.03))',
+                                border: '1px solid rgba(245, 158, 11, 0.2)',
+                                display: 'flex', flexDirection: 'column', gap: 8,
+                            }}>
+                                <div style={{
+                                    display: 'flex', alignItems: 'center', gap: 6,
+                                    fontSize: 11, fontWeight: 700, color: '#f59e0b',
+                                }}>
+                                    <span style={{
+                                        width: 8, height: 8, borderRadius: '50%',
+                                        background: '#f59e0b',
+                                        boxShadow: '0 0 6px rgba(245, 158, 11, 0.4)',
+                                    }} />
+                                    {tr('需要审核', 'Review Required')}
+                                </div>
+                                <div style={{ fontSize: 9, color: 'var(--text2)', lineHeight: 1.5 }}>
+                                    {tr('审核代理已完成分析，请确认是否通过进入自检阶段。', 'The review agent has completed analysis. Approve to proceed to self-check or reject to rework.')}
+                                </div>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    <button
+                                        disabled={inlineActionPending !== null}
+                                        onClick={() => void handleInlineAction('review-approve', 'selfcheck', 'running')}
+                                        style={{
+                                            flex: 1, padding: '7px 0', fontSize: 10, fontWeight: 700,
+                                            borderRadius: 6, border: '1px solid rgba(34, 197, 94, 0.3)',
+                                            background: 'rgba(34, 197, 94, 0.1)', color: '#22c55e',
+                                            cursor: inlineActionPending ? 'wait' : 'pointer', transition: 'all 0.15s',
+                                            opacity: inlineActionPending ? 0.7 : 1,
+                                        }}
+                                    >
+                                        {inlineActionPending === 'review-approve'
+                                            ? tr('处理中…', 'Working…')
+                                            : tr('通过到自检', 'Approve to Self-Check')}
+                                    </button>
+                                    <button
+                                        disabled={inlineActionPending !== null}
+                                        onClick={() => void handleInlineAction('review-reject', 'executing', 'running')}
+                                        style={{
+                                            flex: 1, padding: '7px 0', fontSize: 10, fontWeight: 700,
+                                            borderRadius: 6, border: '1px solid rgba(239, 68, 68, 0.3)',
+                                            background: 'rgba(239, 68, 68, 0.08)', color: '#ef4444',
+                                            cursor: inlineActionPending ? 'wait' : 'pointer', transition: 'all 0.15s',
+                                            opacity: inlineActionPending ? 0.7 : 1,
+                                        }}
+                                    >
+                                        {inlineActionPending === 'review-reject'
+                                            ? tr('处理中…', 'Working…')
+                                            : tr('驳回并返工', 'Reject and Rework')}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         {/* Review Decision Card */}
                         <div className="s-section">
                             <div className="s-section-title" style={SECTION_TITLE_STYLE}>
@@ -795,6 +940,81 @@ export default function TaskDetailPanel({ task, lang, onClose, onTransition, onU
 
                 {activeTab === 'selfcheck' && (
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                        {/* P1-3: Inline Selfcheck Action Banner */}
+                        {task.status === 'selfcheck' && selfcheckStats.total > 0 && (
+                            <div style={{
+                                padding: '10px 14px', borderRadius: 10,
+                                background: selfcheckStats.allPassed
+                                    ? 'linear-gradient(135deg, rgba(34, 197, 94, 0.08), rgba(34, 197, 94, 0.02))'
+                                    : 'linear-gradient(135deg, rgba(239, 68, 68, 0.06), rgba(245, 158, 11, 0.03))',
+                                border: `1px solid ${selfcheckStats.allPassed ? 'rgba(34, 197, 94, 0.2)' : 'rgba(239, 68, 68, 0.15)'}`,
+                                display: 'flex', flexDirection: 'column', gap: 8,
+                            }}>
+                                <div style={{
+                                    display: 'flex', alignItems: 'center', gap: 6,
+                                    fontSize: 11, fontWeight: 700,
+                                    color: selfcheckStats.allPassed ? '#22c55e' : '#ef4444',
+                                }}>
+                                    <span style={{
+                                        width: 8, height: 8, borderRadius: '50%',
+                                        background: selfcheckStats.allPassed ? '#22c55e' : '#ef4444',
+                                        boxShadow: `0 0 6px ${selfcheckStats.allPassed ? 'rgba(34,197,94,0.4)' : 'rgba(239,68,68,0.4)'}`,
+                                    }} />
+                                    {selfcheckStats.allPassed
+                                        ? tr('全部检查通过', 'All Checks Passed')
+                                        : tr(`${selfcheckStats.total - selfcheckStats.passed} 项检查未通过`, `${selfcheckStats.total - selfcheckStats.passed} Check(s) Failed`)}
+                                </div>
+                                <div style={{ fontSize: 9, color: 'var(--text2)', lineHeight: 1.5 }}>
+                                    {selfcheckStats.allPassed
+                                        ? tr('所有自检项均已通过，任务可以标记为完成。', 'All self-check items passed. The task is ready to be marked as done.')
+                                        : tr('部分自检未通过，需要修复后重新验证。', 'Some checks failed. Fix issues and re-validate.')}
+                                </div>
+                                <div style={{ display: 'flex', gap: 8 }}>
+                                    {selfcheckStats.allPassed ? (
+                                        <button
+                                            disabled={inlineActionPending !== null}
+                                            onClick={() => void handleInlineAction(
+                                                'selfcheck-complete',
+                                                'done',
+                                                latestRun?.status === 'waiting_selfcheck' ? 'done' : undefined,
+                                            )}
+                                            style={{
+                                                flex: 1, padding: '7px 0', fontSize: 10, fontWeight: 700,
+                                                borderRadius: 6, border: '1px solid rgba(34, 197, 94, 0.3)',
+                                                background: 'rgba(34, 197, 94, 0.12)', color: '#22c55e',
+                                                cursor: inlineActionPending ? 'wait' : 'pointer', transition: 'all 0.15s',
+                                                opacity: inlineActionPending ? 0.7 : 1,
+                                            }}
+                                        >
+                                            {inlineActionPending === 'selfcheck-complete'
+                                                ? tr('处理中…', 'Working…')
+                                                : tr('标记完成', 'Mark Done')}
+                                        </button>
+                                    ) : (
+                                        <button
+                                            disabled={inlineActionPending !== null}
+                                            onClick={() => void handleInlineAction(
+                                                'selfcheck-rework',
+                                                'executing',
+                                                latestRun?.status === 'waiting_selfcheck' ? 'running' : undefined,
+                                            )}
+                                            style={{
+                                                flex: 1, padding: '7px 0', fontSize: 10, fontWeight: 700,
+                                                borderRadius: 6, border: '1px solid rgba(239, 68, 68, 0.3)',
+                                                background: 'rgba(239, 68, 68, 0.08)', color: '#ef4444',
+                                                cursor: inlineActionPending ? 'wait' : 'pointer', transition: 'all 0.15s',
+                                                opacity: inlineActionPending ? 0.7 : 1,
+                                            }}
+                                        >
+                                            {inlineActionPending === 'selfcheck-rework'
+                                                ? tr('处理中…', 'Working…')
+                                                : tr('返工修复', 'Rework')}
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
                         {/* Progress Summary */}
                         {tabArtifactsLoading ? (
                             <div style={{

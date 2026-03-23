@@ -9,7 +9,8 @@ interface SidebarProps {
     lang: 'en' | 'zh';
     onOpenArtifacts?: () => void;
     onOpenReports?: () => void;
-    onOpenTaskBoard?: () => void;
+    onOpenSkillsLibrary?: () => void;
+
 }
 
 const CATEGORIES = [
@@ -18,7 +19,7 @@ const CATEGORIES = [
     { key: 'media', label_en: 'Art & Media', label_zh: '美术 & 媒体', types: ['imagegen', 'bgremove', 'spritesheet', 'assetimport', 'merger'] },
 ];
 
-export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts, onOpenReports, onOpenTaskBoard }: SidebarProps) {
+export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts, onOpenReports, onOpenSkillsLibrary }: SidebarProps) {
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
     const [search, setSearch] = useState('');
     const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -62,7 +63,12 @@ export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts,
                         style={{ WebkitAppRegion: 'drag' } as React.CSSProperties}
                         ref={(el) => { if (el) el.style.setProperty('-webkit-app-region', 'drag'); }}
                     >
-                        <span className="text-lg">🧠</span>
+                        <span style={{
+                            width: 20, height: 20, borderRadius: 6,
+                            background: 'linear-gradient(135deg, #4f8fff, #6c5ce7)',
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 11, fontWeight: 800, color: '#fff',
+                        }}>E</span>
                         <span className="font-bold text-sm">Evermind</span>
                         <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 ml-auto">v2.0</span>
                     </div>
@@ -73,8 +79,8 @@ export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts,
                         <span className="text-[var(--text3)]">{connected ? (lang === 'zh' ? '后端已连接' : 'Backend connected') : (lang === 'zh' ? '离线模式' : 'Offline mode')}</span>
                     </div>
 
-                    {/* Quick Actions: Files / Reports / Task Board */}
-                    <div className="px-3 py-2.5 border-b border-white/5 flex gap-2">
+                    {/* Quick Actions: Files / Reports / Skills */}
+                    <div className="px-3 py-2.5 border-b border-white/5 grid" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
                         <button
                             className="btn text-[10px] flex-1"
                             onClick={onOpenArtifacts}
@@ -85,7 +91,7 @@ export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts,
                                 background: 'rgba(108,92,231,0.08)', border: '1px solid rgba(108,92,231,0.2)',
                             }}
                         >
-                            <span style={{ fontSize: 13 }}>📁</span> {lang === 'zh' ? '文件' : 'Files'}
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#6c5ce7', flexShrink: 0 }} /> {lang === 'zh' ? '文件' : 'Files'}
                         </button>
                         <button
                             className="btn text-[10px] flex-1"
@@ -97,19 +103,19 @@ export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts,
                                 background: 'rgba(0,206,201,0.08)', border: '1px solid rgba(0,206,201,0.2)',
                             }}
                         >
-                            <span style={{ fontSize: 13 }}>📑</span> {lang === 'zh' ? '报告' : 'Reports'}
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#00cec9', flexShrink: 0 }} /> {lang === 'zh' ? '报告' : 'Reports'}
                         </button>
                         <button
                             className="btn text-[10px] flex-1"
-                            onClick={onOpenTaskBoard}
-                            title={lang === 'zh' ? '打开任务看板' : 'Open task board'}
+                            onClick={onOpenSkillsLibrary}
+                            title={lang === 'zh' ? '打开技能库 / 资源库' : 'Open skills library'}
                             style={{
                                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
                                 padding: '7px 10px', borderRadius: 8,
                                 background: 'rgba(79,143,255,0.08)', border: '1px solid rgba(79,143,255,0.2)',
                             }}
                         >
-                            <span style={{ fontSize: 13 }}>📋</span> {lang === 'zh' ? '看板' : 'Board'}
+                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#4f8fff', flexShrink: 0 }} /> {lang === 'zh' ? '技能库' : 'Skills'}
                         </button>
                     </div>
 

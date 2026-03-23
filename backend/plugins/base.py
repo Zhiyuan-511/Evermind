@@ -112,7 +112,7 @@ NODE_DEFAULT_PLUGINS = {
     "browser":     ["browser"],
     "uicontrol":   ["ui_control"],
     # Art nodes
-    "imagegen":    [],
+    "imagegen":    ["file_ops", "comfyui"],
     "bgremove":    [],
     "videoedit":   [],
     "uidesign":    ["screenshot", "browser"],
@@ -127,6 +127,71 @@ def _is_truthy(value: Any) -> bool:
     if value is None:
         return False
     return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _get_config_value(config: Optional[Dict[str, Any]], *paths: str) -> Any:
+    if not isinstance(config, dict):
+        return None
+    for path in paths:
+        current: Any = config
+        found = True
+        for part in str(path).split("."):
+            if isinstance(current, dict) and part in current:
+                current = current.get(part)
+            else:
+                found = False
+                break
+        if found:
+            return current
+    return None
+
+
+def _get_config_string(config: Optional[Dict[str, Any]], *paths: str) -> str:
+    value = _get_config_value(config, *paths)
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def get_image_generation_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
+    """
+    Resolve the configured image-generation backend without assuming a default local
+    ComfyUI instance is actually available.
+    """
+    comfyui_url = _get_config_string(
+        config,
+        "comfyui_base_url",
+        "comfyui_url",
+        "image_generation.comfyui_url",
+        "image_generation.base_url",
+    )
+    workflow_template = _get_config_string(
+        config,
+        "comfyui_workflow_template",
+        "comfyui_template_path",
+        "image_generation.workflow_template",
+        "image_generation.comfyui_workflow_template",
+    )
+    if not comfyui_url:
+        comfyui_url = str(os.getenv("EVERMIND_COMFYUI_URL", "") or "").strip()
+    if not workflow_template:
+        workflow_template = str(os.getenv("EVERMIND_COMFYUI_WORKFLOW_TEMPLATE", "") or "").strip()
+    return {
+        "comfyui_url": comfyui_url.rstrip("/"),
+        "workflow_template": workflow_template,
+    }
+
+
+def is_image_generation_available(config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Only treat image generation as available when a real backend URL and workflow
+    template are both configured. Kimi text models do not count as image capability.
+    """
+    image_cfg = get_image_generation_config(config=config)
+    enabled_override = _get_config_value(config, "image_generation.enabled", "enable_image_generation")
+    if enabled_override is not None and not _is_truthy(enabled_override):
+        return False
+    return bool(image_cfg["comfyui_url"] and image_cfg["workflow_template"])
 
 
 def is_builder_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
@@ -144,11 +209,38 @@ def is_builder_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
     return _is_truthy(os.getenv("EVERMIND_BUILDER_ENABLE_BROWSER", "0"))
 
 
+def is_qa_computer_use_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Optional escalation path for reviewer/tester when browser-only validation is insufficient.
+    Stays OFF by default to avoid adding brittle tool choices when OpenAI CUA is unavailable.
+    """
+    if isinstance(config, dict):
+        for key in ("qa_enable_computer_use", "reviewer_tester_enable_computer_use"):
+            if key in config:
+                enabled = _is_truthy(config.get(key))
+                break
+        else:
+            enabled = _is_truthy(os.getenv("EVERMIND_QA_ENABLE_COMPUTER_USE", "0"))
+    else:
+        enabled = _is_truthy(os.getenv("EVERMIND_QA_ENABLE_COMPUTER_USE", "0"))
+    if not enabled:
+        return False
+    openai_key = ""
+    if isinstance(config, dict):
+        openai_key = str(config.get("openai_api_key", "") or "")
+    if not openai_key:
+        openai_key = str(os.getenv("OPENAI_API_KEY", "") or "")
+    return bool(openai_key.strip())
+
+
 def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]] = None) -> List[str]:
     defaults = list(NODE_DEFAULT_PLUGINS.get(node_type, []))
     if node_type == "builder" and is_builder_browser_enabled(config=config):
         if "browser" not in defaults:
             defaults.append("browser")
+    if node_type in ("reviewer", "tester") and is_qa_computer_use_enabled(config=config):
+        if "computer_use" not in defaults:
+            defaults.append("computer_use")
     return defaults
 
 

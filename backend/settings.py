@@ -43,6 +43,14 @@ DEFAULT_SETTINGS = {
         "kimi": "",
         "qwen": "",
     },
+    "api_bases": {
+        "openai": "",
+        "anthropic": "",
+        "gemini": "",
+        "deepseek": "",
+        "kimi": "",
+        "qwen": "",
+    },
     "workspace": str(Path.home() / "Desktop"),
     "output_dir": "/tmp/evermind_output",
     "privacy": {
@@ -66,6 +74,10 @@ DEFAULT_SETTINGS = {
     "shell_timeout": 30,
     "builder": {
         "enable_browser_search": False,
+    },
+    "image_generation": {
+        "comfyui_url": "",
+        "workflow_template": "",
     },
 }
 
@@ -206,6 +218,12 @@ def _merge_defaults(saved: Dict) -> Dict:
     return deep_merge_dicts(DEFAULT_SETTINGS, saved or {})
 
 
+def _write_integrity_hash(raw_bytes: bytes) -> None:
+    file_hash = hashlib.sha256(raw_bytes).hexdigest()
+    SETTINGS_HASH_FILE.write_text(file_hash, encoding="utf-8")
+    _chmod_600(SETTINGS_HASH_FILE)
+
+
 def load_settings() -> Dict:
     """Load settings from disk or return defaults, decrypting secrets in memory."""
     try:
@@ -219,8 +237,13 @@ def load_settings() -> Dict:
                 if expected_hash != actual_hash:
                     logger.warning(
                         "Settings file integrity check FAILED — file may have been tampered with. "
-                        "Expected hash does not match. Loading anyway, but review your config."
+                        "Expected hash does not match. Loading anyway, but review your config. "
+                        "Refreshing the local hash to prevent repeated noise."
                     )
+                    try:
+                        _write_integrity_hash(raw_bytes)
+                    except Exception as hash_err:
+                        logger.warning(f"Failed to refresh integrity hash after mismatch: {hash_err}")
 
             saved = json.loads(raw_bytes.decode("utf-8"))
 
@@ -276,10 +299,7 @@ def save_settings(settings: Dict) -> bool:
 
         # ── Write SHA-256 integrity hash ──
         try:
-            file_bytes = SETTINGS_FILE.read_bytes()
-            file_hash = hashlib.sha256(file_bytes).hexdigest()
-            SETTINGS_HASH_FILE.write_text(file_hash, encoding="utf-8")
-            _chmod_600(SETTINGS_HASH_FILE)
+            _write_integrity_hash(SETTINGS_FILE.read_bytes())
         except Exception as hash_err:
             logger.warning(f"Failed to write integrity hash: {hash_err}")
 
@@ -293,7 +313,7 @@ def save_settings(settings: Dict) -> bool:
 
 
 def apply_api_keys(settings: Dict):
-    """Set API keys as environment variables for LiteLLM."""
+    """Set API keys and base URLs as environment variables for LiteLLM."""
     key_map = {
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
@@ -301,6 +321,14 @@ def apply_api_keys(settings: Dict):
         "deepseek": "DEEPSEEK_API_KEY",
         "kimi": "KIMI_API_KEY",
         "qwen": "QWEN_API_KEY",
+    }
+    base_map = {
+        "openai": "OPENAI_API_BASE",
+        "anthropic": "ANTHROPIC_API_BASE",
+        "gemini": "GEMINI_API_BASE",
+        "deepseek": "DEEPSEEK_API_BASE",
+        "kimi": "KIMI_API_BASE",
+        "qwen": "QWEN_API_BASE",
     }
     count = 0
     for name, env_key in key_map.items():
@@ -310,7 +338,16 @@ def apply_api_keys(settings: Dict):
             count += 1
         else:
             os.environ.pop(env_key, None)
-    logger.info(f"Applied {count} API keys to environment")
+    # Apply relay/proxy base URLs
+    base_count = 0
+    for name, env_key in base_map.items():
+        val = settings.get("api_bases", {}).get(name, "")
+        if val:
+            os.environ[env_key] = val
+            base_count += 1
+        else:
+            os.environ.pop(env_key, None)
+    logger.info(f"Applied {count} API keys and {base_count} base URLs to environment")
     return count
 
 

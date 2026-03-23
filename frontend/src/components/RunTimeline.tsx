@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef, type CSSProperties } from 're
 import type { RunRecord, NodeExecutionRecord, RunStatus, NodeExecutionStatus } from '@/lib/types';
 import { useRunContext } from '@/contexts/TaskRunProvider';
 import { cancelRun as cancelRunApi } from '@/lib/api';
+import { buildReadableCurrentWork } from '@/lib/nodeOutputHumanizer';
 
 interface RunTimelineProps {
     taskId: string;
@@ -99,7 +100,7 @@ export default function RunTimeline({
     const [cancellingRunId, setCancellingRunId] = useState<string | null>(null);
     const refreshKeyRef = useRef(refreshKey);
     const autoExpandedTaskRef = useRef<string | null>(null);
-    const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
+    const tr = useCallback((zh: string, en: string) => (lang === 'zh' ? zh : en), [lang]);
     const {
         runs,
         selectedRun,
@@ -422,10 +423,28 @@ export default function RunTimeline({
                                                                 marginTop: 3, lineHeight: 1.4, maxHeight: 40, overflow: 'hidden',
                                                                 fontStyle: ne.status === 'running' ? 'italic' : 'normal',
                                                             }}>
-                                                                {ne.status === 'running' ? '> ' : ''}
-                                                                {ne.output_summary.length > 100
-                                                                    ? ne.output_summary.slice(0, 100) + '…'
-                                                                    : ne.output_summary}
+                                                                {(() => {
+                                                                    const readable = buildReadableCurrentWork({
+                                                                        lang,
+                                                                        nodeType: ne.node_key || 'builder',
+                                                                        status: ne.status,
+                                                                        phase: ne.phase || '',
+                                                                        taskDescription: ne.input_summary || '',
+                                                                        loadedSkills: Array.isArray(ne.loaded_skills) ? ne.loaded_skills : [],
+                                                                        outputSummary: ne.output_summary,
+                                                                        lastOutput: ne.output_summary,
+                                                                        logs: Array.isArray(ne.activity_log) ? ne.activity_log : [],
+                                                                    }).replace(/\s*\n+\s*/g, ' ');
+                                                                    const preview = readable || ne.output_summary;
+                                                                    return (
+                                                                        <>
+                                                                            {ne.status === 'running' ? '> ' : ''}
+                                                                            {preview.length > 100
+                                                                                ? preview.slice(0, 100) + '…'
+                                                                                : preview}
+                                                                        </>
+                                                                    );
+                                                                })()}
                                                             </div>
                                                         )}
                                                         {ne.error_message && (

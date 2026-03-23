@@ -1,8 +1,9 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import type { NodeExecutionRecord, ArtifactRecord, NodeExecutionStatus, ArtifactType } from '@/lib/types';
+import type { NodeExecutionRecord, ArtifactRecord, NodeExecutionStatus } from '@/lib/types';
 import { listArtifacts, getNodeExecution, retryNodeExecution } from '@/lib/api';
+import { buildReadableCurrentWork, formatSkillLabel, getStructuredOutputSections } from '@/lib/nodeOutputHumanizer';
 
 interface NodeInspectorPanelProps {
     nodeExecution: NodeExecutionRecord;
@@ -13,29 +14,29 @@ interface NodeInspectorPanelProps {
 
 const MAX_NODE_RETRY_COUNT = 5;
 
-const STATUS_META: Record<NodeExecutionStatus, { icon: string; color: string; label_en: string; label_zh: string }> = {
-    queued:            { icon: '⏳', color: '#64748b', label_en: 'Queued',      label_zh: '排队' },
-    running:           { icon: '⚡', color: '#3b82f6', label_en: 'Running',     label_zh: '运行中' },
-    passed:            { icon: '✅', color: '#22c55e', label_en: 'Passed',      label_zh: '通过' },
-    failed:            { icon: '❌', color: '#ef4444', label_en: 'Failed',      label_zh: '失败' },
-    blocked:           { icon: '🔒', color: '#f59e0b', label_en: 'Blocked',     label_zh: '阻塞' },
-    waiting_approval:  { icon: '✋', color: '#a855f7', label_en: 'Awaiting Approval', label_zh: '等待审批' },
-    skipped:           { icon: '⏭',  color: '#6b7280', label_en: 'Skipped',     label_zh: '已跳过' },
-    cancelled:         { icon: '🚫', color: '#78716c', label_en: 'Cancelled',   label_zh: '已取消' },
+const STATUS_META: Record<NodeExecutionStatus, { color: string; label_en: string; label_zh: string }> = {
+    queued:            { color: '#64748b', label_en: 'Queued',      label_zh: '排队' },
+    running:           { color: '#3b82f6', label_en: 'Running',     label_zh: '运行中' },
+    passed:            { color: '#22c55e', label_en: 'Passed',      label_zh: '通过' },
+    failed:            { color: '#ef4444', label_en: 'Failed',      label_zh: '失败' },
+    blocked:           { color: '#f59e0b', label_en: 'Blocked',     label_zh: '阻塞' },
+    waiting_approval:  { color: '#a855f7', label_en: 'Awaiting Approval', label_zh: '等待审批' },
+    skipped:           { color: '#6b7280', label_en: 'Skipped',     label_zh: '已跳过' },
+    cancelled:         { color: '#78716c', label_en: 'Cancelled',   label_zh: '已取消' },
 };
 
-const ARTIFACT_TYPE_META: Record<string, { icon: string; label_en: string; label_zh: string }> = {
-    changed_files:    { icon: '📝', label_en: 'Changed Files',    label_zh: '变更文件' },
-    diff_summary:     { icon: '📊', label_en: 'Diff Summary',     label_zh: '差异摘要' },
-    report:           { icon: '📋', label_en: 'Report',           label_zh: '报告' },
-    review_result:    { icon: '👁', label_en: 'Review Result',    label_zh: '审核结果' },
-    test_output:      { icon: '🧪', label_en: 'Test Output',      label_zh: '测试输出' },
-    build_output:     { icon: '🔨', label_en: 'Build Output',     label_zh: '构建输出' },
-    run_summary:      { icon: '📄', label_en: 'Run Summary',      label_zh: '运行摘要' },
-    risk_report:      { icon: '⚠️', label_en: 'Risk Report',      label_zh: '风险报告' },
-    deployment_notes: { icon: '🚀', label_en: 'Deploy Notes',     label_zh: '部署说明' },
-    raw_log:          { icon: '📜', label_en: 'Raw Log',           label_zh: '原始日志' },
-    preview_ref:      { icon: '🖼', label_en: 'Preview',          label_zh: '预览' },
+const ARTIFACT_TYPE_META: Record<string, { mark: string; label_en: string; label_zh: string }> = {
+    changed_files:    { mark: 'CF', label_en: 'Changed Files',    label_zh: '变更文件' },
+    diff_summary:     { mark: 'DI', label_en: 'Diff Summary',     label_zh: '差异摘要' },
+    report:           { mark: 'RP', label_en: 'Report',           label_zh: '报告' },
+    review_result:    { mark: 'RV', label_en: 'Review Result',    label_zh: '审核结果' },
+    test_output:      { mark: 'TS', label_en: 'Test Output',      label_zh: '测试输出' },
+    build_output:     { mark: 'BD', label_en: 'Build Output',     label_zh: '构建输出' },
+    run_summary:      { mark: 'RS', label_en: 'Run Summary',      label_zh: '运行摘要' },
+    risk_report:      { mark: 'RK', label_en: 'Risk Report',      label_zh: '风险报告' },
+    deployment_notes: { mark: 'DP', label_en: 'Deploy Notes',     label_zh: '部署说明' },
+    raw_log:          { mark: 'LG', label_en: 'Raw Log',           label_zh: '原始日志' },
+    preview_ref:      { mark: 'PV', label_en: 'Preview',          label_zh: '预览' },
 };
 
 function formatTs(epochSec: number, lang: 'en' | 'zh'): string {
@@ -70,6 +71,29 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
     const sMeta = STATUS_META[ne.status] || STATUS_META.queued;
     const retryLimitReached = ne.retry_count >= MAX_NODE_RETRY_COUNT;
     const retryBudgetRemaining = Math.max(0, MAX_NODE_RETRY_COUNT - ne.retry_count);
+    const readableOutputSummary = ne.output_summary
+        ? buildReadableCurrentWork({
+            lang,
+            nodeType: ne.node_key || 'builder',
+            status: ne.status,
+            phase: ne.phase || '',
+            taskDescription: ne.input_summary || '',
+            loadedSkills: Array.isArray(ne.loaded_skills) ? ne.loaded_skills : [],
+            outputSummary: ne.output_summary,
+            lastOutput: ne.output_summary,
+            logs: Array.isArray(ne.activity_log) ? ne.activity_log : [],
+        })
+        : '';
+    const outputSections = ne.output_summary
+        ? getStructuredOutputSections(ne.output_summary, {
+            lang,
+            nodeType: ne.node_key || 'builder',
+            status: ne.status,
+        })
+        : [];
+    const loadedSkills = Array.isArray(ne.loaded_skills) ? ne.loaded_skills : [];
+    const activityLog = Array.isArray(ne.activity_log) ? ne.activity_log : [];
+    const referenceUrls = Array.isArray(ne.reference_urls) ? ne.reference_urls : [];
 
     useEffect(() => {
         currentNodeIdRef.current = initNe.id;
@@ -157,15 +181,23 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                             padding: '2px 8px', borderRadius: 6, fontSize: 10, fontWeight: 700,
                             background: `${sMeta.color}15`, color: sMeta.color,
                             border: `1px solid ${sMeta.color}25`,
+                            display: 'inline-flex', alignItems: 'center', gap: 6,
                         }}>
-                            {sMeta.icon} {lang === 'zh' ? sMeta.label_zh : sMeta.label_en}
+                            <span style={{
+                                width: 7,
+                                height: 7,
+                                borderRadius: '50%',
+                                background: sMeta.color,
+                                boxShadow: `0 0 8px ${sMeta.color}55`,
+                            }} />
+                            {lang === 'zh' ? sMeta.label_zh : sMeta.label_en}
                         </span>
                         {ne.assigned_model && (
                             <span style={{
                                 padding: '2px 6px', borderRadius: 4, fontSize: 9,
                                 background: 'var(--glass)', color: 'var(--text2)',
                             }}>
-                                🤖 {ne.assigned_model}
+                                {ne.assigned_model}
                             </span>
                         )}
                         {ne.assigned_provider && (
@@ -178,7 +210,7 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                         )}
                     </div>
                     <h3 style={{ fontSize: 14, fontWeight: 700, color: 'var(--text1)', lineHeight: 1.3 }}>
-                        🔍 {ne.node_label || ne.node_key}
+                        {ne.node_label || ne.node_key}
                     </h3>
                     <div style={{ fontSize: 8, color: 'var(--text3)', marginTop: 3 }}>
                         ID: {ne.id}
@@ -223,7 +255,7 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                     }}>
                         {ne.retried_from_id && (
                             <div style={{ fontSize: 9, color: 'var(--text2)', marginBottom: 4 }}>
-                                ↩ {tr('重试来源', 'Retried From')}: <span style={{ fontFamily: 'var(--font-mono), monospace' }}>{ne.retried_from_id}</span>
+                                {tr('重试来源', 'Retried From')}: <span style={{ fontFamily: 'var(--font-mono), monospace' }}>{ne.retried_from_id}</span>
                             </div>
                         )}
                         <div style={{ fontSize: 9, color: retryLimitReached ? '#f59e0b' : 'var(--text3)' }}>
@@ -243,19 +275,18 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                         fontSize: 10,
                         lineHeight: 1.5,
                     }}>
-                        ⚠ {tr('该节点已达到最大重试次数，需新建运行或手动介入', 'This node has reached the retry limit. Start a new run or intervene manually.')}
+                        {tr('该节点已达到最大重试次数，需新建运行或手动介入', 'This node has reached the retry limit. Start a new run or intervene manually.')}
                     </div>
                 )}
 
                 {/* Input Summary */}
                 {ne.input_summary && (
                     <div className="s-section" style={{ marginBottom: 12 }}>
-                        <div className="s-section-title">📥 {tr('输入摘要', 'Input Summary')}</div>
+                        <div className="s-section-title">{tr('输入摘要', 'Input Summary')}</div>
                         <div style={{
                             fontSize: 10, color: 'var(--text2)', lineHeight: 1.6,
                             background: 'var(--glass)', borderRadius: 8, padding: '8px 10px',
                             border: '1px solid var(--glass-border)',
-                            fontFamily: 'var(--font-mono), monospace',
                             whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                             maxHeight: 150, overflow: 'auto',
                         }}>
@@ -267,16 +298,121 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                 {/* Output Summary */}
                 {ne.output_summary && (
                     <div className="s-section" style={{ marginBottom: 12 }}>
-                        <div className="s-section-title">📤 {tr('输出摘要', 'Output Summary')}</div>
+                        <div className="s-section-title">{tr('输出摘要', 'Output Summary')}</div>
                         <div style={{
-                            fontSize: 10, color: 'var(--text2)', lineHeight: 1.6,
+                            fontSize: 10, color: 'var(--text2)', lineHeight: 1.7,
                             background: 'var(--glass)', borderRadius: 8, padding: '8px 10px',
                             border: '1px solid var(--glass-border)',
-                            fontFamily: 'var(--font-mono), monospace',
                             whiteSpace: 'pre-wrap', wordBreak: 'break-word',
                             maxHeight: 200, overflow: 'auto',
                         }}>
-                            {ne.output_summary}
+                            {readableOutputSummary}
+                        </div>
+                        {outputSections.length > 0 && (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 8 }}>
+                                {outputSections.map((section) => (
+                                    <div
+                                        key={section.title}
+                                        style={{
+                                            borderRadius: 8,
+                                            padding: '8px 10px',
+                                            background: 'rgba(255,255,255,0.03)',
+                                            border: '1px solid var(--glass-border)',
+                                        }}
+                                    >
+                                        <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--text1)', marginBottom: 4 }}>
+                                            {section.title}
+                                        </div>
+                                        <div style={{
+                                            fontSize: 9,
+                                            color: 'var(--text2)',
+                                            lineHeight: 1.6,
+                                            whiteSpace: 'pre-wrap',
+                                            wordBreak: 'break-word',
+                                        }}>
+                                            {section.text}
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {loadedSkills.length > 0 && (
+                    <div className="s-section" style={{ marginBottom: 12 }}>
+                        <div className="s-section-title">{tr('已加载技能', 'Loaded Skills')}</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                            {loadedSkills.map((skill) => (
+                                <span
+                                    key={skill}
+                                    style={{
+                                        padding: '4px 8px',
+                                        borderRadius: 999,
+                                        fontSize: 9,
+                                        color: '#e9d5ff',
+                                        background: 'rgba(168,85,247,0.12)',
+                                        border: '1px solid rgba(168,85,247,0.2)',
+                                    }}
+                                >
+                                    {formatSkillLabel(skill)}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {referenceUrls.length > 0 && (
+                    <div className="s-section" style={{ marginBottom: 12 }}>
+                        <div className="s-section-title">{tr('参考网址', 'Reference URLs')}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 160, overflow: 'auto' }}>
+                            {referenceUrls.map((url) => (
+                                <a
+                                    key={url}
+                                    href={url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{
+                                        fontSize: 9,
+                                        color: '#93c5fd',
+                                        lineHeight: 1.5,
+                                        wordBreak: 'break-all',
+                                        textDecoration: 'none',
+                                        padding: '7px 9px',
+                                        borderRadius: 8,
+                                        background: 'var(--glass)',
+                                        border: '1px solid var(--glass-border)',
+                                    }}
+                                >
+                                    {url}
+                                </a>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
+                {activityLog.length > 0 && (
+                    <div className="s-section" style={{ marginBottom: 12 }}>
+                        <div className="s-section-title">{tr('执行历史', 'Execution History')}</div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxHeight: 220, overflow: 'auto' }}>
+                            {activityLog.map((item, index) => (
+                                <div
+                                    key={`${item.ts}-${index}`}
+                                    style={{
+                                        borderRadius: 8,
+                                        padding: '8px 10px',
+                                        background: 'var(--glass)',
+                                        border: '1px solid var(--glass-border)',
+                                    }}
+                                >
+                                    <div style={{ fontSize: 8, color: 'var(--text3)', marginBottom: 4 }}>
+                                        {formatTs(item.ts, lang)}
+                                    </div>
+                                    <div style={{ fontSize: 9, color: 'var(--text2)', lineHeight: 1.6, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                        {item.msg}
+                                    </div>
+                                </div>
+                            ))}
                         </div>
                     </div>
                 )}
@@ -284,7 +420,7 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                 {/* Error Message */}
                 {ne.error_message && (
                     <div className="s-section" style={{ marginBottom: 12 }}>
-                        <div className="s-section-title">❌ {tr('错误信息', 'Error Message')}</div>
+                        <div className="s-section-title">{tr('错误信息', 'Error Message')}</div>
                         <div style={{
                             fontSize: 10, color: '#ef4444', lineHeight: 1.6,
                             background: 'rgba(239, 68, 68, 0.06)', borderRadius: 8,
@@ -301,7 +437,7 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                 {/* Artifacts */}
                 <div className="s-section">
                     <div className="s-section-title" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                        📦 {tr('产出物', 'Artifacts')}
+                        {tr('产出物', 'Artifacts')}
                         {artLoading && <span style={{ fontSize: 8, color: 'var(--text3)' }}>({tr('加载中…', 'loading…')})</span>}
                     </div>
 
@@ -316,7 +452,7 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                     ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                             {artifacts.map((art) => {
-                                const aMeta = ARTIFACT_TYPE_META[art.artifact_type] || { icon: '📄', label_en: art.artifact_type, label_zh: art.artifact_type };
+                                const aMeta = ARTIFACT_TYPE_META[art.artifact_type] || { mark: 'DOC', label_en: art.artifact_type, label_zh: art.artifact_type };
                                 const isExpanded = expandedArt === art.id;
 
                                 return (
@@ -335,7 +471,20 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                                                 display: 'flex', alignItems: 'center', gap: 6,
                                             }}
                                         >
-                                            <span style={{ fontSize: 12 }}>{aMeta.icon}</span>
+                                            <span style={{
+                                                minWidth: 24,
+                                                height: 18,
+                                                borderRadius: 6,
+                                                border: '1px solid var(--glass-border)',
+                                                background: 'var(--glass)',
+                                                display: 'inline-flex',
+                                                alignItems: 'center',
+                                                justifyContent: 'center',
+                                                fontSize: 8,
+                                                fontWeight: 700,
+                                                color: 'var(--text2)',
+                                                letterSpacing: '0.06em',
+                                            }}>{aMeta.mark}</span>
                                             <div style={{ flex: 1, minWidth: 0 }}>
                                                 <div style={{
                                                     fontSize: 10, fontWeight: 600, color: 'var(--text1)',

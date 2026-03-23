@@ -26,8 +26,8 @@ function agentLabel(agent: string, lang: 'en' | 'zh'): string {
 function statusLabel(status: string, lang: 'en' | 'zh'): string {
     if (lang !== 'zh') return status;
     const map: Record<string, string> = {
-        completed: '✅ 已完成', failed: '❌ 失败',
-        running: '⏳ 进行中', retrying: '🔄 重试中', unknown: '❓ 未知',
+        completed: '已完成', failed: '失败',
+        running: '进行中', retrying: '重试中', unknown: '未知',
     };
     return map[status.toLowerCase()] || status;
 }
@@ -258,8 +258,8 @@ function reportMarkdown(report: RunReportRecord, lang: 'en' | 'zh'): string {
         lines.push(`# Evermind 执行报告\n`);
         lines.push(`## 任务目标\n${report.goal}\n`);
         lines.push(`## 执行概览`);
-        lines.push(`- 模式：${report.difficulty === 'simple' ? '⚡ 极速' : report.difficulty === 'pro' ? '💎 深度' : '🔥 平衡'}`);
-        lines.push(`- 结果：${report.success ? '✅ 成功' : '❌ 失败'}`);
+        lines.push(`- 模式：${report.difficulty === 'simple' ? '极速' : report.difficulty === 'pro' ? '深度' : '平衡'}`);
+        lines.push(`- 结果：${report.success ? '成功' : '失败'}`);
         lines.push(`- 完成：${report.completed}/${report.totalSubtasks} 个节点`);
         lines.push(`- 耗时：${formatDuration(report.durationSeconds, 'zh')}`);
         if (report.totalRetries > 0) lines.push(`- 重试：${report.totalRetries} 次`);
@@ -283,8 +283,8 @@ function reportMarkdown(report: RunReportRecord, lang: 'en' | 'zh'): string {
         lines.push(`# Evermind Run Report\n`);
         lines.push(`## Goal\n${report.goal}\n`);
         lines.push(`## Summary`);
-        lines.push(`- Mode: ${report.difficulty === 'simple' ? '⚡ Blitz' : report.difficulty === 'pro' ? '💎 Deep' : '🔥 Balanced'}`);
-        lines.push(`- Result: ${report.success ? '✅ Success' : '❌ Failed'}`);
+        lines.push(`- Mode: ${report.difficulty === 'simple' ? 'Blitz' : report.difficulty === 'pro' ? 'Deep' : 'Balanced'}`);
+        lines.push(`- Result: ${report.success ? 'Success' : 'Failed'}`);
         lines.push(`- Completed: ${report.completed}/${report.totalSubtasks} nodes`);
         lines.push(`- Duration: ${formatDuration(report.durationSeconds, 'en')}`);
         if (report.totalRetries > 0) lines.push(`- Retries: ${report.totalRetries}`);
@@ -319,9 +319,9 @@ function downloadText(content: string, filename: string) {
 }
 
 const DIFFICULTY_LABEL: Record<string, Record<string, string>> = {
-    simple:   { en: '⚡ Blitz',    zh: '⚡ 极速' },
-    standard: { en: '🔥 Balanced', zh: '🔥 平衡' },
-    pro:      { en: '💎 Deep',     zh: '💎 深度' },
+    simple:   { en: 'Blitz',    zh: '极速' },
+    standard: { en: 'Balanced', zh: '平衡' },
+    pro:      { en: 'Deep',     zh: '深度' },
 };
 
 export default function ReportsModal({
@@ -359,10 +359,10 @@ export default function ReportsModal({
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-container" onClick={(e) => e.stopPropagation()} style={{ width: 860, maxWidth: '92vw' }}>
                 <div className="modal-header">
-                    <h3>📑 {t('Report Center', '报告中心')}</h3>
+                    <h3>{t('Report Center', '报告中心')}</h3>
                     <div style={{ display: 'flex', gap: 8 }}>
                         <button className="btn text-[11px]" onClick={onClearReports} disabled={!reports.length}>
-                            🧹 {t('Clear All', '清空全部')}
+                            {t('Clear All', '清空全部')}
                         </button>
                         <button className="modal-close" onClick={onClose}>✕</button>
                     </div>
@@ -405,7 +405,7 @@ export default function ReportsModal({
                                     }}
                                 >
                                     <div style={{ fontSize: 9, color: report.success ? 'var(--green)' : 'var(--red)', marginBottom: 2 }}>
-                                        {report.success ? '✅' : '❌'} {report.completed}/{report.totalSubtasks} · {modeLabel}
+                                        {report.success ? '✓' : '✗'} {report.completed}/{report.totalSubtasks} · {modeLabel}
                                     </div>
                                     <div style={{
                                         fontSize: 10, color: 'var(--text1)', fontWeight: 700, marginBottom: 2,
@@ -433,7 +433,7 @@ export default function ReportsModal({
                                 {/* Header */}
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
                                     <div style={{ fontSize: 15, fontWeight: 700, flex: 1, color: 'var(--text1)', minWidth: 120 }}>
-                                        {active.success ? '✅' : '❌'} {t('Execution Report', '执行报告')}
+                                        {active.success ? '✓' : '✗'} {t('Execution Report', '执行报告')}
                                     </div>
                                     <button
                                         className="btn text-[10px]"
@@ -443,10 +443,10 @@ export default function ReportsModal({
                                             downloadText(md, file);
                                         }}
                                     >
-                                        📤 {t('Export', '导出')}
+                                        {t('Export', '导出')}
                                     </button>
                                     <button className="btn text-[10px]" onClick={() => onDeleteReport(active.id)}>
-                                        🗑 {t('Delete', '删除')}
+                                        {t('Delete', '删除')}
                                     </button>
                                 </div>
 
@@ -457,7 +457,7 @@ export default function ReportsModal({
                                     background: 'rgba(108,92,231,0.06)', border: '1px solid rgba(108,92,231,0.15)',
                                     lineHeight: 1.55, wordBreak: 'break-word' as const,
                                 }}>
-                                    {t('🎯 Goal: ', '🎯 目标：')}{active.goal}
+                                    {t('Goal: ', '目标：')}{active.goal}
                                 </div>
 
                                 {/* Overview stats */}
@@ -466,7 +466,7 @@ export default function ReportsModal({
                                 }}>
                                     {[
                                         { label: t('Mode', '模式'), value: DIFFICULTY_LABEL[active.difficulty]?.[lang] || active.difficulty },
-                                        { label: t('Result', '结果'), value: active.success ? t('✅ OK', '✅ 成功') : t('❌ Fail', '❌ 失败') },
+                                        { label: t('Result', '结果'), value: active.success ? t('OK', '成功') : t('Fail', '失败') },
                                         { label: t('Nodes', '节点'), value: `${active.completed}/${active.totalSubtasks}` },
                                         { label: t('Duration', '耗时'), value: formatDuration(active.durationSeconds, lang) },
                                     ].map((item) => (
@@ -489,14 +489,14 @@ export default function ReportsModal({
                                             onClick={() => window.open(active.previewUrl, '_blank', 'noopener,noreferrer')}
                                             style={{ padding: '8px 16px' }}
                                         >
-                                            🌐 {t('Open Preview', '打开预览')}
+                                            {t('Open Preview', '打开预览')}
                                         </button>
                                     </div>
                                 )}
 
                                 {/* Agent details — clickable to expand */}
                                 <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text1)', marginBottom: 8 }}>
-                                    {t('📋 Execution Details', '📋 执行详情')}
+                                    {t('Execution Details', '执行详情')}
                                     <span style={{ fontSize: 10, fontWeight: 400, color: 'var(--text3)', marginLeft: 8 }}>
                                         {t('(click to expand)', '（点击展开详情）')}
                                     </span>
@@ -541,14 +541,14 @@ export default function ReportsModal({
                                                     {narrative.workSummary.length > 0 && (
                                                         <div style={{ marginTop: 4, fontSize: 10, color: 'var(--text3)', lineHeight: 1.6 }}>
                                                             {narrative.workSummary.slice(0, 3).map((item, idx) => (
-                                                                <div key={`ws-${idx}`}>📌 {item}</div>
+                                                                <div key={`ws-${idx}`}>• {item}</div>
                                                             ))}
                                                         </div>
                                                     )}
                                                 </div>
                                                 {st.retries > 0 && (
                                                     <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 3, paddingLeft: 20 }}>
-                                                        🔄 {lang === 'zh' ? `重试 ${st.retries} 次` : `${st.retries} retries`}
+                                                        {lang === 'zh' ? `重试 ${st.retries} 次` : `${st.retries} retries`}
                                                     </div>
                                                 )}
 

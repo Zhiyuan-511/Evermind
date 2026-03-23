@@ -3,10 +3,11 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
+import agent_skills
 import server
 import task_store
 
@@ -106,10 +107,13 @@ class TaskApiTestCase(unittest.TestCase):
     def test_report_endpoints_accept_and_return_camel_case(self):
         created = asyncio.run(server.create_task({"title": "Run Owner"}))
         task_id = created["task"]["id"]
+        created_run = asyncio.run(server.create_run({"id": "run_api_1", "task_id": task_id}))
+        run_id = created_run["run"]["id"]
 
         saved = asyncio.run(server.save_report({
-            "id": "run_api_1",
+            "id": "report_api_1",
             "taskId": task_id,
+            "runId": run_id,
             "createdAt": 1_710_000_000_000,
             "goal": "Build landing page",
             "difficulty": "pro",
@@ -136,6 +140,7 @@ class TaskApiTestCase(unittest.TestCase):
 
         report = saved["report"]
         self.assertEqual(report["taskId"], task_id)
+        self.assertEqual(report["runId"], run_id)
         self.assertEqual(report["totalSubtasks"], 2)
         self.assertEqual(report["totalRetries"], 1)
         self.assertEqual(report["previewUrl"], "/preview/task/index.html")
@@ -146,14 +151,79 @@ class TaskApiTestCase(unittest.TestCase):
 
         listed = asyncio.run(server.list_reports(taskId=task_id))
         self.assertEqual(len(listed["reports"]), 1)
-        self.assertEqual(listed["reports"][0]["id"], "run_api_1")
+        self.assertEqual(listed["reports"][0]["id"], "report_api_1")
 
         linked_task = task_store.get_task_store().get_task(task_id)
-        self.assertIn("run_api_1", linked_task["run_ids"])
+        self.assertIn(run_id, linked_task["run_ids"])
+        self.assertNotIn("report_api_1", linked_task["run_ids"])
         self.assertIn("/tmp/index.html", linked_task["related_files"])
 
         loaded_task = asyncio.run(server.get_task(task_id))
         self.assertEqual(loaded_task["task"]["reports"][0]["taskId"], task_id)
+        self.assertEqual(loaded_task["task"]["reports"][0]["runId"], run_id)
+
+    def test_report_without_run_id_does_not_corrupt_task_run_ids(self):
+        created = asyncio.run(server.create_task({"title": "Report Safety"}))
+        task_id = created["task"]["id"]
+
+        saved = asyncio.run(server.save_report({
+            "id": "report_only_1",
+            "taskId": task_id,
+            "goal": "Summarize findings",
+            "difficulty": "standard",
+            "success": True,
+        }))
+
+        self.assertEqual(saved["report"]["taskId"], task_id)
+        self.assertEqual(saved["report"]["id"], "report_only_1")
+        self.assertEqual(saved["report"]["runId"], "")
+        linked_task = task_store.get_task_store().get_task(task_id)
+        self.assertEqual(linked_task["run_ids"], [])
+
+    def test_board_summary_uses_node_label_for_active_nodes(self):
+        created_task = asyncio.run(server.create_task({"title": "Board Summary"}))
+        task_id = created_task["task"]["id"]
+        run = asyncio.run(server.create_run({"task_id": task_id}))
+        run_id = run["run"]["id"]
+
+        ne_one = asyncio.run(server.create_node_execution({
+            "run_id": run_id,
+            "node_key": "builder",
+            "node_label": "Builder Alpha",
+        }))
+        ne_two = asyncio.run(server.create_node_execution({
+            "run_id": run_id,
+            "node_key": "tester",
+            "node_label": "QA Beta",
+        }))
+
+        task_store.get_run_store().transition_run(run_id, "running")
+        task_store.get_run_store().update_run(run_id, {
+            "active_node_execution_ids": [
+                ne_one["nodeExecution"]["id"],
+                ne_two["nodeExecution"]["id"],
+            ],
+        })
+        task_store.get_node_execution_store().transition_node(ne_one["nodeExecution"]["id"], "running")
+        task_store.get_node_execution_store().transition_node(ne_two["nodeExecution"]["id"], "running")
+
+        summary = asyncio.run(server.board_summary())
+        task_payload = next(task for task in summary["tasks"] if task["id"] == task_id)
+        self.assertEqual(task_payload["latestRun"]["id"], run_id)
+        self.assertEqual(task_payload["activeNodeLabel"], "Builder Alpha")
+        self.assertEqual(task_payload["activeNodeLabels"], ["Builder Alpha", "QA Beta"])
+
+    def test_create_run_broadcasts_run_created_and_task_updated(self):
+        created_task = asyncio.run(server.create_task({"title": "Broadcast Parent"}))
+        task_id = created_task["task"]["id"]
+
+        with patch.object(server, "_broadcast_ws_event", new=AsyncMock()) as mock_broadcast:
+            created_run = asyncio.run(server.create_run({"task_id": task_id}))
+
+        self.assertTrue(created_run["run"]["id"])
+        event_types = [call.args[0]["type"] for call in mock_broadcast.await_args_list]
+        self.assertIn("run_created", event_types)
+        self.assertIn("task_updated", event_types)
 
     def test_create_run_requires_existing_task_and_rejects_duplicate_id(self):
         missing = asyncio.run(server.create_run({"task_id": "missing-task"}))
@@ -354,6 +424,28 @@ class TaskApiTestCase(unittest.TestCase):
         }))
         self.assertEqual(mismatched.status_code, 400)
         self.assertIn("does not belong", self._decode_error(mismatched)["error"])
+
+    def test_skills_endpoint_lists_builtin_and_community_skills(self):
+        community_dir = Path(self.tmpdir.name) / "community-skills"
+        skill_dir = community_dir / "sample-video-skill"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("SAMPLE VIDEO SKILL\n\n- Sample community skill.\n", encoding="utf-8")
+        (skill_dir / "evermind_skill.json").write_text(
+            '{"title":"Sample Video Skill","summary":"Sample summary","node_types":["builder"],"keywords":["video prompt"],"tags":["video"]}',
+            encoding="utf-8",
+        )
+
+        with patch.object(agent_skills, "USER_SKILLS_DIR", community_dir):
+            agent_skills.list_skill_catalog.cache_clear()
+            agent_skills._load_skill.cache_clear()
+            result = asyncio.run(server.list_skills())
+            self.assertIn("skills", result)
+            names = {item["name"] for item in result["skills"]}
+            self.assertIn("sample-video-skill", names)
+            self.assertIn("remotion-scene-composer", names)
+            self.assertGreaterEqual(result["counts"]["community"], 1)
+            agent_skills.list_skill_catalog.cache_clear()
+            agent_skills._load_skill.cache_clear()
 
 
 class TestTaskApiCors(unittest.TestCase):

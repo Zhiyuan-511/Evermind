@@ -13,7 +13,9 @@ import re
 import time
 from typing import Any, Callable, Dict, List, Optional
 
-from plugins.base import Plugin, PluginResult, PluginRegistry, is_builder_browser_enabled
+from plugins.base import Plugin, PluginResult, PluginRegistry, is_builder_browser_enabled, is_image_generation_available
+from agent_skills import build_skill_context, resolve_skill_names_for_goal
+from repo_map import build_repo_context
 import task_classifier
 from privacy import get_masker, PrivacyMasker
 from proxy_relay import get_relay_manager
@@ -97,19 +99,48 @@ AGENT_PRESETS = {
     "router": {
         "instructions": (
             "You are a task router and planner. Analyze the user's request and output a JSON plan.\n"
-            "Format: {\"subtasks\": [{\"agent\": \"builder|tester|reviewer|deployer\", \"task\": \"description\", \"depends_on\": []}]}\n"
+            "Format: {\"subtasks\": [{\"agent\": \"builder|tester|reviewer|deployer|analyst|debugger|scribe|uidesign|imagegen|spritesheet|assetimport\", \"task\": \"description\", \"depends_on\": []}]}\n"
             "Each subtask should have a clear agent assignment and description.\n"
             "IMPORTANT RULES for website/app tasks:\n"
             "- The builder task should specify: 'Create a complete, self-contained HTML file with embedded CSS and JavaScript'\n"
             "- The deployer task should say: 'List the generated files and provide the local preview URL'\n"
             "- The tester should say: 'Verify the generated HTML files exist and are valid'\n"
+            "- Use scribe for documentation/manual/report tasks\n"
+            "- Use imagegen for image-prompt / concept-art / poster / cover generation tasks only when a real image backend is configured or when prompt packs alone are explicitly acceptable\n"
+            "- Use spritesheet or assetimport for game-asset pipeline tasks when useful, but do NOT insert them as fake filler nodes when no actual asset pipeline is available\n"
+            "- Use uidesign for design-system or UI-direction tasks when explicit design output is needed\n"
+            "- For game research tasks, do NOT send analyst to spend time playing browser games; prefer GitHub repos, source references, tutorials, docs, postmortems, and implementation writeups\n"
             "- Keep the plan to 3-5 subtasks for efficiency"
         ),
     },
     "planner": {
         "instructions": (
-            "You are a senior project planner. Break complex goals into concrete subtasks.\n"
-            "Consider dependencies between tasks. Output a structured plan with phases."
+            "You are a senior project planner. Your ONLY job is to produce a lean execution skeleton.\n"
+            "\n"
+            "## What you MUST output (JSON):\n"
+            "{\n"
+            '  "architecture": "brief info-architecture summary (2-3 sentences)",\n'
+            '  "modules": ["module1", "module2", ...],\n'
+            '  "execution_order": ["step1 -> step2 -> ..."],\n'
+            '  "key_dependencies": ["dep1", "dep2"]\n'
+            "}\n"
+            "\n"
+            "## What you must NOT do:\n"
+            "- Do NOT write any code, HTML, CSS, or JavaScript\n"
+            "- Do NOT write marketing copy, slogans, or detailed text content\n"
+            "- Do NOT design animations, transitions, or visual effects\n"
+            "- Do NOT produce more than 400 words total\n"
+            "\n"
+            "You are the SKELETON planner. Other nodes (builder, analyst, reviewer) will handle details.\n"
+            "Keep it short. Keep it structural. Finish fast."
+        ),
+    },
+    "planner_degraded": {
+        "instructions": (
+            "EMERGENCY PLANNER MODE. Previous attempt timed out.\n"
+            "Output ONLY a JSON list of page sections. Nothing else.\n"
+            'Example: {"sections": ["hero", "features", "pricing", "faq", "contact"]}\n'
+            "Maximum 100 words. No code. No descriptions. Just section names."
         ),
     },
     "builder": {
@@ -122,10 +153,12 @@ AGENT_PRESETS = {
             "3. Implement responsive design with at least one @media breakpoint\n"
             "4. Include accessibility basics: lang attr, aria labels, focus styles\n"
             "5. Use CSS variables for colors, spacing, and shadows\n"
-            "6. Import Google Font 'Inter' (weights 400,600,700)\n"
+            "6. Choose typography intentionally for the product category; avoid default-looking font decisions\n"
             "7. Do NOT use emoji characters as UI icons; use inline SVG instead\n"
+            "   Treat any emoji glyph in the final page as a hard failure and remove it before finishing\n"
             "8. Smooth animations with cubic-bezier(0.4,0,0.2,1); honor prefers-reduced-motion\n"
-            "9. Keep implementation concise (target 100-300 lines)\n\n"
+            "9. Implement as much code as the task requires; do not compress the result into a low-quality stub\n"
+            "10. Treat loaded skills, analyst notes, reviewer acceptance criteria, and task constraints as mandatory contracts\n\n"
             "PERSONALIZATION:\n"
             "- Read the user's goal carefully and tailor EVERYTHING to it\n"
             "- Choose colors, layout, animations, and content that match the goal's industry/mood\n"
@@ -142,7 +175,8 @@ AGENT_PRESETS = {
             "QUALITY BAR:\n"
             "- Must look professional and premium, never like a student project\n"
             "- Must be fully viewable without external build tools\n"
-            "- Prioritize SPEED: deliver a complete working result quickly"
+            "- Must include concrete content, clear hierarchy, and visible polish rather than a bare scaffold\n"
+            "- Self-check before finishing: remove placeholders, confirm core interactions work, confirm the page is commercially credible"
         ),
     },
     "tester": {
@@ -156,6 +190,7 @@ AGENT_PRESETS = {
             "STEP 2 — Visual browser test (MANDATORY):\n"
             "  Call browser with {\"action\": \"navigate\", \"url\": \"http://127.0.0.1:8765/preview/\", \"full_page\": true}\n"
             "  If page is blank, try subdirectory: {\"action\": \"navigate\", \"url\": \"http://127.0.0.1:8765/preview/task_1/index.html\", \"full_page\": true}\n"
+            "  Immediately call browser with {\"action\": \"observe\"} to inspect visible controls before interacting.\n"
             "  The browser tool returns a screenshot automatically. Analyze it for:\n"
             "  - Layout: are sections visible and properly spaced?\n"
             "  - Colors: is the color scheme consistent and professional?\n"
@@ -167,6 +202,16 @@ AGENT_PRESETS = {
             "  Call browser with {\"action\": \"scroll\", \"direction\": \"down\", \"amount\": 500}\n"
             "  Check if below-the-fold content exists and renders correctly.\n"
             "\n"
+            "STEP 4 — Interaction test (MANDATORY when interactive UI exists):\n"
+            "  Prefer browser act with semantic targets for buttons, forms, or controls; fall back to direct click/fill only when needed.\n"
+            "  After interaction, you MUST call browser wait_for or observe to verify the page state actually changed.\n"
+            "  A PASS verdict is invalid if post-action verification evidence is missing.\n"
+            "  If the product is a GAME, you MUST click the start/play button and use browser press actions\n"
+            "  with keys such as ArrowUp, ArrowDown, ArrowLeft, ArrowRight, KeyW, KeyA, KeyS, KeyD, Space, or Enter.\n"
+            "  Prefer browser press_sequence for games so multiple inputs are tested in one run.\n"
+            "  PASS only if the game is actually playable after those inputs and the state hash or visible HUD changes.\n"
+            "  FAIL if browser diagnostics report console/page runtime errors.\n"
+            "\n"
             "OUTPUT: {\"status\": \"pass\"/\"fail\", \"visual_score\": 1-10, \"issues\": [...], \"screenshot\": \"taken\"}\n"
             "IMPORTANT: Do NOT skip the browser step. You MUST navigate to the preview URL.\n"
         ),
@@ -177,25 +222,45 @@ AGENT_PRESETS = {
             "Your job is to decide: APPROVED (ship it) or REJECTED (builder must redo).\n\n"
             "VISUAL REVIEW (MANDATORY):\n"
             "1. Use browser tool → navigate to http://127.0.0.1:8765/preview/\n"
-            "2. Take a full-page screenshot\n"
-            "3. Scroll down 500px, take another screenshot\n"
+            "2. Call browser observe to inspect visible controls and current state\n"
+            "3. Take a full-page screenshot\n"
+            "4. Scroll down 500px, take another screenshot\n"
+            "5. If the artifact is interactive, you MUST use browser act for the main interaction test whenever possible.\n"
+            "   After interaction, you MUST call browser wait_for or browser observe before approval.\n"
+            "   If the artifact is a GAME, you MUST click the start/play UI and use browser press actions\n"
+            "   with gameplay keys (Arrow keys / WASD / Space / Enter) before approving it.\n"
+            "   Prefer press_sequence for games and verify the page state changes after gameplay input.\n"
+            "6. Reject if browser diagnostics show runtime errors, if post-action verification is missing, or if the post-action state looks unchanged.\n"
             "You MUST use the browser tool — do NOT skip. No excuses.\n\n"
             "SCORE EACH DIMENSION (1-10):\n"
             "- layout: spacing, alignment, visual hierarchy, section flow\n"
             "- color: palette harmony, contrast, dark/light consistency\n"
             "- typography: font choice, size scale, line height, readability\n"
             "- animation: hover effects, transitions, scroll reveals, micro-interactions\n"
-            "- responsive: mobile-friendly, no horizontal scroll, touch-ready\n\n"
+            "- responsive: mobile-friendly, no horizontal scroll, touch-ready\n"
+            "- functionality: core interactions really work after you test them\n"
+            "- completeness: no blank sections, thin placeholders, or unfinished modules\n"
+            "- originality: not generic, not commercially weak, not template-looking\n\n"
+            "HARD REJECTION RULES:\n"
+            "- Reject if emoji glyphs are used as icons, bullets, CTA ornaments, or fake illustrations\n"
+            "- Reject if the page feels generic, unfinished, or commercially weak even if it technically works\n\n"
             "VERDICT RULES:\n"
             "- Average score ≥ 7 → APPROVED\n"
             "- Average score < 7 → REJECTED (builder must fix and resubmit)\n"
-            "- Any single dimension ≤ 3 → auto REJECTED\n\n"
+            "- Any single dimension < 5 → auto REJECTED\n"
+            "- Any functionality/completeness/originality score < 6 → REJECTED\n"
+            "- APPROVED is invalid if blocking_issues or required_changes are non-empty\n\n"
             "OUTPUT FORMAT (strict JSON):\n"
             '{"verdict": "APPROVED" or "REJECTED", '
-            '"scores": {"layout": N, "color": N, "typography": N, "animation": N, "responsive": N}, '
+            '"scores": {"layout": N, "color": N, "typography": N, "animation": N, "responsive": N, "functionality": N, "completeness": N, "originality": N}, '
+            '"ship_readiness": N, '
             '"average": N.N, '
             '"issues": ["specific issue 1", "specific issue 2"], '
-            '"improvements": ["what builder must fix if REJECTED"]}\n\n'
+            '"blocking_issues": ["what prevents approval"], '
+            '"missing_deliverables": ["missing artifact / missing section / missing interaction"], '
+            '"required_changes": ["exact builder changes"], '
+            '"acceptance_criteria": ["how the resubmission will pass"], '
+            '"strengths": ["what is already strong enough to preserve"]}\n\n'
             "Be STRICT. A professional product must score ≥ 7 average.\n"
             "Generic/student-quality work should be REJECTED.\n"
         ),
@@ -220,15 +285,65 @@ AGENT_PRESETS = {
     "debugger": {
         "instructions": (
             "You are a debugging expert. Analyze error messages and failed tests.\n"
-            "Identify root causes and provide specific fixes with code patches.\n"
-            "Use file_ops to read the problematic files and shell to test fixes."
+            "Identify the root cause, map the failing path through the relevant code, and produce the smallest coherent fix.\n"
+            "When an existing repository context is injected, use the repo map to choose files deliberately instead of wandering.\n"
+            "Use file_ops to inspect and edit files, and use shell to validate fixes when commands are available."
         ),
     },
     "analyst": {
-        "instructions": "You are a data analyst. Analyze data, create reports, and provide insights.",
+        "instructions": (
+            "You are a research analyst for product, UX, and design tasks.\n"
+            "When the task asks for references, inspiration, competitors, trends, or design analysis, "
+            "you MUST use the browser tool to inspect live websites.\n"
+            "Prefer browser observe/extract for initial inspection, and use browser act only when interaction is required.\n"
+            "Visit at least 2 distinct URLs, and prefer 3 when possible.\n"
+            "If a site is blocked by captcha, login wall, or bot-detection, skip it immediately and try another URL.\n"
+            "Always include the visited URLs in your final report before the analysis summary.\n"
+            "Do not stop after a single site unless the task explicitly forbids browsing.\n"
+            "For game tasks, do NOT browse playable web games as your main research flow. Prefer GitHub repos, source code, tutorials, docs, devlogs, and postmortems.\n"
+            "You are optimizing the next nodes' execution quality, not writing a vague inspiration memo.\n"
+            "Prefer a mixed evidence set: source repo(s), technical docs/tutorials, and visual/product references.\n"
+            "Translate research into concrete downstream constraints, implementation advice, and review criteria.\n"
+            "Your report is not freeform. It must contain downstream execution handoffs using exact XML tags:\n"
+            "<reference_sites>, <design_direction>, <non_negotiables>, <deliverables_contract>, <risk_register>, "
+            "<builder_1_handoff>, <builder_2_handoff>, <reviewer_handoff>, "
+            "<tester_handoff>, <debugger_handoff>.\n"
+            "Use those tags to optimize the next nodes' prompts. "
+            "Enforce a premium quality bar and explicitly ban emoji glyphs inside generated pages."
+        ),
     },
     "scribe": {
-        "instructions": "You are a technical writer. Create clear documentation, guides, and reports.",
+        "instructions": (
+            "You are a technical writer. Create clear documentation, guides, reports, and structured explainers.\n"
+            "Prefer strong information architecture, concise headings, examples, and checklists over filler prose."
+        ),
+    },
+    "uidesign": {
+        "instructions": (
+            "You are a senior UI designer. Produce design-direction output that is concrete enough for implementation.\n"
+            "Define hierarchy, layout rhythm, motion intent, component behavior, and visual consistency.\n"
+            "If browser or screenshot tools are available, inspect references before finalizing decisions."
+        ),
+    },
+    "imagegen": {
+        "instructions": (
+            "You are an image-generation art director. Produce production-ready prompt packs, shot lists, and visual constraints.\n"
+            "If the comfyui plugin is available, call it to check health first and generate assets when the pipeline is configured.\n"
+            "If no image tool is attached or the generation backend is unavailable, return highly-usable prompt variants, negative prompts,\n"
+            "style lock notes, and fallback illustration guidance that builder/spritesheet can execute."
+        ),
+    },
+    "spritesheet": {
+        "instructions": (
+            "You are a game asset pipeline specialist. Plan sprite families, frame states, palette constraints, and export layout.\n"
+            "Output should be packaging-ready, not just a loose art wish list."
+        ),
+    },
+    "assetimport": {
+        "instructions": (
+            "You are an asset pipeline coordinator. Organize imported assets, naming, folder structure, usage mapping, and handoff notes.\n"
+            "Favor clean manifests and production readiness."
+        ),
     },
 }
 
@@ -387,24 +502,35 @@ class AIBridge:
     def _timeout_for_node(self, node_type: str) -> int:
         if node_type == "builder":
             return self._read_int_env("EVERMIND_BUILDER_TIMEOUT_SEC", 180, 30, 600)
+        if node_type in ("planner", "planner_degraded"):
+            # P0-1: Planner should finish fast — only outputs skeleton, not full content.
+            return self._read_int_env("EVERMIND_PLANNER_TIMEOUT_SEC", 60, 20, 180)
         return self._read_int_env("EVERMIND_TIMEOUT_SEC", 90, 30, 600)
 
     def _stream_stall_timeout_for_node(self, node_type: str) -> int:
         """
         Max allowed gap between streamed chunks before we treat the call as stalled.
         Builder can reasonably take longer before first meaningful chunk.
+        Planner uses a short stall window — if it goes silent, it's stuck.
         """
         if node_type == "builder":
             return self._read_int_env("EVERMIND_BUILDER_STREAM_STALL_SEC", 300, 60, 600)
+        if node_type in ("planner", "planner_degraded"):
+            # P0-2: Short stall window for planner — fail fast if stuck.
+            return self._read_int_env("EVERMIND_PLANNER_STREAM_STALL_SEC", 45, 15, 120)
         return self._read_int_env("EVERMIND_STREAM_STALL_SEC", 180, 30, 300)
 
     def _max_tool_iterations_for_node(self, node_type: str) -> int:
         if node_type == "builder":
             return self._read_int_env("EVERMIND_BUILDER_MAX_TOOL_ITERS", 8, 1, 20)
+        if node_type in ("reviewer", "tester"):
+            return self._read_int_env("EVERMIND_QA_MAX_TOOL_ITERS", 8, 4, 12)
+        if node_type == "analyst":
+            return self._read_int_env("EVERMIND_ANALYST_MAX_TOOL_ITERS", 4, 2, 10)
         return self._read_int_env("EVERMIND_DEFAULT_MAX_TOOL_ITERS", 3, 1, 10)
 
     def _analyst_browser_call_limit(self) -> int:
-        return self._read_int_env("EVERMIND_ANALYST_MAX_BROWSER_CALLS", 2, 0, 10)
+        return self._read_int_env("EVERMIND_ANALYST_MAX_BROWSER_CALLS", 3, 0, 10)
 
     def _should_block_browser_call(self, node_type: str, tool_call_stats: Dict[str, int]) -> bool:
         if node_type != "analyst":
@@ -481,6 +607,117 @@ class AIBridge:
         has_html = "<!doctype" in lower or "<html" in lower
         has_file_write = any(self._tool_result_has_write(tr) for tr in (tool_results or []))
         return (not has_html) and (not has_file_write)
+
+    def _classify_task_type(self, prompt_source: str) -> str:
+        source = str(prompt_source or "").strip()
+        if not source:
+            return "website"
+        try:
+            return task_classifier.classify(source).task_type
+        except Exception:
+            return "website"
+
+    def _review_browser_followup_reason(
+        self,
+        node_type: str,
+        task_type: str,
+        browser_actions: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        if node_type not in {"reviewer", "tester"}:
+            return None
+
+        successful = [
+            item for item in (browser_actions or [])
+            if item.get("ok")
+        ]
+        if not successful:
+            return "You have not used the browser tool yet."
+
+        def _normalized_action(item: Dict[str, Any]) -> str:
+            action = str(item.get("action") or "").strip().lower()
+            subaction = str(item.get("subaction") or item.get("intent") or "").strip().lower()
+            if action == "observe":
+                return "snapshot"
+            if action == "act" and subaction:
+                return subaction
+            return action
+
+        actions = [_normalized_action(item) for item in successful]
+        if "snapshot" not in actions:
+            return "You must inspect the page with browser.observe or browser.snapshot before final verdict."
+
+        seen_interaction = False
+        has_post_verify = False
+        for item in successful:
+            action = _normalized_action(item)
+            if action in {"click", "fill", "press", "press_sequence"}:
+                seen_interaction = True
+                continue
+            if seen_interaction and action in {"snapshot", "wait_for"}:
+                has_post_verify = True
+                break
+
+        if task_type == "game":
+            if "click" not in actions:
+                return "You must click the start/play control before final verdict."
+            if not any(action in {"press", "press_sequence"} for action in actions):
+                return "You must test gameplay controls with press_sequence or press before final verdict."
+            if not has_post_verify and not any(
+                bool(item.get("state_changed", False))
+                for item in successful
+                if str(item.get("action") or "").strip().lower() in {"press", "press_sequence"}
+            ):
+                return "You must verify the visible game state changed after gameplay input."
+            return None
+
+        if task_type == "dashboard":
+            if "click" not in actions:
+                return "You must click at least one dashboard control before final verdict."
+            if not has_post_verify:
+                return "After clicking a dashboard control, you must call wait_for or snapshot to verify the changed state."
+            return None
+
+        if task_type == "website":
+            if node_type == "reviewer" and "scroll" not in actions:
+                return "Website reviews must scroll the page before final verdict."
+            if not any(action in {"click", "fill"} for action in actions):
+                return "You must click or fill at least one interactive element before final verdict."
+            if not has_post_verify:
+                return "After interacting with the website, you must call wait_for or snapshot to verify the changed state."
+            return None
+
+        if not any(action in {"click", "fill", "press", "press_sequence"} for action in actions):
+            return "You must test at least one interactive control before final verdict."
+        if not has_post_verify:
+            return "After interaction, you must call wait_for or snapshot to verify the changed state."
+        return None
+
+    def _review_browser_followup_message(self, reason: str, task_type: str) -> str:
+        reason_text = str(reason or "").strip()
+        lower = reason_text.lower()
+        action_hint = 'Call browser with {"action":"observe"} now.'
+        if "scroll" in lower:
+            action_hint = 'Call browser with {"action":"scroll","direction":"down","amount":500} now, then continue testing.'
+        elif "start/play" in lower:
+            action_hint = 'Call browser with {"action":"act","intent":"click","target":"Start Game"} or the visible play control now.'
+        elif "gameplay controls" in lower:
+            action_hint = (
+                'Call browser with {"action":"act","intent":"press_sequence","keys":["ArrowRight","ArrowRight","Space","ArrowLeft"],'
+                '"repeat":2,"interval_ms":150} now.'
+            )
+        elif "wait_for or snapshot" in lower or "browser.observe" in lower or "changed state" in lower:
+            if task_type == "game":
+                action_hint = 'Call browser with {"action":"observe"} now to verify the post-gameplay state changed.'
+            else:
+                action_hint = 'Call browser with {"action":"observe"} now to verify the post-action state changed.'
+        elif "browser.snapshot" in lower or "snapshot" in lower or "browser.observe" in lower:
+            action_hint = 'Call browser with {"action":"observe"} now before final verdict.'
+        return (
+            "Your browser-based review/test is incomplete.\n"
+            f"Missing requirement: {reason_text}\n"
+            f"{action_hint}\n"
+            "Do not output a final verdict yet. Use the browser tool immediately and only finalize after the missing step is complete."
+        )
 
     def _message_char_count(self, msg: Dict[str, Any]) -> int:
         total = 0
@@ -616,12 +853,55 @@ class AIBridge:
         node_type = node.get("type", "builder")
         preset = AGENT_PRESETS.get(node_type, {})
         base_prompt = node.get("prompt") or preset.get("instructions", "You are a helpful assistant.")
+        prompt_source = str(input_data or node.get("goal") or node.get("task") or "").strip()
+        skill_block = build_skill_context(node_type, prompt_source)
+        skill_names = resolve_skill_names_for_goal(node_type, prompt_source)
+        repo_context = build_repo_context(node_type, prompt_source, self.config)
+        skill_contract = ""
+        if skill_names:
+            skill_contract = (
+                "\nACTIVE SKILL CHECKLIST:\n"
+                + "\n".join(f"- {name}" for name in skill_names)
+                + "\nYou MUST apply every loaded skill as part of the acceptance criteria.\n"
+            )
+        repo_block = ""
+        if repo_context:
+            repo_root = str(repo_context.get("repo_root") or "").strip()
+            repo_map_prompt = str(repo_context.get("prompt_block") or "").strip()
+            repo_block = (
+                "\n\nEXISTING REPOSITORY EDIT MODE:\n"
+                f"- Work inside the existing repository at {repo_root}\n"
+                "- This is NOT a greenfield one-file HTML task unless the user explicitly asks for that\n"
+                "- Start from the repo map, inspect only the relevant files, then make the smallest coherent edits\n"
+                "- Preserve the repo's architecture, naming, build system, and existing conventions\n"
+                "- Prefer editing existing files over creating parallel replacements or shadow copies\n"
+                "- If shell-based verification is available, run the smallest relevant verification command before finishing\n"
+            )
+            if repo_map_prompt:
+                repo_block += f"\nAIDER-STYLE REPO MAP:\n{repo_map_prompt}"
         if node_type != "builder":
-            return base_prompt
+            backend_hint = ""
+            if node_type == "imagegen":
+                if is_image_generation_available(config=self.config):
+                    backend_hint = (
+                        "\nIMAGE BACKEND STATUS:\n"
+                        "- Configured image backend detected\n"
+                        "- Health-check the comfyui plugin first, then generate concrete assets if the run requires final art files\n"
+                    )
+                else:
+                    backend_hint = (
+                        "\nIMAGE BACKEND STATUS:\n"
+                        "- No configured image backend detected in runtime settings\n"
+                        "- Do NOT pretend to have raster generation\n"
+                        "- Return production-ready prompt packs, negative prompts, style locks, and replacement guidance instead\n"
+                    )
+            if skill_block:
+                return f"{base_prompt}{backend_hint}\n\nLOADED NODE SKILLS:\n{skill_block}{skill_contract}{repo_block}"
+            return base_prompt + backend_hint + repo_block
 
         # Builder system prompt is task-adaptive so game/dashboard/tool goals don't get
         # constrained by website-only guidance.
-        adaptive_source = str(input_data or node.get("goal") or node.get("task") or "").strip()
+        adaptive_source = prompt_source
         if adaptive_source:
             try:
                 base_prompt = task_classifier.builder_system_prompt(adaptive_source)
@@ -629,12 +909,18 @@ class AIBridge:
                 # Keep execution resilient if classifier has an unexpected runtime issue.
                 pass
 
+        if repo_block:
+            if skill_block:
+                return f"{base_prompt}\n\nLOADED NODE SKILLS:\n{skill_block}{skill_contract}{repo_block}"
+            return base_prompt + repo_block
+
         has_browser_plugin = any(p and getattr(p, "name", "") == "browser" for p in (plugins or []))
         web_research_enabled = self._builder_web_research_enabled() and has_browser_plugin
         if web_research_enabled:
             mode_hint = (
                 "\n\nWEB RESEARCH MODE (ENABLED):\n"
-                "- Use browser tool for quick style research (max 2 pages)\n"
+                "- Use browser observe / extract for quick style research (max 2 pages)\n"
+                "- Use browser act only when a site requires one interaction to reveal important content\n"
                 "- Extract structure/tone/color intent only; never copy site code\n"
                 "- After research, produce a fresh implementation locally in one HTML file\n"
             )
@@ -644,6 +930,8 @@ class AIBridge:
                 "- Do not rely on live web browsing\n"
                 "- Achieve premium look using inline SVG icons, gradients, and robust layout system\n"
             )
+        if skill_block:
+            return f"{base_prompt}\n\nLOADED NODE SKILLS:\n{skill_block}{skill_contract}{mode_hint}"
         return base_prompt + mode_hint
 
     def _serialize_assistant_message(self, msg: Any) -> Dict[str, Any]:
@@ -1035,6 +1323,34 @@ class AIBridge:
         except Exception as e:
             return {"success": False, "error": str(e)}
 
+    def _compact_partial_output(self, text: Any, limit: int = 3200) -> str:
+        preview = str(text or "").strip()
+        if not preview:
+            return ""
+        if len(preview) <= limit:
+            return preview
+        head = max(1200, min(1800, limit // 2))
+        tail = max(900, limit - head - 8)
+        return f"{preview[:head]}\n...\n{preview[-tail:]}"
+
+    def _build_partial_output_event(self, text: Any, phase: str = "drafting") -> Optional[Dict[str, Any]]:
+        preview = self._compact_partial_output(text)
+        if not preview:
+            return None
+        return {
+            "stage": "partial_output",
+            "phase": phase,
+            "preview": preview,
+            "source": "model",
+        }
+
+    async def _publish_partial_output(self, on_progress, text: Any, phase: str = "drafting") -> None:
+        if not on_progress:
+            return
+        event = self._build_partial_output_event(text, phase=phase)
+        if event:
+            await on_progress(event)
+
     # ─────────────────────────────────────────
     # Path 2.5: Direct OpenAI-compatible SDK (for APIs needing custom headers, e.g. Kimi Coding)
     #           Now supports tool calling for file_ops, shell, etc.
@@ -1080,6 +1396,7 @@ class AIBridge:
                 default_headers=model_info.get("extra_headers", {}),
                 timeout=timeout_sec,
             )
+            loop = asyncio.get_running_loop()
 
             messages = [
                 {"role": "system", "content": system_prompt},
@@ -1121,6 +1438,7 @@ class AIBridge:
                 finish_reason = None
                 usage_data = None
                 last_chunk_time = time.time()
+                last_preview_emit = 0.0
 
                 for chunk in stream:
                     now = time.time()
@@ -1137,6 +1455,14 @@ class AIBridge:
                     delta = chunk.choices[0].delta
                     if delta.content:
                         content_parts.append(delta.content)
+                        if on_progress and (now - last_preview_emit >= 0.75):
+                            event = self._build_partial_output_event("".join(content_parts), phase="streaming")
+                            if event:
+                                try:
+                                    asyncio.run_coroutine_threadsafe(on_progress(event), loop)
+                                except RuntimeError:
+                                    pass
+                            last_preview_emit = now
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
                             idx = tc.index
@@ -1190,6 +1516,12 @@ class AIBridge:
 
             response = await asyncio.to_thread(_call_streaming, messages, tools)
 
+            await self._publish_partial_output(
+                on_progress,
+                getattr(response.choices[0].message, "content", "") or "",
+                phase="sectioning" if node_type == "planner" else "drafting",
+            )
+
             output_text = ""
             tool_results = []
             tool_call_stats: Dict[str, int] = {}
@@ -1201,16 +1533,47 @@ class AIBridge:
             builder_force_text_early = False
             builder_force_reason = ""
             builder_force_threshold = self._read_int_env("EVERMIND_BUILDER_FORCE_TEXT_STREAK", 3, 2, 20)
+            qa_followup_count = 0
+            qa_task_type = self._classify_task_type(input_data)
+            browser_action_events: List[Dict[str, Any]] = []
 
             while iteration < max_iterations:
                 iteration += 1
                 msg = response.choices[0].message
-                if msg.content:
+                msg_content = getattr(msg, "content", "") or ""
+                if msg.tool_calls and msg_content:
                     output_text += msg.content
+                    await self._publish_partial_output(on_progress, output_text, phase="drafting")
+                    await self._publish_partial_output(on_progress, output_text, phase="drafting")
 
                 # Check for tool calls
                 if not msg.tool_calls:
                     finish_reason = str(getattr(response.choices[0], "finish_reason", "") or "").lower()
+                    followup_reason = self._review_browser_followup_reason(
+                        node_type,
+                        qa_task_type,
+                        browser_action_events,
+                    )
+                    if followup_reason and qa_followup_count < 2 and tools:
+                        qa_followup_count += 1
+                        if msg_content:
+                            messages.append({"role": "assistant", "content": msg_content})
+                        messages.append({
+                            "role": "user",
+                            "content": self._review_browser_followup_message(followup_reason, qa_task_type),
+                        })
+                        if on_progress:
+                            await on_progress({
+                                "stage": "qa_followup",
+                                "message": followup_reason,
+                                "continuation": qa_followup_count,
+                            })
+                        response = await asyncio.to_thread(_call_streaming, messages, tools)
+                        usage_totals = self._merge_usage(usage_totals, getattr(response, "usage", None))
+                        continue
+                    if msg_content:
+                        output_text += msg_content
+                        await self._publish_partial_output(on_progress, output_text, phase="drafting")
                     if finish_reason == "length" and continuation_count < max_continuations:
                         continuation_count += 1
                         messages.append(self._serialize_assistant_message(msg))
@@ -1277,21 +1640,41 @@ class AIBridge:
                         if fn_name == "file_ops"
                         else str(parsed_args.get("action", "")).strip().lower()
                     )
-                    if fn_name == "browser" and on_progress:
+                    if fn_name == "browser":
                         browser_data = result.get("data", {}) if isinstance(result, dict) else {}
                         if not isinstance(browser_data, dict):
                             browser_data = {}
-                        await on_progress({
-                            "stage": "browser_action",
-                            "plugin": "browser",
+                        browser_event = {
                             "action": tool_action or parsed_args.get("action") or "unknown",
+                            "subaction": browser_data.get("subaction"),
+                            "intent": browser_data.get("intent"),
                             "ok": bool(result.get("success", False)) if isinstance(result, dict) else False,
                             "url": browser_data.get("url"),
+                            "target": browser_data.get("target"),
+                            "observation": browser_data.get("observation"),
+                            "snapshot_refs_preview": browser_data.get("snapshot_refs_preview", []),
+                            "snapshot_ref_count": browser_data.get("snapshot_ref_count", 0),
+                            "state_hash": browser_data.get("state_hash"),
+                            "previous_state_hash": browser_data.get("previous_state_hash"),
+                            "state_changed": bool(browser_data.get("state_changed", False)),
+                            "keys_count": browser_data.get("keys_count", 0),
+                            "console_error_count": browser_data.get("console_error_count", 0),
+                            "page_error_count": browser_data.get("page_error_count", 0),
+                            "failed_request_count": browser_data.get("failed_request_count", 0),
+                            "recent_console_errors": browser_data.get("recent_console_errors", []),
+                            "recent_page_errors": browser_data.get("recent_page_errors", []),
                             "browser_mode": browser_data.get("browser_mode"),
                             "requested_mode": browser_data.get("requested_mode"),
                             "launch_note": browser_data.get("launch_note"),
                             "error": (result.get("error") if isinstance(result, dict) else "") or "",
-                        })
+                        }
+                        browser_action_events.append(browser_event)
+                        if on_progress:
+                            await on_progress({
+                                "stage": "browser_action",
+                                "plugin": "browser",
+                                **browser_event,
+                            })
                     if node_type == "builder":
                         wrote_file = fn_name == "file_ops" and self._tool_result_has_write(result)
                         if wrote_file:
@@ -1363,6 +1746,7 @@ class AIBridge:
                     final_msg = final_resp.choices[0].message
                     if final_msg.content:
                         output_text += final_msg.content
+                        await self._publish_partial_output(on_progress, output_text, phase="finalizing")
                     usage_totals = self._merge_usage(usage_totals, getattr(final_resp, "usage", None))
                     logger.info(f"Forced text output: {len(final_msg.content or '')} chars")
                 except Exception as e:
@@ -1419,7 +1803,18 @@ class AIBridge:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
             if model_info.get("api_base"):
-                kwargs["api_base"] = model_info["api_base"]
+                # Allow env-based override for relay/proxy users
+                provider = model_info.get("provider", "")
+                env_base_key = {
+                    "openai": "OPENAI_API_BASE",
+                    "anthropic": "ANTHROPIC_API_BASE",
+                    "google": "GEMINI_API_BASE",
+                    "deepseek": "DEEPSEEK_API_BASE",
+                    "kimi": "KIMI_API_BASE",
+                    "qwen": "QWEN_API_BASE",
+                }.get(provider, "")
+                env_base = os.getenv(env_base_key, "") if env_base_key else ""
+                kwargs["api_base"] = env_base if env_base else model_info["api_base"]
             if model_info.get("extra_headers"):
                 kwargs["extra_headers"] = model_info["extra_headers"]
             api_key_env = {
@@ -1445,15 +1840,45 @@ class AIBridge:
             builder_force_text_early = False
             builder_force_reason = ""
             builder_force_threshold = self._read_int_env("EVERMIND_BUILDER_FORCE_TEXT_STREAK", 3, 2, 20)
+            qa_followup_count = 0
+            qa_task_type = self._classify_task_type(input_data)
+            browser_action_events: List[Dict[str, Any]] = []
 
             while iteration < max_iterations:
                 iteration += 1
                 msg = response.choices[0].message
-                if msg.content:
+                msg_content = getattr(msg, "content", "") or ""
+                if msg.tool_calls and msg_content:
                     output_text += msg.content
 
                 # Check for tool calls
                 if not msg.tool_calls:
+                    followup_reason = self._review_browser_followup_reason(
+                        node_type,
+                        qa_task_type,
+                        browser_action_events,
+                    )
+                    if followup_reason and qa_followup_count < 2 and tools:
+                        qa_followup_count += 1
+                        if msg_content:
+                            messages.append({"role": "assistant", "content": msg_content})
+                        messages.append({
+                            "role": "user",
+                            "content": self._review_browser_followup_message(followup_reason, qa_task_type),
+                        })
+                        if on_progress:
+                            await on_progress({
+                                "stage": "qa_followup",
+                                "message": followup_reason,
+                                "continuation": qa_followup_count,
+                            })
+                        kwargs["messages"] = self._prepare_messages_for_request(messages, litellm_model)
+                        response = await asyncio.to_thread(self._litellm.completion, **kwargs)
+                        usage_totals = self._merge_usage(usage_totals, getattr(response, "usage", None))
+                        total_cost += self._estimate_litellm_cost(response, litellm_model)
+                        continue
+                    if msg_content:
+                        output_text += msg_content
                     break
 
                 messages.append(self._serialize_assistant_message(msg))
@@ -1483,21 +1908,41 @@ class AIBridge:
                         if fn_name == "file_ops"
                         else str(parsed_args.get("action", "")).strip().lower()
                     )
-                    if fn_name == "browser" and on_progress:
+                    if fn_name == "browser":
                         browser_data = result.get("data", {}) if isinstance(result, dict) else {}
                         if not isinstance(browser_data, dict):
                             browser_data = {}
-                        await on_progress({
-                            "stage": "browser_action",
-                            "plugin": "browser",
+                        browser_event = {
                             "action": tool_action or parsed_args.get("action") or "unknown",
+                            "subaction": browser_data.get("subaction"),
+                            "intent": browser_data.get("intent"),
                             "ok": bool(result.get("success", False)) if isinstance(result, dict) else False,
                             "url": browser_data.get("url"),
+                            "target": browser_data.get("target"),
+                            "observation": browser_data.get("observation"),
+                            "snapshot_refs_preview": browser_data.get("snapshot_refs_preview", []),
+                            "snapshot_ref_count": browser_data.get("snapshot_ref_count", 0),
+                            "state_hash": browser_data.get("state_hash"),
+                            "previous_state_hash": browser_data.get("previous_state_hash"),
+                            "state_changed": bool(browser_data.get("state_changed", False)),
+                            "keys_count": browser_data.get("keys_count", 0),
+                            "console_error_count": browser_data.get("console_error_count", 0),
+                            "page_error_count": browser_data.get("page_error_count", 0),
+                            "failed_request_count": browser_data.get("failed_request_count", 0),
+                            "recent_console_errors": browser_data.get("recent_console_errors", []),
+                            "recent_page_errors": browser_data.get("recent_page_errors", []),
                             "browser_mode": browser_data.get("browser_mode"),
                             "requested_mode": browser_data.get("requested_mode"),
                             "launch_note": browser_data.get("launch_note"),
                             "error": (result.get("error") if isinstance(result, dict) else "") or "",
-                        })
+                        }
+                        browser_action_events.append(browser_event)
+                        if on_progress:
+                            await on_progress({
+                                "stage": "browser_action",
+                                "plugin": "browser",
+                                **browser_event,
+                            })
                     if node_type == "builder":
                         wrote_file = fn_name == "file_ops" and self._tool_result_has_write(result)
                         if wrote_file:
@@ -1569,6 +2014,7 @@ class AIBridge:
                 final_msg = final_resp.choices[0].message
                 if final_msg.content:
                     output_text += final_msg.content
+                    await self._publish_partial_output(on_progress, output_text, phase="finalizing")
                 usage_totals = self._merge_usage(usage_totals, getattr(final_resp, "usage", None))
                 total_cost += self._estimate_litellm_cost(final_resp, litellm_model)
 
@@ -1595,7 +2041,14 @@ class AIBridge:
                 {"role": "user", "content": input_data}
             ], "timeout": 120, "num_retries": 0}
             if model_info.get("api_base"):
-                kwargs["api_base"] = model_info["api_base"]
+                provider = model_info.get("provider", "")
+                env_base_key = {
+                    "openai": "OPENAI_API_BASE", "anthropic": "ANTHROPIC_API_BASE",
+                    "google": "GEMINI_API_BASE", "deepseek": "DEEPSEEK_API_BASE",
+                    "kimi": "KIMI_API_BASE", "qwen": "QWEN_API_BASE",
+                }.get(provider, "")
+                env_base = os.getenv(env_base_key, "") if env_base_key else ""
+                kwargs["api_base"] = env_base if env_base else model_info["api_base"]
             if model_info.get("extra_headers"):
                 kwargs["extra_headers"] = model_info["extra_headers"]
             api_key_env = {
@@ -1605,7 +2058,9 @@ class AIBridge:
                 kwargs["api_key"] = self.config.get(api_key_env.lower()) or os.getenv(api_key_env)
 
             response = await asyncio.to_thread(self._litellm.completion, **kwargs)
-            return {"success": True, "output": response.choices[0].message.content or "",
+            content = response.choices[0].message.content or ""
+            await self._publish_partial_output(on_progress, content, phase="drafting")
+            return {"success": True, "output": content,
                     "model": litellm_model, "tool_results": [], "mode": "litellm_chat",
                     "usage": self._normalize_usage(getattr(response, "usage", None)),
                     "cost": self._estimate_litellm_cost(response, litellm_model)}
@@ -1628,6 +2083,7 @@ class AIBridge:
                     {"role": "user", "content": input_data}
                 ]
             )
+            await self._publish_partial_output(on_progress, response.choices[0].message.content or "", phase="drafting")
             usage = self._normalize_usage(getattr(response, "usage", None))
             cost = self._estimate_litellm_cost(response, "gpt-4o") if self._litellm else self._estimate_response_cost("gpt-4o", usage)
             return {"success": True, "output": response.choices[0].message.content, "model": "gpt-4o", "tool_results": [], "mode": "openai_direct",

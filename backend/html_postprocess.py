@@ -30,6 +30,46 @@ def postprocess_html(html: str, task_type: str = "website") -> str:
 
     original = html
 
+    # 0. Auto-fix missing structural tags (body, html, doctype, head)
+    # This prevents quality gate failures on truncated builder output.
+    lower = html.lower()
+
+    # Ensure <!DOCTYPE html>
+    if "<!doctype" not in lower:
+        html = "<!DOCTYPE html>\n" + html
+
+    # Ensure <html> wrapper
+    if "<html" not in lower:
+        html = html.replace("<!DOCTYPE html>", "<!DOCTYPE html>\n<html lang=\"zh\">", 1)
+
+    # Ensure <head> exists
+    if "<head" not in html.lower():
+        # Insert after <html...>
+        html = re.sub(r'(<html[^>]*>)', r'\1\n<head>\n</head>', html, count=1, flags=re.IGNORECASE)
+
+    # Ensure <body> exists
+    if "<body" not in html.lower():
+        # Insert after </head> or after <head>...</head>
+        if "</head>" in html.lower():
+            html = re.sub(r'(</head>)', r'\1\n<body>', html, count=1, flags=re.IGNORECASE)
+            if "</body>" not in html.lower():
+                if "</html>" in html.lower():
+                    html = re.sub(r'(</html>)', r'</body>\n\1', html, count=1, flags=re.IGNORECASE)
+                else:
+                    html += "\n</body>"
+
+    # Ensure </body> closing
+    if "<body" in html.lower() and "</body>" not in html.lower():
+        if "</html>" in html.lower():
+            html = re.sub(r'(</html>)', r'</body>\n\1', html, count=1, flags=re.IGNORECASE)
+        else:
+            html += "\n</body>"
+
+    # Ensure </html> closing
+    if "<html" in html.lower() and "</html>" not in html.lower():
+        html += "\n</html>"
+
+
     # 1. Ensure charset meta
     if "<meta charset" not in html.lower():
         html = html.replace("<head>", f"<head>\n    {_CHARSET_META}", 1)

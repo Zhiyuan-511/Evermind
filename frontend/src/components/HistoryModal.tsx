@@ -136,7 +136,9 @@ export default function HistoryModal({
                         </div>
                     ) : (
                         filteredSessions.map((s) => {
-                            const preview = s.messages.slice().reverse().find((m) => m.role === 'user')?.content || '';
+                            const userMsg = s.messages.slice().reverse().find((m) => m.role === 'user');
+                            const anyMsg = !userMsg ? s.messages.slice().reverse().find((m) => m.content.trim().length > 5 && !m.content.startsWith('<b>')) : null;
+                            const preview = (userMsg?.content || anyMsg?.content?.replace(/<[^>]+>/g, '') || '').trim();
                             const active = s.id === activeSessionId;
                             const isEditing = editingId === s.id;
                             return (

@@ -108,8 +108,8 @@ class API:
         r.raise_for_status()
         return r.json()
 
-    def create_run(self, task_id: str, run_id: str = "", trigger: str = "api") -> dict:
-        payload = {"task_id": task_id, "trigger_source": trigger}
+    def create_run(self, task_id: str, run_id: str = "", trigger: str = "api", runtime: str = "local") -> dict:
+        payload = {"task_id": task_id, "trigger_source": trigger, "runtime": runtime}
         if run_id:
             payload["id"] = run_id
         r = self.client.post(f"{self.base}/api/runs", json=payload)
@@ -187,11 +187,12 @@ def phase_1_create_entities(api: API) -> tuple:
 
     # Create run (auto-transitions task to executing)
     run_id = uid("run_smoke_")
-    run = api.create_run(task_id, run_id=run_id)
+    run = api.create_run(task_id, run_id=run_id, trigger="openclaw", runtime="openclaw")
     check(run["id"] == run_id, f"Run ID mismatch: expected {run_id}, got {run['id']}")
     check(run["status"] == "queued", f"New run should be queued, got: {run['status']}")
+    check(run.get("runtime") == "openclaw", f"Run runtime should be openclaw, got: {run.get('runtime')}")
     check(run.get("version", 0) >= 1, f"Run version should be >= 1, got: {run.get('version')}")
-    ok(f"Run created: {run_id} (status={run['status']}, version={run.get('version')})")
+    ok(f"Run created: {run_id} (status={run['status']}, runtime={run.get('runtime')}, version={run.get('version')})")
 
     # Verify task auto-transitioned to executing
     task = api.get_task(task_id)
@@ -223,7 +224,7 @@ def phase_1_create_entities(api: API) -> tuple:
 
 async def phase_2_simulate_execution(api: API, base_url: str, task_id: str, run_id: str,
                                       ne_planner_id: str, ne_builder_id: str, ne_tester_id: str):
-    """Simulate OpenClaw executing nodes via WS events."""
+    """Simulate OpenClaw executing nodes via WS events and verify auto-completion."""
     section("Phase 2: Simulate OpenClaw Node Execution")
 
     now = time.time()
@@ -312,21 +313,37 @@ async def phase_2_simulate_execution(api: API, base_url: str, task_id: str, run_
     check(ne["status"] == "passed", f"Tester should be passed, got: {ne['status']}")
     ok(f"Tester → passed (version={ne.get('version')})")
 
-    # Verify run is still running at this point
+    # Current runtime semantics: once all nodes are terminal, the run auto-completes.
     run = wait_until(
-        "run remains running after node execution",
+        "run auto-completes after final node execution",
         lambda: api.get_run(run_id),
-        lambda item: item["status"] == "running",
+        lambda item: item["status"] == "done" and item.get("total_tokens", 0) == 12500,
     )
-    check(run["status"] == "running", f"Run should still be running, got: {run['status']}")
-    ok(f"Run still running after all nodes pass (version={run.get('version')})")
+    check(run["status"] == "done", f"Run should auto-complete to done, got: {run['status']}")
+    check(run.get("total_tokens", 0) == 12500, f"Run tokens should roll up to 12500, got: {run.get('total_tokens')}")
+    check(abs(float(run.get("total_cost", 0.0) or 0.0) - 0.045) < 1e-9, f"Run cost should roll up to 0.045, got: {run.get('total_cost')}")
+    ok(f"Run auto-completed → done (tokens={run.get('total_tokens')}, cost={run.get('total_cost')}, version={run.get('version')})")
 
+    task = wait_until(
+        "task auto-projects to done after auto-complete",
+        lambda: api.get_task(task_id),
+        lambda item: item["status"] == "done" and run_id in item.get("runIds", []),
+    )
+    check(task["status"] == "done", f"Task should auto-project to done, got: {task['status']}")
+    ok(f"Task auto-projected → done (version={task.get('version')})")
 
-async def phase_3_review_and_selfcheck(api: API, base_url: str, task_id: str, run_id: str):
-    """Simulate review and validation events."""
-    section("Phase 3: Review & Self-Check")
+async def phase_3_review_projection(api: API, base_url: str):
+    """Simulate review events on a dedicated running run."""
+    section("Phase 3: Review Projection")
 
     now = time.time()
+    task = api.create_task("Review Projection Smoke", "Verify review verdict projection")
+    task_id = task["id"]
+    run_id = uid("run_review_")
+    run = api.create_run(task_id, run_id=run_id, trigger="openclaw", runtime="openclaw")
+    check(run.get("runtime") == "openclaw", f"Review run runtime should be openclaw, got: {run.get('runtime')}")
+    api.transition_run(run_id, "running")
+    ok(f"Review scenario run ready: task={task_id}, run={run_id}")
 
     # 3a. Submit review — needs_fix (negative) → blocks run
     await send_openclaw_event(base_url, "openclaw_submit_review", {
@@ -384,18 +401,65 @@ async def phase_3_review_and_selfcheck(api: API, base_url: str, task_id: str, ru
     check(task.get("latestRisk") == "", f"Latest risk should be cleared, got: {task.get('latestRisk')!r}")
     ok(f"Review approve projected → verdict={task.get('reviewVerdict')}, risk cleared")
 
-    # 3d. Submit validation — passed
+    return task_id, run_id
+
+
+async def phase_4_validation_and_completion(api: API, base_url: str):
+    """Simulate validation rollback + explicit completion on a dedicated running run."""
+    section("Phase 4: Validation & Run Complete")
+
+    now = time.time()
+    task = api.create_task("Validation Projection Smoke", "Verify self-check + completion projection")
+    task_id = task["id"]
+    run_id = uid("run_validation_")
+    run = api.create_run(task_id, run_id=run_id, trigger="openclaw", runtime="openclaw")
+    check(run.get("runtime") == "openclaw", f"Validation run runtime should be openclaw, got: {run.get('runtime')}")
+    api.transition_run(run_id, "running")
+    ok(f"Validation scenario run ready: task={task_id}, run={run_id}")
+
+    await send_openclaw_event(base_url, "openclaw_submit_validation", {
+        "taskId": task_id,
+        "runId": run_id,
+        "summaryStatus": "failed",
+        "summary": "Preview has layout overflow on mobile",
+        "checklist": [
+            {"name": "Responsive layout", "passed": False, "detail": "Hero overflow below 390px"},
+        ],
+        "timestamp": now,
+    }, idem_key=uid("idem_"))
+
+    task = wait_until(
+        "task projected to selfcheck after failed validation",
+        lambda: api.get_task(task_id),
+        lambda item: item["status"] == "selfcheck" and item.get("latestSummary") == "Preview has layout overflow on mobile",
+    )
+    check(task["status"] == "selfcheck", f"Task should be in selfcheck after failed validation, got: {task['status']}")
+    ok(f"Validation failure projected → task status={task['status']}")
+
+    run = wait_until(
+        "run status=waiting_selfcheck",
+        lambda: api.get_run(run_id),
+        lambda item: item["status"] == "waiting_selfcheck",
+    )
+    check(run["status"] == "waiting_selfcheck", f"Run should be waiting_selfcheck, got: {run['status']}")
+    ok(f"Run → waiting_selfcheck (version={run.get('version')})")
+
+    api.transition_run(run_id, "running")
+    run = api.get_run(run_id)
+    check(run["status"] == "running", f"Run should be running after selfcheck resume, got: {run['status']}")
+    ok(f"Run resumed → running (version={run.get('version')})")
+
     await send_openclaw_event(base_url, "openclaw_submit_validation", {
         "taskId": task_id,
         "runId": run_id,
         "summaryStatus": "passed",
         "summary": "All quality gates passed",
         "checklist": [
-            {"name": "Unit tests", "status": "passed", "detail": "12/12 pass"},
-            {"name": "Integration tests", "status": "passed", "detail": "4/4 pass"},
-            {"name": "Lint check", "status": "passed", "detail": "0 warnings"},
+            {"name": "Unit tests", "passed": True, "detail": "12/12 pass"},
+            {"name": "Integration tests", "passed": True, "detail": "4/4 pass"},
+            {"name": "Lint check", "passed": True, "detail": "0 warnings"},
         ],
-        "timestamp": now + 2,
+        "timestamp": now + 1,
     }, idem_key=uid("idem_"))
 
     task = wait_until(
@@ -405,14 +469,7 @@ async def phase_3_review_and_selfcheck(api: API, base_url: str, task_id: str, ru
     )
     check(len(task.get("selfcheckItems", [])) == 3, f"Should have 3 selfcheck items, got: {len(task.get('selfcheckItems', []))}")
     check(task.get("latestSummary") == "All quality gates passed", f"Summary mismatch")
-    ok(f"Validation projected → selfcheckItems={len(task.get('selfcheckItems', []))}, summary='{task.get('latestSummary')}'")
-
-
-async def phase_4_run_complete(api: API, base_url: str, task_id: str, run_id: str):
-    """Simulate run completion and verify final state."""
-    section("Phase 4: Run Complete")
-
-    now = time.time()
+    ok(f"Validation passed projected → selfcheckItems={len(task.get('selfcheckItems', []))}, summary='{task.get('latestSummary')}'")
 
     await send_openclaw_event(base_url, "openclaw_run_complete", {
         "taskId": task_id,
@@ -438,19 +495,21 @@ async def phase_4_run_complete(api: API, base_url: str, task_id: str, run_id: st
     check(v_run >= 3, f"Run version should be >= 3 (create + running + done), got: {v_run}")
     ok(f"Run → done (tokens={run.get('total_tokens')}, cost={run.get('total_cost')}, version={v_run})")
 
-    # Verify task projected to review
+    # Verify task projected to done
     task = wait_until(
-        "task projected final review summary",
+        "task projected final completion summary",
         lambda: api.get_task(task_id),
-        lambda item: item["status"] == "review" and item.get("latestSummary") == "Auth service fully implemented and tested",
+        lambda item: item["status"] == "done" and item.get("latestSummary") == "Auth service fully implemented and tested",
     )
-    check(task["status"] == "review", f"Task should be in review after successful run, got: {task['status']}")
+    check(task["status"] == "done", f"Task should be done after successful run, got: {task['status']}")
     check(task.get("latestSummary") == "Auth service fully implemented and tested", f"Task summary mismatch")
     check(task.get("latestRisk") == "Minor: Session timeout could be tuned", f"Task risk mismatch")
     check(run_id in task.get("runIds", []), f"Run ID should be in task's runIds")
     v_task = task.get("version", 0)
     check(v_task >= 3, f"Task version should be >= 3 after multiple updates, got: {v_task}")
     ok(f"Task projected → status={task['status']}, summary present, risk present, version={v_task}")
+
+    return task_id, run_id
 
 
 def phase_5_version_monotonicity(api: API, task_id: str, run_id: str,
@@ -561,17 +620,18 @@ async def main(base_url: str):
         task_id, run_id, ne_planner_id, ne_builder_id, ne_tester_id = phase_1_create_entities(api)
         await phase_2_simulate_execution(api, base_url, task_id, run_id,
                                           ne_planner_id, ne_builder_id, ne_tester_id)
-        await phase_3_review_and_selfcheck(api, base_url, task_id, run_id)
-        await phase_4_run_complete(api, base_url, task_id, run_id)
+        review_task_id, review_run_id = await phase_3_review_projection(api, base_url)
+        validation_task_id, validation_run_id = await phase_4_validation_and_completion(api, base_url)
         phase_5_version_monotonicity(api, task_id, run_id, ne_planner_id, ne_builder_id, ne_tester_id)
         await phase_6_idempotency(api, base_url, run_id, ne_builder_id)
 
         section("RESULT")
         print(f"  ✅ ALL PHASES PASSED")
         print(f"\n  Summary:")
-        print(f"    Task ID:  {task_id}")
-        print(f"    Run ID:   {run_id}")
-        print(f"    Nodes:    {ne_planner_id}, {ne_builder_id}, {ne_tester_id}")
+        print(f"    Auto Run:        {task_id} / {run_id}")
+        print(f"    Review Run:      {review_task_id} / {review_run_id}")
+        print(f"    Validation Run:  {validation_task_id} / {validation_run_id}")
+        print(f"    Nodes:           {ne_planner_id}, {ne_builder_id}, {ne_tester_id}")
         print()
 
     except httpx.HTTPError as e:

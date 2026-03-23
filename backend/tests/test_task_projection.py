@@ -117,7 +117,7 @@ class TestSelfcheckProjection:
 
 class TestRunCompletionProjection:
 
-    def test_success_transitions_to_review(self, store, task_in_executing):
+    def test_success_transitions_to_done(self, store, task_in_executing):
         tid = task_in_executing["id"]
         result = store.project_task_from_run(
             tid,
@@ -127,8 +127,8 @@ class TestRunCompletionProjection:
             run_id="run_002",
         )
         assert result is not None
-        assert result["status"] == "review"
-        assert result["progress"] == 60
+        assert result["status"] == "done"
+        assert result["progress"] == 100
         assert result["latest_summary"] == "All tests pass, deployment ready"
         assert result["latest_risk"] == "Minor: CSS alignment"
         assert "run_002" in result["run_ids"]
@@ -146,7 +146,7 @@ class TestRunCompletionProjection:
         assert result["latest_summary"] == "Build failed: 3 errors"
 
     def test_invalid_transition_skipped_safely(self, store):
-        """If task is already 'done', projecting run_status='done'→'review' should be skipped."""
+        """If task is already 'done', projecting run_status='done' should remain stable."""
         task = store.create_task({"title": "Done task"})
         tid = task["id"]
         store.transition_task(tid, "planned")
@@ -155,7 +155,7 @@ class TestRunCompletionProjection:
         store.transition_task(tid, "selfcheck")
         store.transition_task(tid, "done")
         result = store.project_task_from_run(tid, run_status="done")
-        # done → review is invalid (done only allows → backlog)
+        # done → done is a no-op and should not reopen the task
         assert result["status"] == "done"
 
 
@@ -193,7 +193,7 @@ class TestProjectionEdgeCases:
             summary="All good",
             run_id="run_combo",
         )
-        assert result["status"] == "review"
+        assert result["status"] == "done"
         assert result["review_verdict"] == "approve"
         assert len(result["selfcheck_items"]) == 1
         assert result["latest_summary"] == "All good"

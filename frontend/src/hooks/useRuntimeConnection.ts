@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
-import type { ChatMessage, RunReportRecord, TaskCard, RunRecord, NodeExecutionRecord } from '@/lib/types';
+import { NODE_TYPES, type ChatMessage, type RunReportRecord, type TaskCard, type RunRecord, type NodeExecutionRecord } from '@/lib/types';
+import { buildReadableCurrentWork, describeNodeActivity } from '@/lib/nodeOutputHumanizer';
 import type { Node, Edge as RFEdge } from '@xyflow/react';
 
 // ── Helpers ──
@@ -33,12 +34,98 @@ function toEpochSeconds(value: unknown, fallback = Date.now() / 1000): number {
     return num > 10_000_000_000 ? num / 1000 : num;
 }
 
+function normalizeEpochMs(value: unknown, fallback = 0): number {
+    const num = Number(value || 0);
+    if (!Number.isFinite(num) || num <= 0) return fallback;
+    return num < 10_000_000_000 ? Math.round(num * 1000) : Math.round(num);
+}
+
+function deriveDurationSeconds(startedAt: unknown, endedAt: unknown): number | undefined {
+    const startedMs = normalizeEpochMs(startedAt, 0);
+    const endedMs = normalizeEpochMs(endedAt, 0);
+    if (!startedMs || !endedMs || endedMs < startedMs) return undefined;
+    return Math.max(0, Math.round((endedMs - startedMs) / 1000));
+}
+
+function normalizeCanvasNodeType(value: unknown): string {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return 'builder';
+    if (NODE_TYPES[raw]) return raw;
+
+    const withoutNumericSuffix = raw.replace(/(?:[_-]?\d+)+$/, '');
+    if (withoutNumericSuffix && NODE_TYPES[withoutNumericSuffix]) return withoutNumericSuffix;
+
+    const alphaPrefix = raw.match(/^[a-z]+/)?.[0] || '';
+    if (alphaPrefix && NODE_TYPES[alphaPrefix]) return alphaPrefix;
+
+    return raw;
+}
+
 function clearRunActivity(runPatch: Partial<RunRecord> & Pick<RunRecord, 'id'>): Partial<RunRecord> & Pick<RunRecord, 'id'> {
     return {
         ...runPatch,
         current_node_execution_id: '',
         active_node_execution_ids: [],
     };
+}
+
+function connectorNodeStatusLabel(status: string, lang: 'en' | 'zh'): string {
+    const normalized = String(status || '').trim().toLowerCase();
+    const zhMap: Record<string, string> = {
+        queued: '排队中',
+        running: '执行中',
+        passed: '已完成',
+        failed: '失败',
+        blocked: '阻塞',
+        waiting_approval: '等待审批',
+        skipped: '已跳过',
+        cancelled: '已取消',
+    };
+    const enMap: Record<string, string> = {
+        queued: 'Queued',
+        running: 'Running',
+        passed: 'Passed',
+        failed: 'Failed',
+        blocked: 'Blocked',
+        waiting_approval: 'Awaiting approval',
+        skipped: 'Skipped',
+        cancelled: 'Cancelled',
+    };
+    return (lang === 'zh' ? zhMap : enMap)[normalized] || normalized || (lang === 'zh' ? '未知' : 'Unknown');
+}
+
+function connectorReviewLabel(decision: string, lang: 'en' | 'zh'): string {
+    const normalized = String(decision || '').trim().toLowerCase();
+    const zhMap: Record<string, string> = {
+        approve: '通过',
+        reject: '驳回',
+        needs_fix: '需修复',
+        blocked: '阻塞',
+    };
+    const enMap: Record<string, string> = {
+        approve: 'Approved',
+        reject: 'Rejected',
+        needs_fix: 'Needs fix',
+        blocked: 'Blocked',
+    };
+    return (lang === 'zh' ? zhMap : enMap)[normalized] || normalized || (lang === 'zh' ? '未知' : 'Unknown');
+}
+
+function connectorValidationLabel(summaryStatus: string, lang: 'en' | 'zh'): string {
+    const normalized = String(summaryStatus || '').trim().toLowerCase();
+    const zhMap: Record<string, string> = {
+        passed: '通过',
+        failed: '失败',
+        blocked: '阻塞',
+        skipped: '跳过',
+    };
+    const enMap: Record<string, string> = {
+        passed: 'Passed',
+        failed: 'Failed',
+        blocked: 'Blocked',
+        skipped: 'Skipped',
+    };
+    return (lang === 'zh' ? zhMap : enMap)[normalized] || normalized || (lang === 'zh' ? '未知' : 'Unknown');
 }
 
 // Preview validation
@@ -74,8 +161,10 @@ export interface UseRuntimeConnectionOptions {
     wsUrl: string;
     lang: 'en' | 'zh';
     difficulty: 'simple' | 'standard' | 'pro';
+    goalRuntime?: 'local' | 'openclaw';
+    sessionId?: string;
     messages: ChatMessage[];
-    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string) => void;
+    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: import('@/lib/types').ChatMessage['completionData']) => void;
     addReport: (report: RunReportRecord) => void;
     buildPlanNodes: (
         subtasks: Array<{ id: string; agent: string; task: string; depends_on: string[] }>,
@@ -95,6 +184,13 @@ export interface UseRuntimeConnectionOptions {
     onMergeNodeExecution?: (ne: Partial<NodeExecutionRecord> & Pick<NodeExecutionRecord, 'id' | 'run_id'>) => void;
     /** Active OpenClaw runs to re-check when the WS reconnects. */
     reconnectRunIds?: string[];
+    /** Feed connector/session events to UI consumers such as OpenClawPanel. */
+    onConnectorEvent?: (event: {
+        type: string;
+        label: string;
+        detail?: string;
+        timestamp: number;
+    }) => void;
 }
 
 export interface UseRuntimeConnectionReturn {
@@ -119,17 +215,28 @@ export interface UseRuntimeConnectionReturn {
     rerunNodeWS: (neId: string) => void;
     /** P1-2C: Re-dispatch stale nodes on WS reconnect */
     recheckStaleNodes: (runId: string) => Promise<void>;
+    /** Manual WS reconnect for connector UI. */
+    reconnect: () => void;
+    /** Backend runtime/session metadata shown in desktop connector UI. */
+    connectorRuntimeId: string;
+    connectorPid: string;
+    connectorConnectedAt: number | null;
+    connectorLastEventAt: number | null;
 }
 
 export function useRuntimeConnection({
-    wsUrl, lang, difficulty, messages, addMessage, addReport,
+    wsUrl, lang, difficulty, goalRuntime = 'local', sessionId = '', messages, addMessage, addReport,
     buildPlanNodes, updateNodeData, nodes, edges, setNodes,
-    onMergeTask, onMergeRun, onMergeNodeExecution, reconnectRunIds = [],
+    onMergeTask, onMergeRun, onMergeNodeExecution, reconnectRunIds = [], onConnectorEvent,
 }: UseRuntimeConnectionOptions): UseRuntimeConnectionReturn {
     const [running, setRunning] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [previewRunId, setPreviewRunId] = useState<string | null>(null);
     const [canvasView, setCanvasView] = useState<'editor' | 'preview'>('editor');
+    const [connectorRuntimeId, setConnectorRuntimeId] = useState('');
+    const [connectorPid, setConnectorPid] = useState('');
+    const [connectorConnectedAt, setConnectorConnectedAt] = useState<number | null>(null);
+    const [connectorLastEventAt, setConnectorLastEventAt] = useState<number | null>(null);
 
     // Run-scoped refs
     const subtaskNodeMap = useRef<Record<string, string>>({});
@@ -137,6 +244,8 @@ export function useRuntimeConnection({
     const previewReadyForRunRef = useRef<boolean>(false);
     const previewFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const runPreviewUrlRef = useRef<string>('');
+    const canonicalTaskIdRef = useRef<string>('');
+    const canonicalRunIdRef = useRef<string>('');
     const runSubtasksRef = useRef<Record<string, {
         task?: string; agent?: string; output?: string; error?: string;
         status?: string; retries?: number; startedAt?: number; endedAt?: number;
@@ -146,12 +255,85 @@ export function useRuntimeConnection({
     const waitingAiLastNotifyRef = useRef<Record<string, number>>({});
     const previousConnectedRef = useRef(false);
 
+    const emitConnectorEvent = useCallback((type: string, label: string, detail?: string, timestamp = Date.now()) => {
+        setConnectorLastEventAt(timestamp);
+        onConnectorEvent?.({ type, label, detail, timestamp });
+    }, [onConnectorEvent]);
+
     const appendSubtaskTimeline = useCallback((subtaskId: string, line: string) => {
         if (!subtaskId || !line.trim()) return;
         const prev = runSubtasksRef.current[subtaskId] || {};
-        const events = [...(prev.timelineEvents || []), line.trim()].slice(-30);
+        const events = [...(prev.timelineEvents || []), line.trim()].slice(-80);
         runSubtasksRef.current[subtaskId] = { ...prev, timelineEvents: events };
     }, []);
+
+    const appendCanvasNodeLog = useCallback((canvasNodeId: string, entry: { ts?: number; msg: string; type?: string }) => {
+        const message = String(entry.msg || '').trim();
+        if (!canvasNodeId || !message) return;
+        const ts = normalizeEpochMs(entry.ts, Date.now());
+        const type = String(entry.type || 'info');
+        setNodes((prev) => prev.map((node) => {
+            if (node.id !== canvasNodeId) return node;
+            const currentLog = Array.isArray(node.data?.log)
+                ? (node.data.log as Array<{ ts?: number; msg?: string; type?: string }>)
+                : [];
+            const nextEntry = {
+                ts,
+                msg: message.slice(0, 520),
+                type,
+            };
+            const last = currentLog[currentLog.length - 1];
+            const duplicate = last
+                && String(last.msg || '') === nextEntry.msg
+                && String(last.type || 'info') === nextEntry.type
+                && Math.abs(normalizeEpochMs(last.ts, 0) - nextEntry.ts) < 1500;
+            const nextLog = duplicate ? currentLog : [...currentLog, nextEntry].slice(-80);
+            return {
+                ...node,
+                data: {
+                    ...node.data,
+                    log: nextLog,
+                },
+            };
+        }));
+    }, [setNodes]);
+
+    const mergeCanvasNodeLogs = useCallback((canvasNodeId: string, entries: Array<{ ts?: number; msg: string; type?: string }>) => {
+        const sanitized = entries
+            .map((entry) => ({
+                ts: normalizeEpochMs(entry.ts, Date.now()),
+                msg: String(entry.msg || '').trim().slice(0, 520),
+                type: String(entry.type || 'info'),
+            }))
+            .filter((entry) => entry.msg);
+
+        if (!canvasNodeId || sanitized.length === 0) return;
+
+        setNodes((prev) => prev.map((node) => {
+            if (node.id !== canvasNodeId) return node;
+            const currentLog = Array.isArray(node.data?.log)
+                ? (node.data.log as Array<{ ts?: number; msg?: string; type?: string }>)
+                : [];
+            const merged = [...currentLog];
+            for (const nextEntry of sanitized) {
+                const last = merged[merged.length - 1];
+                const duplicate = last
+                    && String(last.msg || '') === nextEntry.msg
+                    && String(last.type || 'info') === nextEntry.type
+                    && Math.abs(normalizeEpochMs(last.ts, 0) - nextEntry.ts) < 1500;
+                if (!duplicate) {
+                    merged.push(nextEntry);
+                }
+            }
+            return {
+                ...node,
+                data: {
+                    ...node.data,
+                    log: merged.slice(-80),
+                },
+            };
+        }));
+    }, [setNodes]);
 
     const clearPreviewFallbackTimer = useCallback(() => {
         if (previewFallbackTimerRef.current) {
@@ -169,18 +351,33 @@ export function useRuntimeConnection({
     const resolveCanvasNodeId = useCallback((payload: Record<string, unknown>) => {
         const nodeExecutionId = String(payload.nodeExecutionId || '').trim();
         const nodeKey = String(payload.nodeKey || '').trim();
+        const normalizedNodeKey = normalizeCanvasNodeType(nodeKey);
         const subtaskId = String(payload.subtaskId || '').trim();
         const nodeLabel = String(payload.nodeLabel || '').trim();
+
+        if (nodeExecutionId && subtaskNodeMap.current[nodeExecutionId]) {
+            return subtaskNodeMap.current[nodeExecutionId];
+        }
+        if (subtaskId && subtaskNodeMap.current[subtaskId]) {
+            return subtaskNodeMap.current[subtaskId];
+        }
 
         const exactMatch = nodes.find((node) =>
             (nodeExecutionId && String(node.data?.nodeExecutionId || '').trim() === nodeExecutionId) ||
             (nodeKey && node.id === nodeKey) ||
+            (nodeKey && String(node.data?.rawNodeKey || '').trim() === nodeKey) ||
             (subtaskId && String(node.data?.subtaskId || '').trim() === subtaskId),
         );
         if (exactMatch) return exactMatch.id;
 
         if (nodeKey) {
-            const typeMatches = nodes.filter((node) => String(node.data?.nodeType || '').trim() === nodeKey);
+            const typeMatches = nodes.filter((node) => {
+                const nodeType = String(node.data?.nodeType || '').trim().toLowerCase();
+                const rawNodeKey = String(node.data?.rawNodeKey || '').trim().toLowerCase();
+                return nodeType === nodeKey.toLowerCase()
+                    || rawNodeKey === nodeKey.toLowerCase()
+                    || (!!normalizedNodeKey && nodeType === normalizedNodeKey);
+            });
             if (typeMatches.length === 1) return typeMatches[0].id;
             const activeTypeMatch = typeMatches.find((node) => ['running', 'queued', 'blocked', 'waiting_approval'].includes(String(node.data?.status || '').trim()));
             if (activeTypeMatch) return activeTypeMatch.id;
@@ -204,6 +401,8 @@ export function useRuntimeConnection({
         runStartedAtRef.current = Date.now();
         previewReadyForRunRef.current = false;
         runPreviewUrlRef.current = '';
+        canonicalTaskIdRef.current = '';
+        canonicalRunIdRef.current = '';
         setPreviewRunId(null);
         runSubtasksRef.current = {};
         browserModeNotifiedRef.current = {};
@@ -223,23 +422,166 @@ export function useRuntimeConnection({
             const version = String(msg.version || 'unknown');
             const runtimeId = String(msg.runtime_id || 'n/a');
             const pid = String(msg.pid || 'n/a');
+            setConnectorRuntimeId(runtimeId === 'n/a' ? '' : runtimeId);
+            setConnectorPid(pid === 'n/a' ? '' : pid);
+            setConnectorConnectedAt(Date.now());
             addMessage('system',
-                tr(`🟢 后端已连接：v${version} · runtime ${runtimeId} · pid ${pid}`, `🟢 Backend connected: v${version} · runtime ${runtimeId} · pid ${pid}`),
+                tr(`后端已连接：v${version} · runtime ${runtimeId} · pid ${pid}`, `Backend connected: v${version} · runtime ${runtimeId} · pid ${pid}`),
                 'System', '🟢', 'var(--green)');
             addConsoleLog(`[connected] version=${version} runtime=${runtimeId} pid=${pid}`);
+            emitConnectorEvent(
+                'bridge_connected',
+                tr('桌面桥接已连接', 'Desktop bridge connected'),
+                `${runtimeId} · pid ${pid}`,
+            );
 
         } else if (t === 'orchestrator_start') {
             setRunning(true);
             resetRunState();
             setPreviewUrl(null);
             setCanvasView('editor');
-            addMessage('system', tr('🧠 已接收目标，正在规划执行...', '🧠 Goal received. Planning execution...'), 'Orchestrator', '🧠');
+            addMessage('system', tr('已接收目标，正在规划执行...', 'Goal received. Planning execution...'), 'Orchestrator', '🧠');
             addConsoleLog(`[orchestrator_start] difficulty=${String(msg.difficulty || 'standard')}`);
+
+        } else if (t === 'run_goal_ack') {
+            // P0-1: Backend created canonical task/run/NEs — merge into frontend state
+            const payload = (msg.payload || msg) as Record<string, unknown>;
+            const taskId = String(payload.taskId || '');
+            const runId = String(payload.runId || '');
+            const taskData = payload.task as Record<string, unknown> | undefined;
+            const runData = payload.run as Record<string, unknown> | undefined;
+            const nodeExecutions = (payload.nodeExecutions || []) as Array<Record<string, unknown>>;
+            if (taskId) canonicalTaskIdRef.current = taskId;
+            if (runId) canonicalRunIdRef.current = runId;
+            addConsoleLog(`[run_goal_ack] taskId=${taskId} runId=${runId} NEs=${nodeExecutions.length}`);
+            emitConnectorEvent(
+                'task_created',
+                tr('已创建规范任务', 'Canonical task created'),
+                taskId && runId ? `${taskId} · ${runId}` : undefined,
+                Date.now(),
+            );
+
+            // Merge task into board
+            if (taskId && taskData && onMergeTask) {
+                onMergeTask({ id: taskId, ...taskData } as Partial<TaskCard> & Pick<TaskCard, 'id'>);
+            }
+            // Merge run
+            if (runId && runData && onMergeRun) {
+                onMergeRun({ id: runId, ...runData } as Partial<RunRecord> & Pick<RunRecord, 'id'>);
+            }
+            // Merge NEs
+            if (onMergeNodeExecution) {
+                for (const ne of nodeExecutions) {
+                    if (ne.id && ne.run_id) {
+                        onMergeNodeExecution({ id: String(ne.id), run_id: String(ne.run_id), ...ne } as Partial<NodeExecutionRecord> & Pick<NodeExecutionRecord, 'id' | 'run_id'>);
+                    }
+                }
+            }
+
+            // §P0-1: Build canvas nodes for ALL custom plans (local AND openclaw).
+            // Previously gated by `effectiveRuntime === 'openclaw'`, which caused
+            // local custom runs (dispatched by OpenClaw) to show an empty canvas.
+            const effectiveRuntime = String(payload.effectiveRuntime || payload.requestedRuntime || '');
+            if (nodeExecutions.length > 0) {
+                const subtaskFormat = nodeExecutions.map(ne => ({
+                    id: String(ne.id || ''),
+                    agent: normalizeCanvasNodeType(ne.node_key || 'builder'),
+                    task: String(ne.inputSummary || ne.input_summary || ne.node_label || ne.node_key || ''),
+                    depends_on: Array.isArray(ne.depends_on_keys) ? ne.depends_on_keys.map(String) : [],
+                }));
+                // Map NE depends_on_keys (node_keys) to NE ids for edge building
+                const keyToId: Record<string, string> = {};
+                for (const ne of nodeExecutions) {
+                    if (ne.node_key && ne.id) keyToId[String(ne.node_key)] = String(ne.id);
+                }
+                const subtasksWithIdDeps = subtaskFormat.map(st => ({
+                    ...st,
+                    depends_on: st.depends_on.map(key => keyToId[key] || key),
+                }));
+                subtaskNodeMap.current = buildPlanNodes(subtasksWithIdDeps, lang);
+
+                // §P0-3: Also build a subtask-index → NE-id mapping so that local
+                // orchestrator events (using subtask IDs "1","2","3"...) can find
+                // the correct canvas node via NE id.
+                for (let i = 0; i < nodeExecutions.length; i++) {
+                    const neId = String(nodeExecutions[i].id || '').trim();
+                    const subtaskId = String(i + 1);  // orchestrator subtask IDs are 1-indexed
+                    if (neId && subtaskNodeMap.current[neId]) {
+                        // Map subtask ID → same canvas node as the NE ID
+                        subtaskNodeMap.current[subtaskId] = subtaskNodeMap.current[neId];
+                    }
+                }
+
+                for (const ne of nodeExecutions) {
+                    const neId = String(ne.id || '').trim();
+                    const canvasNodeId = neId ? subtaskNodeMap.current[neId] : '';
+                    if (!canvasNodeId) continue;
+                    const startedAt = normalizeEpochMs(ne.startedAt ?? ne.started_at, 0);
+                    const endedAt = normalizeEpochMs(ne.endedAt ?? ne.ended_at, 0);
+                    const durationSeconds = Number.isFinite(Number(ne.durationSeconds ?? ne.duration_seconds))
+                        ? Math.max(0, Number(ne.durationSeconds ?? ne.duration_seconds))
+                        : deriveDurationSeconds(startedAt, endedAt);
+                    const progress = Number(ne.progress);
+                    const tokensUsed = Number(ne.tokensUsed ?? ne.tokens_used);
+                    const cost = Number(ne.cost ?? 0);
+                    updateNodeData(canvasNodeId, {
+                        nodeExecutionId: neId,
+                        rawNodeKey: String(ne.node_key || '').trim(),
+                        nodeType: normalizeCanvasNodeType(ne.node_key || 'builder'),
+                        label: String(ne.node_label || ne.node_key || '').trim(),
+                        status: String(ne.status || 'queued').trim() || 'queued',
+                        runtime: effectiveRuntime === 'openclaw' ? 'openclaw' : 'local',
+                        ...(Number.isFinite(progress) ? { progress } : {}),
+                        ...(String(ne.assignedModel || ne.assigned_model || '').trim()
+                            ? { assignedModel: String(ne.assignedModel || ne.assigned_model || '').trim() }
+                            : {}),
+                        ...(String(ne.inputSummary || ne.input_summary || '').trim()
+                            ? { taskDescription: String(ne.inputSummary || ne.input_summary || '').trim() }
+                            : {}),
+                        ...(String(ne.outputSummary || ne.output_summary || '').trim()
+                            ? {
+                                outputSummary: String(ne.outputSummary || ne.output_summary || '').trim(),
+                                lastOutput: String(ne.outputSummary || ne.output_summary || '').trim(),
+                            }
+                            : {}),
+                        ...(Number.isFinite(tokensUsed) ? { tokensUsed } : {}),
+                        ...(Number.isFinite(cost) ? { cost } : {}),
+                        ...(startedAt > 0 ? { startedAt } : {}),
+                        ...(endedAt > 0 ? { endedAt } : {}),
+                        ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+                    });
+                }
+            }
+
+            // Add visible chat message for task creation
+            const taskTitle = String(taskData?.title || taskData?.id || taskId || '').slice(0, 80);
+            addMessage('system',
+                effectiveRuntime === 'openclaw'
+                    ? tr(`☁ OpenClaw 已创建任务: ${taskTitle} (${nodeExecutions.length} 节点)`,
+                         `☁ OpenClaw created task: ${taskTitle} (${nodeExecutions.length} nodes)`)
+                    : tr(`✅ 任务已创建: ${taskTitle}`, `✅ Task created: ${taskTitle}`),
+                effectiveRuntime === 'openclaw' ? 'OpenClaw' : 'System',
+                effectiveRuntime === 'openclaw' ? 'OC' : '✅',
+                effectiveRuntime === 'openclaw' ? '#a855f7' : '#22c55e');
+
+        } else if (t === 'task_created') {
+            // P0-1: Another client created a task — merge into board
+            const payload = (msg.payload || msg) as Record<string, unknown>;
+            const taskData = payload.task as Record<string, unknown> | undefined;
+            if (taskData && taskData.id && onMergeTask) {
+                onMergeTask({ id: String(taskData.id), ...taskData } as Partial<TaskCard> & Pick<TaskCard, 'id'>);
+                addConsoleLog(`[task_created] taskId=${String(taskData.id)}`);
+                emitConnectorEvent(
+                    'task_created',
+                    tr(`任务已创建: ${String(taskData.title || taskData.id).slice(0, 60)}`, `Task created: ${String(taskData.title || taskData.id).slice(0, 60)}`),
+                    String(taskData.id),
+                );
+            }
 
         } else if (t === 'plan_created') {
             const subtasks = (msg.subtasks as Array<{ id: string; agent: string; task: string; depends_on: string[] }>) || [];
             addMessage('system',
-                tr(`📋 计划已创建：${msg.total} 个节点（详细执行步骤已写入日志）`, `📋 Plan created: ${msg.total} nodes (detailed execution is in logs)`),
+                tr(`计划已创建：${msg.total} 个步骤，开始自动执行`, `Plan ready: ${msg.total} steps. Starting automatic execution...`),
                 'Plan', '📋');
             try { console.info('[Evermind][Plan]', subtasks); } catch { /* noop */ }
             addConsoleLog(`[plan_created] total=${String(msg.total || subtasks.length)}`);
@@ -258,10 +600,27 @@ export function useRuntimeConnection({
                 status: 'running', startedAt, endedAt: undefined, durationSeconds: undefined,
             };
             appendSubtaskTimeline(subtaskId, `开始执行：${agentName} 接收任务并进入处理流程。`);
-            addMessage('system', tr(`⚙️ ${agentName} #${subtaskId} 开始执行`, `⚙️ ${agentName} #${subtaskId} started`), `${agentName} #${subtaskId}`, '⚙️', 'var(--blue)');
+            if (String(msg.task || '').trim()) {
+                appendSubtaskTimeline(subtaskId, `任务说明：${String(msg.task || '').trim().slice(0, 240)}`);
+            }
+            // P1-3: Humanized agent names for feed
+            const agentLabel = agentName.replace(/([a-z])([A-Z])/g, '$1 $2');
+            const humanLabel = {
+                builder: tr('代码生成', 'Code generation'),
+                reviewer: tr('代码审核', 'Code review'),
+                tester: tr('自动测试', 'Automated testing'),
+                deployer: tr('自动部署', 'Auto-deployment'),
+                validator: tr('质量验证', 'Quality validation'),
+                planner: tr('任务规划', 'Task planning'),
+            }[agentName.toLowerCase()] || `${agentLabel} step`;
+            addMessage('system', tr(`${humanLabel}开始`, `${humanLabel} started`), `${agentName} #${subtaskId}`, '⚙️', 'var(--blue)');
             addConsoleLog(`[subtask_start] #${subtaskId} agent=${agentName} task=${String(msg.task || '').slice(0, 180)}`);
             const canvasNodeId = subtaskNodeMap.current[subtaskId];
-            if (canvasNodeId) updateNodeData(canvasNodeId, { status: 'running', progress: 30, startedAt });
+            if (canvasNodeId) updateNodeData(canvasNodeId, {
+                status: 'running', progress: 5, startedAt,
+                outputSummary: tr(`${agentName} 正在接收任务并开始处理...`, `${agentName} received task, starting work...`),
+                taskDescription: String(msg.task || ''),
+            });
 
         } else if (t === 'subtask_complete') {
             const subtaskId = msg.subtask_id as string;
@@ -282,28 +641,72 @@ export function useRuntimeConnection({
                 ? `执行完成：${agentName} 已完成，耗时约 ${durationSeconds} 秒。`
                 : `执行失败：${agentName} 结束于失败，耗时约 ${durationSeconds} 秒。`);
             if (err) appendSubtaskTimeline(subtaskId, `失败原因：${err.slice(0, 160)}`);
+            // P1-3: Humanized completion messages
+            const completeLabel = {
+                builder: tr('代码生成', 'Code generation'),
+                reviewer: tr('代码审核', 'Code review'),
+                tester: tr('自动测试', 'Automated testing'),
+                deployer: tr('自动部署', 'Auto-deployment'),
+                validator: tr('质量验证', 'Quality validation'),
+                planner: tr('任务规划', 'Task planning'),
+            }[agentName.toLowerCase()] || agentName;
             addMessage('system',
                 success
-                    ? tr(`✅ ${agentName} #${subtaskId} 已完成`, `✅ ${agentName} #${subtaskId} completed`)
-                    : tr(`❌ ${agentName} #${subtaskId} 执行失败（细节见日志）`, `❌ ${agentName} #${subtaskId} failed (see logs)`),
+                    ? tr(`${completeLabel}完成（${durationSeconds}s）`, `${completeLabel} completed (${durationSeconds}s)`)
+                    : tr(`${completeLabel}遇到问题`, `${completeLabel} encountered an issue`),
                 `${agentName} #${subtaskId}`, success ? '✅' : '❌', success ? 'var(--green)' : 'var(--red)');
             try { console.info(`[Evermind][Subtask ${subtaskId}]`, { agent: agentName, success, output_len: fullOutput.length, output_preview: fullOutput.slice(0, 1200) }); } catch { /* noop */ }
             addConsoleLog(`[subtask_complete] #${subtaskId} agent=${agentName} success=${String(success)} output_len=${fullOutput.length}${err ? ` error=${err.slice(0, 160)}` : ''}`);
             const canvasNodeId = subtaskNodeMap.current[subtaskId];
-            if (canvasNodeId) updateNodeData(canvasNodeId, {
-                status: success ? 'passed' : 'failed',
-                progress: 100,
-                lastOutput: fullOutput.substring(0, 2000),
-                endedAt,
-                startedAt: prevState.startedAt || endedAt,
-            });
+            if (canvasNodeId) {
+                // Build human-readable completion summary
+                const completeSummary = success
+                    ? tr(
+                        `${completeLabel}已完成，耗时 ${durationSeconds} 秒。${fullOutput.length > 0 ? '已产出工作成果。' : ''}`,
+                        `${completeLabel} completed in ${durationSeconds}s.${fullOutput.length > 0 ? ' Output generated.' : ''}`
+                    )
+                    : tr(
+                        `${completeLabel}执行失败。${err ? `原因：${err.slice(0, 100)}` : ''}`,
+                        `${completeLabel} failed.${err ? ` Reason: ${err.slice(0, 100)}` : ''}`
+                    );
+                // Collect timeline log
+                const timelineEvents = (runSubtasksRef.current[subtaskId]?.timelineEvents || [])
+                    .map((msg: string) => ({ ts: Date.now(), msg, type: success ? 'ok' : 'error' }));
+                mergeCanvasNodeLogs(canvasNodeId, timelineEvents);
+                updateNodeData(canvasNodeId, {
+                    status: success ? 'passed' : 'failed',
+                    progress: 100,
+                    lastOutput: fullOutput.substring(0, 4000),
+                    outputSummary: completeSummary,
+                    endedAt,
+                    startedAt: prevState.startedAt || endedAt,
+                    durationSeconds,
+                    tokensUsed: Number(msg.tokens_used || 0),
+                    promptTokens: Number(msg.prompt_tokens || 0),
+                    completionTokens: Number(msg.completion_tokens || 0),
+                    cost: Number(msg.cost || 0),
+                });
+            }
 
         } else if (t === 'files_created') {
             const files = (msg.files as string[]) || [];
             const outputDir = (msg.output_dir as string) || '/tmp/evermind_output';
+            const sid = String(msg.subtask_id || '');
             if (files.length > 0) {
+                if (sid) {
+                    const compactFiles = files.slice(0, 6).map((file) => file.split('/').pop()).join(', ');
+                    appendSubtaskTimeline(sid, tr(`生成文件：${compactFiles}${files.length > 6 ? ' 等' : ''}。输出目录：${outputDir}`, `Generated files: ${compactFiles}${files.length > 6 ? ' and more' : ''}. Output dir: ${outputDir}`));
+                    const canvasNodeId = subtaskNodeMap.current[sid];
+                    if (canvasNodeId) {
+                        appendCanvasNodeLog(canvasNodeId, {
+                            ts: Date.now(),
+                            msg: tr(`已写出 ${files.length} 个文件到 ${outputDir}`, `Wrote ${files.length} file(s) to ${outputDir}`),
+                            type: 'ok',
+                        });
+                    }
+                }
                 addMessage('system',
-                    tr(`📁 产物已更新：${files.length} 个文件（目录：<code>${outputDir}</code>）`, `📁 Artifacts updated: ${files.length} files (dir: <code>${outputDir}</code>)`),
+                    tr(`产物已更新：${files.length} 个文件（目录：<code>${outputDir}</code>）`, `Artifacts updated: ${files.length} files (dir: <code>${outputDir}</code>)`),
                     'File Output', '📁', 'var(--green)');
                 addConsoleLog(`[files_created] count=${files.length} dir=${outputDir}`);
             }
@@ -311,12 +714,24 @@ export function useRuntimeConnection({
         } else if (t === 'preview_ready') {
             const rawPreviewUrl = msg.preview_url as string;
             const files = (msg.files as string[]) || [];
+            const sid = String(msg.subtask_id || '');
             if (rawPreviewUrl) {
                 previewReadyForRunRef.current = true;
                 clearPreviewFallbackTimer();
                 let resolvedUrl = rawPreviewUrl.trim();
                 try { resolvedUrl = new URL(resolvedUrl, 'http://127.0.0.1:8765').toString(); } catch { /* Keep original */ }
                 runPreviewUrlRef.current = resolvedUrl;
+                if (sid) {
+                    appendSubtaskTimeline(sid, tr(`预览已就绪：${resolvedUrl}`, `Preview ready: ${resolvedUrl}`));
+                    const canvasNodeId = subtaskNodeMap.current[sid];
+                    if (canvasNodeId) {
+                        appendCanvasNodeLog(canvasNodeId, {
+                            ts: Date.now(),
+                            msg: tr(`预览地址已生成：${resolvedUrl}`, `Preview URL ready: ${resolvedUrl}`),
+                            type: 'ok',
+                        });
+                    }
+                }
                 const safePreviewUrl = escapeHtml(resolvedUrl);
                 const previewWithBust = withCacheBust(resolvedUrl);
                 setPreviewUrl(previewWithBust);
@@ -324,17 +739,17 @@ export function useRuntimeConnection({
                 const shortFiles = files.slice(0, 3).map((f: string) => f.split('/').pop()).join(', ');
                 addMessage('system',
                     tr(
-                        `🔗 <b>预览已就绪</b>，已自动切换到预览视图。<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">👉 新窗口打开</a>${shortFiles ? `<br/>📄 文件: ${shortFiles}` : ''}`,
-                        `🔗 <b>Preview ready</b>, switched to preview view.<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">👉 Open in new window</a>${shortFiles ? `<br/>📄 Files: ${shortFiles}` : ''}`),
+                        `<b>预览已就绪</b>，已自动切换到预览视图。<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">新窗口打开</a>${shortFiles ? `<br/>文件: ${shortFiles}` : ''}`,
+                        `<b>Preview ready</b>, switched to preview view.<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">Open in new window</a>${shortFiles ? `<br/>Files: ${shortFiles}` : ''}`),
                     'Preview', '🔗', 'var(--green)');
                 try { console.info('[Evermind][PreviewReady]', { preview_url: resolvedUrl, files, final: Boolean(msg.final) }); } catch { /* noop */ }
                 addConsoleLog(`[preview_ready] url=${resolvedUrl} files=${files.length} final=${String(Boolean(msg.final))}`);
                 void (async () => {
                     const check = await runClientPreviewValidation(resolvedUrl);
                     if (check.ok) {
-                        addMessage('system', tr(`✅ 预览验收通过（HTTP ${check.status}，${check.bytes} bytes）`, `✅ Preview validation passed (HTTP ${check.status}, ${check.bytes} bytes)`), 'Validator', '✅', 'var(--green)');
+                        addMessage('system', tr(`预览验收通过（HTTP ${check.status}，${check.bytes} bytes）`, `Preview validation passed (HTTP ${check.status}, ${check.bytes} bytes)`), 'Validator', '✅', 'var(--green)');
                     } else {
-                        addMessage('system', tr(`❌ 预览验收失败：${check.errors.slice(0, 3).join('；')}`, `❌ Preview validation failed: ${check.errors.slice(0, 3).join('; ')}`), 'Validator', '❌', 'var(--red)');
+                        addMessage('system', tr(`预览验收失败：${check.errors.slice(0, 3).join('；')}`, `Preview validation failed: ${check.errors.slice(0, 3).join('; ')}`), 'Validator', '❌', 'var(--red)');
                     }
                 })();
             }
@@ -349,13 +764,13 @@ export function useRuntimeConnection({
                     ? `触发重试：第 ${retryCount}/${String(msg.max_retries || '?')} 次，原因：${retryReason}`
                     : `触发重试：第 ${retryCount}/${String(msg.max_retries || '?')} 次。`);
             }
-            addMessage('system', tr(`🔄 触发重试（第 ${msg.retry}/${msg.max_retries} 次）`, `🔄 Retry triggered (attempt ${msg.retry}/${msg.max_retries})`), `Retry #${msg.subtask_id}`, '🔄', 'var(--yellow)');
+            addMessage('system', tr(`触发重试（第 ${msg.retry}/${msg.max_retries} 次）`, `Retry triggered (attempt ${msg.retry}/${msg.max_retries})`), `Retry #${msg.subtask_id}`, '🔄', 'var(--yellow)');
             addConsoleLog(`[subtask_retry] #${String(msg.subtask_id)} retry=${String(msg.retry)}/${String(msg.max_retries)} error=${String(msg.error || '').slice(0, 180)}`);
             const canvasNodeId = subtaskNodeMap.current[msg.subtask_id as string];
             if (canvasNodeId) updateNodeData(canvasNodeId, { status: 'running', progress: 10 });
 
         } else if (t === 'test_failed_retrying') {
-            addMessage('system', tr('🔴 测试未通过，正在回滚并重试修复', '🔴 Tests failed, rerunning with repair instructions'), 'Tester', '🧪', 'var(--red)');
+            addMessage('system', tr('测试未通过，正在回滚并重试修复', 'Tests failed, rerunning with repair instructions'), 'Tester', '🧪', 'var(--red)');
 
         } else if (t === 'orchestrator_complete') {
             setRunning(false);
@@ -365,9 +780,6 @@ export function useRuntimeConnection({
                 task?: string; output_preview?: string; error?: string;
                 work_summary?: string[]; files_created?: string[];
             }>) || [];
-            const reportLines = subtasks.map(st =>
-                `• #${st.id} ${st.agent}: ${st.status}${st.retries > 0 ? ` (retry ${st.retries})` : ''}`
-            ).join('<br/>');
             const diffRaw = String(msg.difficulty || difficulty).toLowerCase();
             const runDifficulty: 'simple' | 'standard' | 'pro' = (
                 diffRaw === 'simple' || diffRaw === 'pro' || diffRaw === 'standard'
@@ -384,6 +796,8 @@ export function useRuntimeConnection({
                 totalRetries: Number(msg.total_retries || 0),
                 durationSeconds: Number(msg.duration_seconds || 0),
                 previewUrl: runPreviewUrlRef.current || undefined,
+                taskId: canonicalTaskIdRef.current || undefined,
+                runId: canonicalRunIdRef.current || undefined,
                 subtasks: subtasks.map((st) => {
                     const runtime = runSubtasksRef.current[String(st.id)] || {};
                     return {
@@ -409,47 +823,74 @@ export function useRuntimeConnection({
                 try {
                     const { saveReportApi, createTask, transitionTask: transApi, updateTaskApi } = await import('@/lib/api');
                     const reportPayload: Record<string, unknown> = {
-                        ...reportRecord, task_id: reportRecord.taskId || '',
+                        ...reportRecord,
+                        task_id: canonicalTaskIdRef.current || reportRecord.taskId || '',
+                        run_id: canonicalRunIdRef.current || reportRecord.runId || '',
                         subtasks: reportRecord.subtasks.map((st) => ({ ...st, files_created: st.filesCreated || [] })),
                     };
                     await saveReportApi(reportPayload).catch(() => {});
-                    const taskTitle = reportRecord.goal?.slice(0, 120) || 'Untitled Run';
-                    const { task: newTask } = await createTask({
-                        title: taskTitle,
-                        description: `Auto-created from run at ${new Date().toLocaleString()}`,
-                        mode: runDifficulty === 'pro' ? 'pro' : 'standard', priority: 'medium',
-                    });
-                    if (newTask?.id) {
-                        reportPayload.task_id = newTask.id;
-                        await saveReportApi({ ...reportPayload, id: reportRecord.id, task_id: newTask.id }).catch(() => {});
-                        await transApi(newTask.id, 'planned').catch(() => {});
-                        await transApi(newTask.id, 'executing').catch(() => {});
-                        if (success) {
-                            await transApi(newTask.id, 'review').catch(() => {});
-                            const reviewerSt = subtasks.find(s => s.agent === 'reviewer');
-                            if (reviewerSt) {
-                                try {
-                                    const verdict = JSON.parse(reviewerSt.output_preview || '{}');
-                                    await updateTaskApi(newTask.id, {
-                                        reviewVerdict: verdict.verdict === 'REJECTED' ? 'rejected' : 'approved',
-                                        reviewIssues: verdict.improvements || [],
-                                        latestSummary: taskTitle,
-                                    } as Partial<RunReportRecord & { reviewVerdict: string; reviewIssues: string[]; latestSummary: string }>).catch(() => {});
-                                } catch { /* non-JSON reviewer output */ }
+                    if (!canonicalTaskIdRef.current) {
+                        const taskTitle = reportRecord.goal?.slice(0, 120) || 'Untitled Run';
+                        const { task: newTask } = await createTask({
+                            title: taskTitle,
+                            description: `Auto-created from run at ${new Date().toLocaleString()}`,
+                            mode: runDifficulty === 'pro' ? 'pro' : 'standard', priority: 'medium',
+                        });
+                        if (newTask?.id) {
+                            reportPayload.task_id = newTask.id;
+                            await saveReportApi({ ...reportPayload, id: reportRecord.id, task_id: newTask.id }).catch(() => {});
+                            await transApi(newTask.id, 'planned').catch(() => {});
+                            await transApi(newTask.id, 'executing').catch(() => {});
+                            if (success) {
+                                await transApi(newTask.id, 'review').catch(() => {});
+                                const reviewerSt = subtasks.find(s => s.agent === 'reviewer');
+                                if (reviewerSt) {
+                                    try {
+                                        const verdict = JSON.parse(reviewerSt.output_preview || '{}');
+                                        await updateTaskApi(newTask.id, {
+                                            reviewVerdict: verdict.verdict === 'REJECTED' ? 'rejected' : 'approved',
+                                            reviewIssues: verdict.improvements || [],
+                                            latestSummary: taskTitle,
+                                        } as Partial<RunReportRecord & { reviewVerdict: string; reviewIssues: string[]; latestSummary: string }>).catch(() => {});
+                                    } catch { /* non-JSON reviewer output */ }
+                                }
                             }
                         }
                     }
                 } catch { /* backend persistence failed */ }
             })();
 
+            const completionData: import('@/lib/types').ChatMessage['completionData'] = {
+                success,
+                completed: Number(msg.completed || 0),
+                total: Number(msg.total_subtasks || 0),
+                retries: Number(msg.total_retries || 0),
+                durationSeconds: Number(msg.duration_seconds || 0),
+                difficulty: runDifficulty,
+                subtasks: subtasks.map(st => ({
+                    id: String(st.id),
+                    agent: String(st.agent || 'agent'),
+                    status: String(st.status || 'unknown'),
+                    retries: Number(st.retries || 0),
+                    filesCreated: Array.isArray(st.files_created) ? st.files_created : undefined,
+                    workSummary: Array.isArray(st.work_summary) ? st.work_summary : undefined,
+                })),
+                previewUrl: runPreviewUrlRef.current || undefined,
+            };
+
             addMessage('system',
                 tr(
-                    `${success ? '✅' : '⚠️'} <b>执行完成</b>：${msg.completed}/${msg.total_subtasks} 节点，重试 ${msg.total_retries} 次，耗时 ${msg.duration_seconds}s<br/><br/><b>节点报告</b><br/>${reportLines}<br/><br/>📑 已生成专业报告：可在左侧 <b>报告</b> 按钮查看历史版本。`,
-                    `${success ? '✅' : '⚠️'} <b>Run completed</b>: ${msg.completed}/${msg.total_subtasks} nodes, ${msg.total_retries} retries, ${msg.duration_seconds}s<br/><br/><b>Node report</b><br/>${reportLines}<br/><br/>📑 Professional report generated: open left-side <b>Reports</b> to view history.`),
-                'Report', '🏁', success ? 'var(--green)' : 'var(--orange)');
+                    `<b>执行完成</b>：${msg.completed}/${msg.total_subtasks} 节点，耗时 ${msg.duration_seconds}s`,
+                    `<b>Run completed</b>: ${msg.completed}/${msg.total_subtasks} nodes, ${msg.duration_seconds}s`),
+                'Report', '🏁', success ? 'var(--green)' : 'var(--orange)', completionData);
             addConsoleLog(`[orchestrator_complete] success=${String(success)} completed=${String(msg.completed)}/${String(msg.total_subtasks)} retries=${String(msg.total_retries)} duration=${String(msg.duration_seconds)}s`);
 
             if (success) {
+                // P3-2: If preview URL is already known, switch immediately
+                if (runPreviewUrlRef.current) {
+                    setCanvasView('preview');
+                    previewReadyForRunRef.current = true;
+                }
                 clearPreviewFallbackTimer();
                 previewFallbackTimerRef.current = setTimeout(() => {
                     if (previewReadyForRunRef.current) return;
@@ -467,10 +908,10 @@ export function useRuntimeConnection({
                                 setPreviewUrl(withCacheBust(url));
                                 setCanvasView('preview');
                                 previewReadyForRunRef.current = true;
-                                addMessage('system', tr(`🔗 已自动检测预览：<a href="${url}" target="_blank">打开</a>`, `🔗 Auto-detected preview: <a href="${url}" target="_blank">Open</a>`), 'Preview', '🔗', 'var(--green)');
+                                addMessage('system', tr(`已自动检测预览：<a href="${url}" target="_blank">打开</a>`, `Auto-detected preview: <a href="${url}" target="_blank">Open</a>`), 'Preview', '🔗', 'var(--green)');
                                 addConsoleLog(`[preview_fallback] accepted latest=${latest} mtime=${String(latestMtime)}`);
                             } else if (latest && !freshEnough) {
-                                addMessage('system', tr('⚠️ 检测到的预览文件较旧，已忽略，避免误打开历史产物。', '⚠️ Detected preview artifact is stale, ignored to avoid opening old output.'), 'Preview', '⚠️', 'var(--orange)');
+                                addMessage('system', tr('检测到的预览文件较旧，已忽略，避免误打开历史产物。', 'Detected preview artifact is stale, ignored to avoid opening old output.'), 'Preview', '⚠️', 'var(--orange)');
                                 addConsoleLog(`[preview_fallback] ignored stale latest=${latest} mtime=${String(latestMtime)} runStarted=${String(runStartedAtRef.current)}`);
                             }
                         } catch { /* ignore */ }
@@ -480,12 +921,12 @@ export function useRuntimeConnection({
 
         } else if (t === 'orchestrator_error') {
             setRunning(false);
-            addMessage('system', tr(`❌ 错误：${msg.error}`, `❌ Error: ${msg.error}`), 'Error', '❌', 'var(--red)');
+            addMessage('system', tr(`错误：${msg.error}`, `Error: ${msg.error}`), 'Error', '❌', 'var(--red)');
             addConsoleLog(`[orchestrator_error] ${String(msg.error || '').slice(0, 220)}`);
 
         } else if (t === 'planning_fallback') {
             const fallbackMsg = String(msg.message || 'Planning failed; switched to fallback plan.');
-            addMessage('system', tr(`⚠️ ${fallbackMsg}`, `⚠️ ${fallbackMsg}`), 'Planner', '⚠️', 'var(--orange)');
+            addMessage('system', tr(`${fallbackMsg}`, `${fallbackMsg}`), 'Planner', '⚠️', 'var(--orange)');
             addConsoleLog(`[planning_fallback] ${String(msg.reason || msg.message || '').slice(0, 220)}`);
 
         } else if (t === 'node_start') {
@@ -499,7 +940,7 @@ export function useRuntimeConnection({
         } else if (t === 'config_updated') {
             const providers = (msg.providers as string[]) || [];
             if (providers.length > 0) {
-                addMessage('system', tr(`🔑 API 密钥已生效（${msg.keys_applied} 个）`, `🔑 API keys applied (${msg.keys_applied})`), 'Config', '⚙️', 'var(--green)');
+                addMessage('system', tr(`API 密钥已生效（${msg.keys_applied} 个）`, `API keys applied (${msg.keys_applied})`), 'Config', '⚙️', 'var(--green)');
             }
 
         } else if (t === 'subtask_progress') {
@@ -507,7 +948,7 @@ export function useRuntimeConnection({
             const sid = String(msg.subtask_id || '');
             if (stage === 'error' && msg.message) {
                 if (sid) appendSubtaskTimeline(sid, `执行异常：${String(msg.message).slice(0, 180)}`);
-                addMessage('system', `⚠️ ${msg.message}`, 'Error', '⚠️', 'var(--orange)');
+                addMessage('system', `${msg.message}`, 'Error', '⚠️', 'var(--orange)');
                 addConsoleLog(`[progress] #${sid} stage=error msg=${String(msg.message).slice(0, 220)}`);
             } else if (stage === 'preview_validation') {
                 const ok = Boolean(msg.ok);
@@ -516,61 +957,243 @@ export function useRuntimeConnection({
                 if (sid) appendSubtaskTimeline(sid, ok
                     ? `产物验收通过${typeof score === 'number' ? `（score ${score}）` : ''}`
                     : `产物验收失败：${errors.slice(0, 2).join('；') || '规则校验未通过'}`);
-                if (ok) addMessage('system', tr(`✅ 产物验收通过${score ? `（score ${score}）` : ''}`, `✅ Artifact validation passed${score ? ` (score ${score})` : ''}`), 'Preview Gate', '✅', 'var(--green)');
-                else addMessage('system', tr(`❌ 产物验收失败：${errors.slice(0, 2).join('；')}`, `❌ Artifact validation failed: ${errors.slice(0, 2).join('; ')}`), 'Preview Gate', '❌', 'var(--red)');
+                const canvasNodeId = subtaskNodeMap.current[sid];
+                if (canvasNodeId) {
+                    appendCanvasNodeLog(canvasNodeId, {
+                        ts: Date.now(),
+                        msg: ok
+                            ? tr(`预览验收通过${typeof score === 'number' ? `（score ${score}）` : ''}`, `Preview validation passed${typeof score === 'number' ? ` (score ${score})` : ''}`)
+                            : tr(`预览验收失败：${errors.slice(0, 2).join('；') || '规则校验未通过'}`, `Preview validation failed: ${errors.slice(0, 2).join('; ') || 'rule check failed'}`),
+                        type: ok ? 'ok' : 'error',
+                    });
+                }
+                if (ok) addMessage('system', tr(`产物验收通过${score ? `（score ${score}）` : ''}`, `Artifact validation passed${score ? ` (score ${score})` : ''}`), 'Preview Gate', '✅', 'var(--green)');
+                else addMessage('system', tr(`产物验收失败：${errors.slice(0, 2).join('；')}`, `Artifact validation failed: ${errors.slice(0, 2).join('; ')}`), 'Preview Gate', '❌', 'var(--red)');
                 addConsoleLog(`[progress] #${sid} stage=preview_validation ok=${String(ok)} score=${String(score ?? '')}`);
             } else if (stage === 'preview_validation_failed' && msg.message) {
-                addMessage('system', `❌ ${msg.message}`, 'Preview Gate', '❌', 'var(--red)');
+                if (sid) appendSubtaskTimeline(sid, `预览校验失败：${String(msg.message).slice(0, 180)}`);
+                addMessage('system', `${msg.message}`, 'Preview Gate', '❌', 'var(--red)');
                 addConsoleLog(`[progress] #${sid} stage=preview_validation_failed msg=${String(msg.message).slice(0, 220)}`);
+            } else if (stage === 'preview_waiting_parts') {
+                if (sid) appendSubtaskTimeline(sid, tr('并行构建片段已写出，正在等待另一位构建者完成后再组装与校验。', 'Parallel builder fragment saved; waiting for sibling builder before assembly and validation.'));
+                addConsoleLog(`[progress] #${sid} stage=preview_waiting_parts`);
+            } else if (stage === 'builder_tool_results') {
+                const writeCalls = Number(msg.write_calls || 0);
+                const count = Number(msg.count || 0);
+                if (sid) appendSubtaskTimeline(sid, tr(`工具执行回传 ${count} 条结果，其中检测到 ${writeCalls} 次写文件。`, `Tool loop returned ${count} results, including ${writeCalls} file write operations.`));
+                addConsoleLog(`[progress] #${sid} stage=builder_tool_results count=${count} write_calls=${writeCalls}`);
+            } else if (stage === 'quality_gate') {
+                const score = Number(msg.score || 0);
+                const errors = (msg.errors as string[]) || [];
+                const warnings = (msg.warnings as string[]) || [];
+                if (sid) {
+                    appendSubtaskTimeline(sid, score > 0
+                        ? tr(`质量门评分 ${score}。${errors.length ? `错误：${errors.slice(0, 2).join('；')}。` : ''}${warnings.length ? `警告：${warnings.slice(0, 2).join('；')}。` : ''}`,
+                            `Quality gate score ${score}.${errors.length ? ` Errors: ${errors.slice(0, 2).join('; ')}.` : ''}${warnings.length ? ` Warnings: ${warnings.slice(0, 2).join('; ')}.` : ''}`)
+                        : tr('质量门已执行。', 'Quality gate evaluated.'));
+                }
+                addConsoleLog(`[progress] #${sid} stage=quality_gate score=${score}`);
+            } else if (stage === 'quality_gate_failed') {
+                if (sid) appendSubtaskTimeline(sid, `质量门失败：${String(msg.message || '').slice(0, 220)}`);
+                addConsoleLog(`[progress] #${sid} stage=quality_gate_failed msg=${String(msg.message || '').slice(0, 220)}`);
+            } else if (stage === 'reviewer_visual_gate_failed' || stage === 'reviewer_interaction_gate_failed' || stage === 'tester_visual_gate_failed' || stage === 'tester_interaction_gate_failed') {
+                if (sid) appendSubtaskTimeline(sid, String(msg.message || '').slice(0, 220));
+                addConsoleLog(`[progress] #${sid} stage=${stage} msg=${String(msg.message || '').slice(0, 220)}`);
+            } else if (stage === 'reviewer_rejection') {
+                const rejectionRound = String(msg.rejection_round || '');
+                const maxRejections = String(msg.max_rejections || '');
+                if (sid) appendSubtaskTimeline(sid, tr(`审查员打回作品（第 ${rejectionRound}/${maxRejections} 轮），已要求构建者按整改清单返工。`, `Reviewer rejected the output (round ${rejectionRound}/${maxRejections}); builders must rework against the remediation brief.`));
+                addConsoleLog(`[progress] #${sid} stage=reviewer_rejection round=${rejectionRound}/${maxRejections}`);
+            } else if (stage === 'reviewer_rejection_no_retry') {
+                if (sid) appendSubtaskTimeline(sid, String(msg.message || '').slice(0, 220));
+                addConsoleLog(`[progress] #${sid} stage=reviewer_rejection_no_retry msg=${String(msg.message || '').slice(0, 220)}`);
+            } else if (stage === 'analyst_reference_gate_failed') {
+                const visited = Array.isArray(msg.visited_urls) ? (msg.visited_urls as string[]) : [];
+                const missing = Array.isArray(msg.missing_sections) ? (msg.missing_sections as string[]) : [];
+                if (sid) appendSubtaskTimeline(sid, tr(
+                    `分析师交付不完整：${String(msg.message || '').slice(0, 220)}${visited.length ? ` 已访问：${visited.slice(0, 3).join('，')}。` : ''}${missing.length ? ` 缺失区块：${missing.join('，')}。` : ''}`,
+                    `Analyst handoff incomplete: ${String(msg.message || '').slice(0, 220)}${visited.length ? ` Visited: ${visited.slice(0, 3).join(', ')}.` : ''}${missing.length ? ` Missing sections: ${missing.join(', ')}.` : ''}`));
+                addConsoleLog(`[progress] #${sid} stage=analyst_reference_gate_failed visited=${visited.length} missing=${missing.join(',')}`);
+            } else if (stage === 'tester_visual_gate') {
+                const ok = Boolean(msg.ok);
+                const smokeStatus = String(msg.smoke_status || '');
+                const previewUrl = String(msg.preview_url || '');
+                const errors = (msg.errors as string[]) || [];
+                if (sid) appendSubtaskTimeline(sid, ok
+                    ? tr(`测试员确定性验收通过。${smokeStatus ? ` smoke=${smokeStatus}。` : ''}${previewUrl ? ` 预览：${previewUrl}` : ''}`,
+                        `Tester deterministic gate passed.${smokeStatus ? ` smoke=${smokeStatus}.` : ''}${previewUrl ? ` Preview: ${previewUrl}` : ''}`)
+                    : tr(`测试员确定性验收失败：${errors.slice(0, 2).join('；') || '规则校验未通过'}`,
+                        `Tester deterministic gate failed: ${errors.slice(0, 2).join('; ') || 'rule check failed'}`));
+                addConsoleLog(`[progress] #${sid} stage=tester_visual_gate ok=${String(ok)} smoke=${smokeStatus}`);
+            } else if (stage === 'requeue_downstream') {
+                if (sid) appendSubtaskTimeline(sid, String(msg.message || '').slice(0, 220));
+                addConsoleLog(`[progress] #${sid} stage=requeue_downstream msg=${String(msg.message || '').slice(0, 220)}`);
             } else if (stage === 'model_downgrade') {
                 const fromModel = String(msg.from_model || '');
                 const toModel = String(msg.to_model || '');
                 if (sid) appendSubtaskTimeline(sid, `模型降级重试：${fromModel} → ${toModel}`);
-                addMessage('system', tr(`🔄 模型降级重试：<code>${fromModel}</code> → <code>${toModel}</code>`, `🔄 Model downgrade retry: <code>${fromModel}</code> → <code>${toModel}</code>`), 'Auto Recovery', '🔄', 'var(--orange)');
+                addMessage('system', tr(`模型降级重试：<code>${fromModel}</code> → <code>${toModel}</code>`, `Model downgrade retry: <code>${fromModel}</code> → <code>${toModel}</code>`), 'Auto Recovery', '🔄', 'var(--orange)');
                 addConsoleLog(`[progress] #${sid} stage=model_downgrade ${fromModel} -> ${toModel}`);
+            } else if (stage === 'skills_loaded') {
+                const skills = (msg.skills as string[]) || [];
+                if (skills.length > 0 && sid) {
+                    const canvasNodeId = subtaskNodeMap.current[sid];
+                    if (canvasNodeId) {
+                        updateNodeData(canvasNodeId, { loadedSkills: skills });
+                        appendCanvasNodeLog(canvasNodeId, {
+                            ts: Date.now(),
+                            msg: lang === 'zh'
+                                ? `已加载技能：${skills.join(', ')}`
+                                : `Loaded skills: ${skills.join(', ')}`,
+                            type: 'sys',
+                        });
+                    }
+                    appendSubtaskTimeline(sid, `已加载 ${skills.length} 个技能：${skills.slice(0, 3).join(', ')}${skills.length > 3 ? '...' : ''}`);
+                    addConsoleLog(`[progress] #${sid} stage=skills_loaded skills=[${skills.join(',')}]`);
+                }
             } else if (stage === 'waiting_ai') {
                 const agent = String(msg.agent || 'agent');
                 const elapsed = Number(msg.elapsed_sec || 0);
                 addConsoleLog(`[progress] #${sid} stage=waiting_ai agent=${agent} elapsed=${elapsed}s`);
+                // §PROGRESS-FIX: Update canvas node with live progress during execution
+                const canvasNodeId = subtaskNodeMap.current[sid];
+                if (canvasNodeId) {
+                    // Smooth progress: 5 → 90 over agent-specific timeout period
+                    const agentTimeouts: Record<string, number> = { builder: 900, analyst: 480, reviewer: 420, planner: 120, tester: 360, deployer: 360 };
+                    const agentTimeout = agentTimeouts[agent.toLowerCase()] || 360;
+                    const progressPct = Math.min(90, Math.round(5 + (elapsed / agentTimeout) * 85));
+                    const rawMsg = String(msg.partial_output || msg.message || '');
+                    const existingNode = nodes.find((node) => node.id === canvasNodeId);
+                    const existingData = (existingNode?.data || {}) as Record<string, unknown>;
+                    const incomingSkills = Array.isArray(msg.loaded_skills) ? (msg.loaded_skills as string[]) : [];
+                    const existingSkills = Array.isArray(existingData.loadedSkills) ? (existingData.loadedSkills as string[]) : [];
+                    const mergedSkills = existingSkills.length > 0 ? existingSkills : incomingSkills;
+                    const humanActivity = buildReadableCurrentWork({
+                        lang,
+                        nodeType: String(existingData.nodeType || agent || 'builder'),
+                        status: 'running',
+                        phase: String(existingData.phase || ''),
+                        taskDescription: String(existingData.taskDescription || ''),
+                        loadedSkills: mergedSkills,
+                        outputSummary: rawMsg,
+                        lastOutput: rawMsg,
+                        logs: Array.isArray(existingData.log) ? (existingData.log as Array<{ ts?: number; msg?: string; type?: string }>) : [],
+                        durationText: `${elapsed}s`,
+                    });
+                    updateNodeData(canvasNodeId, {
+                        progress: progressPct,
+                        status: 'running',
+                        outputSummary: humanActivity,
+                        ...(mergedSkills.length > 0 && existingSkills.length === 0 ? { loadedSkills: mergedSkills } : {}),
+                    });
+                }
                 const nowMs = Date.now();
                 const last = waitingAiLastNotifyRef.current[sid] || 0;
                 if (!last || nowMs - last >= 60000) {
                     waitingAiLastNotifyRef.current[sid] = nowMs;
-                    appendSubtaskTimeline(sid, '等待模型响应中……');
-                    addMessage('system', tr(`⏳ ${agent} #${sid} 仍在执行中，请稍候...`, `⏳ ${agent} #${sid} is still running, please wait...`), `${agent} #${sid}`, '⏳', 'var(--orange)');
+                    addMessage('system', tr(`${agent} #${sid} 仍在执行中，请稍候...`, `${agent} #${sid} is still running, please wait...`), `${agent} #${sid}`, '⏳', 'var(--orange)');
+                }
+            } else if (stage === 'partial_output') {
+                // Real-time AI output: forward model's actual response text to canvas node
+                const preview = String(msg.preview || msg.partial_output || '').trim();
+                const source = String(msg.source || '').toLowerCase();
+                if (preview && source === 'model') {
+                    const canvasNodeId = subtaskNodeMap.current[sid];
+                    if (canvasNodeId) {
+                        const existingNode = nodes.find((node) => node.id === canvasNodeId);
+                        const existingData = (existingNode?.data || {}) as Record<string, unknown>;
+                        const phase = String(msg.phase || existingData.phase || 'drafting');
+                        const humanActivity = buildReadableCurrentWork({
+                            lang,
+                            nodeType: String(existingData.nodeType || 'builder'),
+                            status: 'running',
+                            phase,
+                            taskDescription: String(existingData.taskDescription || ''),
+                            loadedSkills: Array.isArray(existingData.loadedSkills) ? (existingData.loadedSkills as string[]) : [],
+                            outputSummary: '',
+                            lastOutput: preview,
+                            logs: Array.isArray(existingData.log) ? (existingData.log as Array<{ ts?: number; msg?: string; type?: string }>) : [],
+                        });
+                        updateNodeData(canvasNodeId, {
+                            outputSummary: humanActivity,
+                            lastOutput: preview,
+                            hasModelPartialOutput: true,
+                            phase,
+                        });
+                    }
+                    addConsoleLog(`[progress] #${sid} stage=partial_output source=${source} len=${preview.length}`);
                 }
             } else if (stage === 'stream_stalled') {
                 const reason = String(msg.reason || '').slice(0, 180);
                 addConsoleLog(`[progress] #${sid} stage=stream_stalled reason=${reason}`);
                 if (sid) appendSubtaskTimeline(sid, '模型流式输出停滞，已触发快速失败并进入重试。');
-                addMessage('system', tr(`⚠️ ${sid ? `#${sid} ` : ''}模型输出停滞，系统将自动快速重试。`, `⚠️ ${sid ? `#${sid} ` : ''}model stream stalled; auto-retrying quickly.`), 'Model', '⚠️', 'var(--orange)');
+                addMessage('system', tr(`${sid ? `#${sid} ` : ''}模型输出停滞，系统将自动快速重试。`, `${sid ? `#${sid} ` : ''}model stream stalled; auto-retrying quickly.`), 'Model', '⚠️', 'var(--orange)');
             } else if (stage === 'builder_loop_guard') {
                 const streak = Number(msg.streak || 0);
                 const threshold = Number(msg.threshold || 0);
                 const reason = String(msg.reason || 'tool_research_loop');
                 addConsoleLog(`[progress] #${sid} stage=builder_loop_guard streak=${streak} threshold=${threshold} reason=${reason}`);
                 if (sid) appendSubtaskTimeline(sid, `构建者触发循环保护：连续 ${streak} 次工具调用未产出文件，切换为强制文本输出。`);
-                addMessage('system', tr(`⚠️ builder #${sid} 触发循环保护，正在强制输出完整 HTML（原因：${reason}）`, `⚠️ builder #${sid} loop guard triggered, forcing full HTML output (reason: ${reason})`), `builder #${sid}`, '⚠️', 'var(--orange)');
+                addMessage('system', tr(`builder #${sid} 触发循环保护，正在强制输出完整 HTML（原因：${reason}）`, `builder #${sid} loop guard triggered, forcing full HTML output (reason: ${reason})`), `builder #${sid}`, '⚠️', 'var(--orange)');
             } else if (stage === 'browser_action') {
                 const action = String(msg.action || 'unknown');
+                const subaction = String(msg.subaction || msg.intent || '').trim();
                 const ok = Boolean(msg.ok);
                 const mode = String(msg.browser_mode || 'unknown');
                 const requestedMode = String(msg.requested_mode || '');
                 const url = String(msg.url || '');
                 const err = String(msg.error || '');
                 const launchNote = String(msg.launch_note || '');
+                const observation = String(msg.observation || '').trim();
+                const target = String(msg.target || '').trim();
+                const snapshotRefs = Array.isArray(msg.snapshot_refs_preview)
+                    ? (msg.snapshot_refs_preview as Array<Record<string, unknown>>)
+                    : [];
+                const snapshotRefText = action === 'snapshot' && snapshotRefs.length > 0
+                    ? snapshotRefs
+                        .slice(0, 4)
+                        .map((item) => {
+                            const ref = String(item.ref || '').trim();
+                            const label = String(item.label || '').trim();
+                            const role = String(item.role || '').trim();
+                            const bits = [ref, label].filter(Boolean);
+                            return role ? `${bits.join(' ')} [${role}]` : bits.join(' ');
+                        })
+                        .filter(Boolean)
+                        .join(', ')
+                    : '';
                 addConsoleLog(`[browser] #${sid} action=${action} ok=${String(ok)} mode=${mode}${requestedMode ? ` requested=${requestedMode}` : ''}${url ? ` url=${url}` : ''}${launchNote ? ` note=${launchNote.slice(0, 140)}` : ''}${err ? ` error=${err.slice(0, 120)}` : ''}`);
                 if (sid) {
-                    const actionText = ok
-                        ? `浏览器步骤：${action} 执行成功（模式 ${mode}）${url ? `，目标 ${url}` : ''}`
-                        : `浏览器步骤：${action} 执行失败（模式 ${mode}）${err ? `，错误：${err.slice(0, 120)}` : ''}`;
+                    const actionText = (() => {
+                        if (!ok) {
+                            return `浏览器步骤：${action}${subaction ? `/${subaction}` : ''} 执行失败（模式 ${mode}）${err ? `，错误：${err.slice(0, 120)}` : ''}`;
+                        }
+                        if (action === 'observe') {
+                            return `浏览器步骤：观察当前页面并整理可交互元素（模式 ${mode}）${snapshotRefText ? `，可交互引用 ${snapshotRefText}` : ''}${observation ? `，摘要：${observation.slice(0, 180)}` : ''}`;
+                        }
+                        if (action === 'act') {
+                            return `浏览器步骤：执行 ${subaction || '交互'}（模式 ${mode}）${target ? `，目标 ${target}` : ''}${url ? `，页面 ${url}` : ''}${snapshotRefText ? `，参考 ${snapshotRefText}` : ''}${observation ? `，摘要：${observation.slice(0, 120)}` : ''}`;
+                        }
+                        if (action === 'extract') {
+                            return `浏览器步骤：提取页面关键信息（模式 ${mode}）${observation ? `，摘要：${observation.slice(0, 180)}` : ''}`;
+                        }
+                        return `浏览器步骤：${action} 执行成功（模式 ${mode}）${url ? `，目标 ${url}` : ''}${snapshotRefText ? `，可交互引用 ${snapshotRefText}` : ''}`;
+                    })();
                     appendSubtaskTimeline(sid, actionText);
+                    const canvasNodeId = subtaskNodeMap.current[sid];
+                    if (canvasNodeId) {
+                        appendCanvasNodeLog(canvasNodeId, {
+                            ts: Date.now(),
+                            msg: actionText,
+                            type: ok ? 'info' : 'error',
+                        });
+                    }
                 }
                 if (sid && !browserModeNotifiedRef.current[sid]) {
                     browserModeNotifiedRef.current[sid] = true;
                     const modeText = mode === 'headful' ? tr('可见窗口', 'visible window') : mode === 'headless' ? tr('无头后台', 'headless background') : mode;
-                    addMessage('system', tr(`🌐 节点 #${sid} 已进入浏览器测试（${modeText}）`, `🌐 Node #${sid} entered browser testing (${modeText})`), 'Browser', '🌐', mode === 'headful' ? 'var(--green)' : 'var(--orange)');
-                    if (launchNote) addMessage('system', tr(`⚠️ 浏览器模式降级：${launchNote}`, `⚠️ Browser mode fallback: ${launchNote}`), 'Browser', '⚠️', 'var(--orange)');
+                    addMessage('system', tr(`节点 #${sid} 已进入浏览器测试（${modeText}）`, `Node #${sid} entered browser testing (${modeText})`), 'Browser', '🌐', mode === 'headful' ? 'var(--green)' : 'var(--orange)');
+                    if (launchNote) addMessage('system', tr(`浏览器模式降级：${launchNote}`, `Browser mode fallback: ${launchNote}`), 'Browser', '⚠️', 'var(--orange)');
                 }
             } else if (stage === 'executing_plugin') {
                 addConsoleLog(`[progress] #${sid} stage=executing_plugin plugin=${String(msg.plugin || 'unknown')}`);
@@ -589,9 +1212,31 @@ export function useRuntimeConnection({
             const canvasNodeId = resolveCanvasNodeId(payload);
             rememberPreviewRunId(payload.runId);
             if (canvasNodeId && neId) {
-                updateNodeData(canvasNodeId, { nodeExecutionId: neId });
+                updateNodeData(canvasNodeId, {
+                    nodeExecutionId: neId,
+                    runtime: 'openclaw',
+                });
             }
             addConsoleLog(`[openclaw_node_ack] nodeExec=${neId} accepted=${String(payload.accepted)}`);
+            const nodeKey = String(payload.nodeKey || payload.nodeLabel || neId).slice(0, 60);
+            const accepted = payload.accepted !== false;
+            addMessage(
+                'system',
+                accepted
+                    ? (lang === 'zh' ? `已派发节点: ${nodeKey}` : `Dispatched: ${nodeKey}`)
+                    : (lang === 'zh' ? `节点派发被拒绝: ${nodeKey}` : `Dispatch rejected: ${nodeKey}`),
+                'OpenClaw',
+                'OC',
+                accepted ? 'var(--blue)' : 'var(--red)',
+            );
+            emitConnectorEvent(
+                'openclaw_node_ack',
+                accepted
+                    ? (lang === 'zh' ? `节点已接收: ${nodeKey}` : `Node accepted: ${nodeKey}`)
+                    : (lang === 'zh' ? `节点被拒绝: ${nodeKey}` : `Node rejected: ${nodeKey}`),
+                neId || String(payload.runId || ''),
+                toEpochSeconds(msg.timestamp, Date.now() / 1000) * 1000,
+            );
 
         } else if (t === 'evermind_dispatch_node') {
             // P1-2B: Auto-chained dispatch broadcast — update NE status to running
@@ -601,6 +1246,17 @@ export function useRuntimeConnection({
             const taskId = String(payload.taskId || '');
             rememberPreviewRunId(payload.runId);
             addConsoleLog(`[evermind_dispatch_node] nodeExec=${neId} nodeKey=${String(payload.nodeKey || '')} autoChained=${String(payload.autoChained || false)}`);
+            // B-3: Feed milestone for dispatch events
+            const dispatchLabel = String(payload.nodeLabel || payload.nodeKey || neId).slice(0, 60);
+            addMessage('system',
+                tr(`☁ 已派发节点给 OpenClaw: ${dispatchLabel}`, `☁ Dispatched to OpenClaw: ${dispatchLabel}`),
+                'OpenClaw', 'OC', '#a855f7');
+            emitConnectorEvent(
+                'evermind_dispatch_node',
+                tr(`准备派发节点: ${String(payload.nodeLabel || payload.nodeKey || neId).slice(0, 60)}`, `Dispatch queued: ${String(payload.nodeLabel || payload.nodeKey || neId).slice(0, 60)}`),
+                runId || taskId || undefined,
+                Date.now(),
+            );
             if (neId && onMergeNodeExecution) {
                 onMergeNodeExecution({
                     id: neId,
@@ -636,6 +1292,13 @@ export function useRuntimeConnection({
                     taskPatch.status = String(payload.taskStatus) as TaskCard['status'];
                 }
                 onMergeTask(taskPatch);
+            }
+            const canvasNodeId = resolveCanvasNodeId(payload);
+            if (canvasNodeId) {
+                updateNodeData(canvasNodeId, {
+                    runtime: String(payload.runtime || 'openclaw'),
+                    status: 'running',
+                });
             }
 
         } else if (t === 'evermind_cancel_run') {
@@ -673,21 +1336,127 @@ export function useRuntimeConnection({
             const status = String(payload.status || '');
             const updatedAt = toEpochSeconds(payload.timestamp);
             addConsoleLog(`[openclaw_node_update] nodeExec=${neId} status=${status} progress=${String(payload.progress || 0)}`);
+            // B-3: feed milestone for running and terminal statuses
+            if (status === 'running') {
+                const nodeLabel = String(payload.nodeLabel || payload.nodeKey || neId).slice(0, 60);
+                addMessage('system',
+                    tr(`⚙️ OpenClaw 正在执行: ${nodeLabel}`, `⚙️ OpenClaw executing: ${nodeLabel}`),
+                    'OpenClaw', 'OC', 'var(--blue)');
+                emitConnectorEvent(
+                    'openclaw_node_update',
+                    tr(`节点执行中: ${nodeLabel}`, `Node running: ${nodeLabel}`),
+                    'running',
+                    updatedAt * 1000,
+                );
+            } else if (['passed', 'failed', 'cancelled', 'skipped'].includes(status)) {
+                const nodeLabel = String(payload.nodeLabel || payload.nodeKey || neId).slice(0, 60);
+                const humanStatus = connectorNodeStatusLabel(status, lang);
+                const statusColor = status === 'passed' || status === 'skipped' ? 'var(--green)' : 'var(--red)';
+                addMessage('system', lang === 'zh' ? `节点 ${nodeLabel}: ${humanStatus}` : `Node ${nodeLabel}: ${humanStatus}`, 'OpenClaw', 'OC', statusColor);
+                emitConnectorEvent(
+                    'openclaw_node_update',
+                    lang === 'zh' ? `节点状态更新: ${nodeLabel}` : `Node updated: ${nodeLabel}`,
+                    humanStatus,
+                    updatedAt * 1000,
+                );
+            }
             rememberPreviewRunId(payload.runId);
             // Pipe V1 metrics into canvas node data for AgentNode rendering
             const canvasNodeId = resolveCanvasNodeId(payload);
             if (canvasNodeId) {
                 const updatePayload: Record<string, unknown> = { status };
+                const fallbackProgress = ['passed', 'failed', 'cancelled', 'skipped'].includes(status)
+                    ? 100
+                    : status === 'running'
+                        ? 5
+                        : 0;
+                const startedAtMs = normalizeEpochMs(payload.startedAt, 0);
+                const endedAtMs = normalizeEpochMs(payload.endedAt, 0);
+                const durationSeconds = deriveDurationSeconds(startedAtMs, endedAtMs);
+                const partialOutputSummary = String(payload.partialOutputSummary || '').trim();
+                const finalOutputSummary = String(payload.outputSummary || '').trim();
+                const outputSummary = partialOutputSummary || finalOutputSummary;
+                const nodeLabel = String(payload.nodeLabel || payload.nodeKey || neId).slice(0, 80);
+                const existingNode = nodes.find((node) => node.id === canvasNodeId);
+                const existingData = (existingNode?.data || {}) as Record<string, unknown>;
+                const phaseValue = String(payload.phase || existingData.phase || '').trim();
+                const incomingSkills = Array.isArray(payload.loadedSkills) ? payload.loadedSkills.map(String) : [];
+                const existingSkills = Array.isArray(existingData.loadedSkills) ? (existingData.loadedSkills as string[]) : [];
+                const mergedSkills = [...new Set([...existingSkills, ...incomingSkills])];
+                const humanOutputSummary = outputSummary
+                    ? buildReadableCurrentWork({
+                        lang,
+                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        status,
+                        phase: phaseValue,
+                        taskDescription: String(payload.inputSummary || existingData.taskDescription || ''),
+                        loadedSkills: mergedSkills,
+                        outputSummary,
+                        lastOutput: outputSummary,
+                        logs: Array.isArray(payload.activityLog)
+                            ? (payload.activityLog as Array<{ ts?: number; msg?: string; type?: string }>)
+                            : (Array.isArray(existingData.log) ? (existingData.log as Array<{ ts?: number; msg?: string; type?: string }>) : []),
+                    })
+                    : '';
                 if (neId) updatePayload.nodeExecutionId = neId;
-                if (payload.progress !== undefined) updatePayload.progress = Number(payload.progress);
+                updatePayload.runtime = String(payload.runtime || 'openclaw');
+                updatePayload.progress = payload.progress !== undefined ? Number(payload.progress) : fallbackProgress;
                 if (payload.tokensUsed !== undefined) updatePayload.tokensUsed = Number(payload.tokensUsed);
                 if (payload.cost !== undefined) updatePayload.cost = Number(payload.cost);
                 if (payload.costDelta !== undefined && !payload.cost) updatePayload.cost = Number(payload.costDelta);
                 if (payload.assignedModel) updatePayload.assignedModel = String(payload.assignedModel);
-                if (payload.partialOutputSummary) updatePayload.outputSummary = String(payload.partialOutputSummary);
-                if (payload.startedAt) updatePayload.startedAt = Number(payload.startedAt);
-                if (payload.endedAt) updatePayload.endedAt = Number(payload.endedAt);
+                if (payload.inputSummary !== undefined) updatePayload.taskDescription = String(payload.inputSummary || '');
+                if (outputSummary) {
+                    updatePayload.outputSummary = humanOutputSummary || outputSummary;
+                    updatePayload.lastOutput = outputSummary;
+                }
+                if (mergedSkills.length > 0) {
+                    updatePayload.loadedSkills = mergedSkills;
+                }
+                if (phaseValue) updatePayload.phase = phaseValue;
+                if (startedAtMs > 0) updatePayload.startedAt = startedAtMs;
+                if (endedAtMs > 0) updatePayload.endedAt = endedAtMs;
+                if (durationSeconds !== undefined) updatePayload.durationSeconds = durationSeconds;
                 updateNodeData(canvasNodeId, updatePayload);
+                if (Array.isArray(payload.activityLog) && payload.activityLog.length > 0) {
+                    const normalizedActivityLog = (payload.activityLog as Array<{ ts?: number; msg?: string; type?: string }>)
+                        .filter((entry) => typeof entry?.msg === 'string' && String(entry.msg).trim().length > 0)
+                        .map((entry) => ({
+                            ts: entry.ts,
+                            msg: String(entry.msg).trim(),
+                            type: entry.type,
+                        }));
+                    mergeCanvasNodeLogs(
+                        canvasNodeId,
+                        normalizedActivityLog,
+                    );
+                }
+                if (status) {
+                    appendCanvasNodeLog(canvasNodeId, {
+                        ts: updatedAt * 1000,
+                        msg: lang === 'zh'
+                            ? `状态更新：${nodeLabel} -> ${connectorNodeStatusLabel(status, lang)}`
+                            : `Status update: ${nodeLabel} -> ${connectorNodeStatusLabel(status, lang)}`,
+                        type: status === 'failed' || status === 'cancelled'
+                            ? 'error'
+                            : status === 'passed' || status === 'skipped'
+                                ? 'ok'
+                                : 'info',
+                    });
+                }
+                if (outputSummary) {
+                    const outputDescriptor = describeNodeActivity(outputSummary, lang, {
+                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        status,
+                    });
+                    if (outputDescriptor && !outputDescriptor.lowSignal) {
+                        appendCanvasNodeLog(canvasNodeId, {
+                            ts: updatedAt * 1000,
+                            msg: outputDescriptor.text,
+                            type: outputDescriptor.type,
+                        });
+                    }
+                }
             }
             // ── P0-1: Merge node execution into canonical state ──
             if (neId && onMergeNodeExecution) {
@@ -708,6 +1477,9 @@ export function useRuntimeConnection({
                 if (payload.partialOutputSummary !== undefined || payload.outputSummary !== undefined) {
                     nodePatch.output_summary = String(payload.partialOutputSummary || payload.outputSummary || '');
                 }
+                if (Array.isArray(payload.loadedSkills)) nodePatch.loaded_skills = payload.loadedSkills.map(String);
+                if (Array.isArray(payload.activityLog)) nodePatch.activity_log = payload.activityLog as NodeExecutionRecord['activity_log'];
+                if (Array.isArray(payload.referenceUrls)) nodePatch.reference_urls = payload.referenceUrls.map(String);
                 if (payload.errorMessage !== undefined) nodePatch.error_message = String(payload.errorMessage || '');
                 if (Array.isArray(payload.artifactIds)) nodePatch.artifact_ids = payload.artifactIds.map(String);
                 if (payload.startedAt !== undefined) nodePatch.started_at = toEpochSeconds(payload.startedAt, 0);
@@ -753,12 +1525,74 @@ export function useRuntimeConnection({
             // Update canvas node data for AgentNode rendering
             const canvasNodeId = resolveCanvasNodeId(payload);
             if (canvasNodeId) {
+                const existingNode = nodes.find((node) => node.id === canvasNodeId);
+                const existingData = (existingNode?.data || {}) as Record<string, unknown>;
                 const update: Record<string, unknown> = {};
+                const incomingSkills = Array.isArray(payload.loadedSkills) ? payload.loadedSkills.map(String) : [];
+                const existingSkills = Array.isArray(existingData.loadedSkills) ? (existingData.loadedSkills as string[]) : [];
+                const mergedSkills = [...new Set([...existingSkills, ...incomingSkills])];
+                update.runtime = String(payload.runtime || 'openclaw');
                 if (progressPct !== undefined) update.progress = progressPct;
-                if (partialOutput) update.outputSummary = partialOutput;
+                if (partialOutput) {
+                    update.outputSummary = buildReadableCurrentWork({
+                        lang,
+                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        status: String(existingData.status || 'running'),
+                        phase: phase || String(existingData.phase || ''),
+                        taskDescription: String(existingData.taskDescription || ''),
+                        loadedSkills: mergedSkills,
+                        outputSummary: '',
+                        lastOutput: partialOutput,
+                        logs: Array.isArray(payload.activityLog)
+                            ? (payload.activityLog as Array<{ ts?: number; msg?: string; type?: string }>)
+                            : (Array.isArray(existingData.log) ? (existingData.log as Array<{ ts?: number; msg?: string; type?: string }>) : []),
+                    });
+                    update.lastOutput = partialOutput;
+                }
+                if (mergedSkills.length > 0) update.loadedSkills = mergedSkills;
                 if (phase) update.phase = phase;
                 if (toolCall) update.toolCall = toolCall;
                 if (Object.keys(update).length) updateNodeData(canvasNodeId, update);
+                if (Array.isArray(payload.activityLog) && payload.activityLog.length > 0) {
+                    const normalizedActivityLog = (payload.activityLog as Array<{ ts?: number; msg?: string; type?: string }>)
+                        .filter((entry) => typeof entry?.msg === 'string' && String(entry.msg).trim().length > 0)
+                        .map((entry) => ({
+                            ts: entry.ts,
+                            msg: String(entry.msg).trim(),
+                            type: entry.type,
+                        }));
+                    mergeCanvasNodeLogs(
+                        canvasNodeId,
+                        normalizedActivityLog,
+                    );
+                }
+                if (phase) {
+                    appendCanvasNodeLog(canvasNodeId, {
+                        ts: updatedAt * 1000,
+                        msg: lang === 'zh' ? `阶段：${phase}` : `Phase: ${phase}`,
+                        type: 'info',
+                    });
+                }
+                if (toolCall) {
+                    appendCanvasNodeLog(canvasNodeId, {
+                        ts: updatedAt * 1000,
+                        msg: lang === 'zh' ? `工具调用：${toolCall}` : `Tool call: ${toolCall}`,
+                        type: 'sys',
+                    });
+                }
+                if (partialOutput) {
+                    const partialDescriptor = describeNodeActivity(partialOutput, lang, {
+                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        status: String(existingData.status || 'running'),
+                    });
+                    if (partialDescriptor && !partialDescriptor.lowSignal) {
+                        appendCanvasNodeLog(canvasNodeId, {
+                            ts: updatedAt * 1000,
+                            msg: partialDescriptor.text,
+                            type: partialDescriptor.type,
+                        });
+                    }
+                }
             }
             // Merge into canonical NE state
             if (neId && onMergeNodeExecution) {
@@ -786,6 +1620,17 @@ export function useRuntimeConnection({
             const updatedAt = toEpochSeconds(payload.timestamp);
             rememberPreviewRunId(payload.runId);
             addConsoleLog(`[openclaw_submit_review] decision=${String(payload.decision || '')} issues=${JSON.stringify(payload.issues || [])}`);
+            // P1-3: Visible review event
+            const reviewText = connectorReviewLabel(decision, lang);
+            const reviewLabel = lang === 'zh' ? `审核结论: ${reviewText}` : `Review: ${reviewText}`;
+            const reviewColor = decision === 'approve' ? 'var(--green)' : (decision === 'reject' || decision === 'blocked' ? 'var(--red)' : 'var(--orange)');
+            addMessage('system', reviewLabel, 'OpenClaw', 'OC', reviewColor);
+            emitConnectorEvent(
+                'openclaw_submit_review',
+                reviewLabel,
+                Array.isArray(payload.issues) ? payload.issues.slice(0, 2).map(String).join(' · ') : undefined,
+                updatedAt * 1000,
+            );
             // ── P0-1: Merge review verdict into canonical task state ──
             if (onMergeTask && payload.taskId) {
                 const issues = Array.isArray(payload.issues) ? payload.issues.map(String) : [];
@@ -821,7 +1666,17 @@ export function useRuntimeConnection({
             const updatedAt = toEpochSeconds(payload.timestamp);
             rememberPreviewRunId(payload.runId);
             addConsoleLog(`[openclaw_submit_validation] summaryStatus=${summaryStatus} summary=${String(payload.summary || '')}`);
-            // ── P0-1: Merge validation into canonical task state ──
+            // P1-3: Visible selfcheck event
+            const validationText = connectorValidationLabel(summaryStatus, lang);
+            const checkLabel = lang === 'zh' ? `自检结果: ${validationText}` : `Selfcheck: ${validationText}`;
+            const validationColor = summaryStatus === 'passed' ? 'var(--green)' : (summaryStatus === 'failed' ? 'var(--red)' : 'var(--orange)');
+            addMessage('system', checkLabel, 'OpenClaw', 'OC', validationColor);
+            emitConnectorEvent(
+                'openclaw_submit_validation',
+                checkLabel,
+                String(payload.summary || '').slice(0, 120) || undefined,
+                updatedAt * 1000,
+            );
             if (onMergeTask && payload.taskId) {
                 const checklist = Array.isArray(payload.checklist)
                     ? payload.checklist.map((item: Record<string, unknown>) => ({
@@ -858,8 +1713,23 @@ export function useRuntimeConnection({
             const finalResult = String(payload.finalResult || '').trim().toLowerCase();
             const success = payload.success === true || finalResult === 'success' || finalResult === 'done';
             const updatedAt = toEpochSeconds(payload.timestamp);
+            const rawCompletionPreviewUrl = String(payload.previewUrl || payload.preview_url || '').trim();
+            let completionPreviewUrl = '';
+            if (rawCompletionPreviewUrl) {
+                try { completionPreviewUrl = new URL(rawCompletionPreviewUrl, 'http://127.0.0.1:8765').toString(); } catch { completionPreviewUrl = rawCompletionPreviewUrl; }
+                runPreviewUrlRef.current = completionPreviewUrl;
+                setPreviewUrl(withCacheBust(completionPreviewUrl));
+            }
             rememberPreviewRunId(payload.runId);
             addConsoleLog(`[openclaw_run_complete] runId=${String(payload.runId || '')} result=${finalResult}`);
+            emitConnectorEvent(
+                'openclaw_run_complete',
+                success
+                    ? tr('运行已完成', 'Run completed')
+                    : tr('运行失败', 'Run failed'),
+                String(payload.summary || payload.finalResult || '').slice(0, 120) || undefined,
+                updatedAt * 1000,
+            );
             // ── P0-1: Merge terminal run status into canonical state ──
             if (onMergeRun && payload.runId) {
                 onMergeRun(clearRunActivity({
@@ -879,7 +1749,7 @@ export function useRuntimeConnection({
             if (onMergeTask && payload.taskId) {
                 onMergeTask({
                     id: String(payload.taskId),
-                    status: success ? 'review' : 'executing',
+                    status: success ? 'done' : 'executing',
                     latestSummary: String(payload.summary || payload.finalResult || ''),
                     latestRisk: Array.isArray(payload.risks) ? String(payload.risks[0] || '') : '',
                     updatedAt: updatedAt * 1000,
@@ -887,10 +1757,84 @@ export function useRuntimeConnection({
                     ...(typeof payload._taskVersion === 'number' ? { version: payload._taskVersion } : {}),
                 });
             }
-        }
-    }, [addMessage, appendSubtaskTimeline, clearPreviewFallbackTimer, difficulty, lang, messages, buildPlanNodes, updateNodeData, addReport, resetRunState, resolveCanvasNodeId, rememberPreviewRunId, onMergeTask, onMergeRun, onMergeNodeExecution]);
 
-    const { connected, sendGoal, runWorkflow: wsRunWorkflow, stop, wsRef, send } = useWebSocket({ url: wsUrl, onMessage: onWSMessage });
+            // §FIX: Display completion report card (same as orchestrator_complete)
+            const ocSubtasks = Array.isArray(payload.subtasks) ? payload.subtasks as Array<{
+                id: string; agent: string; status: string; retries: number;
+                work_summary?: string[]; files_created?: string[]; error?: string;
+            }> : [];
+            if (ocSubtasks.length > 0) {
+                setRunning(false);
+                const diffRaw = String(payload.difficulty || difficulty).toLowerCase();
+                const runDifficulty: 'simple' | 'standard' | 'pro' = (
+                    diffRaw === 'simple' || diffRaw === 'pro' || diffRaw === 'standard'
+                ) ? diffRaw : 'standard';
+                const completionData: import('@/lib/types').ChatMessage['completionData'] = {
+                    success,
+                    completed: Number(payload.completed || 0),
+                    total: Number(payload.total_subtasks || 0),
+                    retries: Number(payload.total_retries || 0),
+                    durationSeconds: Number(payload.duration_seconds || 0),
+                    difficulty: runDifficulty,
+                    subtasks: ocSubtasks.map(st => ({
+                        id: String(st.id),
+                        agent: String(st.agent || 'agent'),
+                        status: String(st.status || 'unknown'),
+                        retries: Number(st.retries || 0),
+                        filesCreated: Array.isArray(st.files_created) ? st.files_created : undefined,
+                        workSummary: Array.isArray(st.work_summary) ? st.work_summary : undefined,
+                    })),
+                    previewUrl: completionPreviewUrl || runPreviewUrlRef.current || undefined,
+                };
+                const dur = Number(payload.duration_seconds || 0);
+                const durText = dur >= 60
+                    ? `${Math.floor(dur / 60)} 分 ${Math.round(dur % 60)} 秒`
+                    : `${Math.round(dur)}s`;
+                addMessage('system',
+                    tr(
+                        `<b>执行完成</b>：${payload.completed}/${payload.total_subtasks} 节点，耗时 ${durText}`,
+                        `<b>Run completed</b>: ${payload.completed}/${payload.total_subtasks} nodes, ${durText}`),
+                    'Report', '🏁', success ? 'var(--green)' : 'var(--orange)', completionData);
+            }
+
+            // §FIX: Auto-open preview on OpenClaw completion
+            if (success && (completionPreviewUrl || runPreviewUrlRef.current)) {
+                setCanvasView('preview');
+                previewReadyForRunRef.current = true;
+            }
+
+        // ── G2: REST endpoint broadcast handlers (multi-client sync) ──
+        } else if (t === 'task_created' || t === 'task_updated' || t === 'task_transitioned') {
+            const payload = (msg.payload || msg) as Record<string, unknown>;
+            const taskData = (payload.task || payload) as Record<string, unknown>;
+            if (onMergeTask && taskData.id) {
+                onMergeTask({ id: String(taskData.id), ...taskData } as Partial<TaskCard> & Pick<TaskCard, 'id'>);
+            }
+            addConsoleLog(`[${t}] taskId=${String(taskData.id || '')}`);
+
+        } else if (t === 'run_created' || t === 'run_updated' || t === 'run_transitioned') {
+            const payload = (msg.payload || msg) as Record<string, unknown>;
+            const runData = (payload.run || payload) as Record<string, unknown>;
+            if (onMergeRun && runData.id) {
+                onMergeRun({ id: String(runData.id), ...runData } as Partial<RunRecord> & Pick<RunRecord, 'id'>);
+            }
+            addConsoleLog(`[${t}] runId=${String(runData.id || '')}`);
+            if (t === 'run_created') {
+                emitConnectorEvent(
+                    'run_created',
+                    tr('运行已创建', 'Run created'),
+                    `${String(runData.id || '')} · ${String(runData.runtime || 'local')}`,
+                );
+            }
+        }
+    }, [addMessage, appendCanvasNodeLog, appendSubtaskTimeline, buildPlanNodes, clearPreviewFallbackTimer, difficulty, emitConnectorEvent, lang, mergeCanvasNodeLogs, messages, nodes, onMergeNodeExecution, onMergeRun, onMergeTask, rememberPreviewRunId, resetRunState, resolveCanvasNodeId, updateNodeData, addReport]);
+
+    const { connected, sendGoal, runWorkflow: wsRunWorkflow, stop, reconnect, wsRef, send } = useWebSocket({ url: wsUrl, onMessage: onWSMessage });
+
+    useEffect(() => {
+        if (connected) return;
+        setConnectorConnectedAt(null);
+    }, [connected]);
 
     // ── Send goal ──
     const handleSendGoal = useCallback((goal: string) => {
@@ -902,14 +1846,26 @@ export function useRuntimeConnection({
                 .slice(-7)
                 .map(m => ({ role: m.role, content: m.content.slice(0, 500) }));
             recentHistory.push({ role: 'user', content: goal.slice(0, 500) });
-            sendGoal(goal, undefined, recentHistory, difficulty);
-            addMessage('system', lang === 'zh' ? '🧠 已收到目标，正在规划执行...' : '🧠 Goal received — planning...', 'Evermind', '🧠');
+            const effectiveGoalRuntime = goalRuntime === 'openclaw' ? 'openclaw' : 'local';
+            if (effectiveGoalRuntime === 'openclaw') {
+                addMessage(
+                    'system',
+                    lang === 'zh'
+                        ? '☁ OpenClaw Direct Mode — 任务将通过 OpenClaw 直接派发执行'
+                        : '☁ OpenClaw Direct Mode — Tasks will be dispatched directly via OpenClaw',
+                    'OpenClaw',
+                    'OC',
+                    '#a855f7',
+                );
+            }
+            sendGoal(goal, undefined, recentHistory, difficulty, effectiveGoalRuntime, sessionId);
+            addMessage('system', lang === 'zh' ? '已收到目标，正在规划执行...' : 'Goal received — planning...', 'Evermind', '🧠');
         } else {
             addMessage('system',
-                lang === 'zh' ? '🔴 后端未连接。请运行：<code>cd backend && python server.py</code>' : '🔴 Backend offline. Run: <code>cd backend && python server.py</code>',
+                lang === 'zh' ? '后端未连接。请运行：<code>cd backend && python server.py</code>' : 'Backend offline. Run: <code>cd backend && python server.py</code>',
                 'System', '⚠️');
         }
-    }, [connected, sendGoal, addMessage, messages, difficulty, lang, resetRunState]);
+    }, [connected, sendGoal, addMessage, messages, difficulty, goalRuntime, lang, resetRunState, sessionId]);
 
     // ── Run workflow from canvas ──
     const handleRun = useCallback(() => {
@@ -1018,9 +1974,86 @@ export function useRuntimeConnection({
         }
     }, [connected, reconnectRunIds, recheckStaleNodes]);
 
+    // ── Deep Link Handler: clean state injection from evermind:// ──
+    // Uses refs for stable access to latest values across re-renders
+    const pendingDeepLinkGoalRef = useRef<string | null>(null);
+    const connectedRef = useRef(connected);
+    const handleSendGoalRef = useRef(handleSendGoal);
+    connectedRef.current = connected;
+    handleSendGoalRef.current = handleSendGoal;
+
+    // Listen for the deep link event dispatched by Electron
+    useEffect(() => {
+        const handleDeepLink = (e: Event) => {
+            const goal = (e as CustomEvent)?.detail?.goal;
+            if (!goal || typeof goal !== 'string' || !goal.trim()) return;
+
+            console.log('[DeepLink] Frontend received goal:', goal);
+
+            // 1. Stop any running execution
+            setRunning(false);
+
+            // 2. Reset all run-scoped state
+            resetRunState();
+
+            // 3. Clear canvas nodes (remove stale workflow graph)
+            setNodes([]);
+
+            // 4. Clear preview
+            setPreviewUrl(null);
+            setCanvasView('editor');
+
+            // 5. Clear the global marker so Electron knows we consumed it
+            if (typeof window !== 'undefined') {
+                (window as unknown as Record<string, unknown>).__EVERMIND_DEEPLINK_GOAL = undefined;
+            }
+
+            // 6. Store goal and attempt submission
+            const trimmedGoal = goal.trim();
+            pendingDeepLinkGoalRef.current = trimmedGoal;
+
+            if (connectedRef.current) {
+                // WS already connected — submit immediately after a micro-delay
+                console.log('[DeepLink] WS connected, submitting goal now');
+                setTimeout(() => {
+                    const g = pendingDeepLinkGoalRef.current;
+                    if (g) {
+                        pendingDeepLinkGoalRef.current = null;
+                        handleSendGoalRef.current(g);
+                        console.log('[DeepLink] Goal submitted to backend:', g.substring(0, 60));
+                    }
+                }, 200);
+            } else {
+                console.log('[DeepLink] WS not connected yet, goal queued for connection watcher');
+                // The connection watcher effect below will handle submission
+            }
+        };
+
+        window.addEventListener('evermind-deeplink', handleDeepLink);
+        return () => window.removeEventListener('evermind-deeplink', handleDeepLink);
+    }, [resetRunState, setNodes, setPreviewUrl, setCanvasView]);
+
+    // Connection watcher: when WS connects and there's a pending deep link goal, submit it
+    useEffect(() => {
+        if (connected && pendingDeepLinkGoalRef.current) {
+            const goal = pendingDeepLinkGoalRef.current;
+            pendingDeepLinkGoalRef.current = null;
+            console.log('[DeepLink] WS just connected, submitting queued goal:', goal);
+            setTimeout(() => {
+                handleSendGoal(goal);
+                console.log('[DeepLink] Queued goal submitted to backend:', goal.substring(0, 60));
+            }, 300);
+        }
+    }, [connected, handleSendGoal]);
+
     return {
         running, previewUrl, previewRunId, canvasView, setCanvasView, connected, wsRef,
         handleSendGoal, handleRun, handleStop, setPreviewUrl,
         dispatchNode, cancelRunWS, resumeRunWS, rerunNodeWS, recheckStaleNodes,
+        reconnect,
+        connectorRuntimeId,
+        connectorPid,
+        connectorConnectedAt,
+        connectorLastEventAt,
     };
 }

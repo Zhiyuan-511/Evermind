@@ -44,6 +44,16 @@ class TestLatestPreviewArtifact(unittest.TestCase):
             self.assertEqual(task_id, "root")
             self.assertEqual(html, root_html)
 
+    def test_ignores_parallel_builder_partial_files(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            (out / "index_part1.html").write_text("<html><body>part1</body></html>", encoding="utf-8")
+            (out / "index_part2.html").write_text("<html><body>part2</body></html>", encoding="utf-8")
+
+            task_id, html = latest_preview_artifact(out)
+            self.assertIsNone(task_id)
+            self.assertIsNone(html)
+
 
 if __name__ == "__main__":
     unittest.main()

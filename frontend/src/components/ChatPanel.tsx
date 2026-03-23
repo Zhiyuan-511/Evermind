@@ -1,7 +1,9 @@
 'use client';
 
 import { ChatMessage } from '@/lib/types';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import TaskSummaryStrip from './TaskSummaryStrip';
+import RunCompletionCard from './RunCompletionCard';
 
 interface ChatPanelProps {
     messages: ChatMessage[];
@@ -12,9 +14,21 @@ interface ChatPanelProps {
     lang: 'en' | 'zh';
     difficulty: 'simple' | 'standard' | 'pro';
     onDifficultyChange: (d: 'simple' | 'standard' | 'pro') => void;
+    runtimeMode?: string;
+    taskTitle?: string | null;
+    taskStatus?: string | null;
+    activeNodeLabels?: string[];
+    completedNodes?: number;
+    runningNodes?: number;
+    totalNodes?: number;
+    startedAt?: number | null;
+    onOpenReports?: () => void;
+    onRevealInFinder?: (previewUrl: string) => void;
+    selectedRuntime?: 'local' | 'openclaw';
+    onRuntimeChange?: (runtime: 'local' | 'openclaw') => void;
 }
 
-// Lightweight HTML sanitizer with safe anchor support for preview links
+// ── Sanitization (unchanged) ──
 const ALLOWED_TAGS = new Set(['b', 'strong', 'i', 'em', 'br', 'code', 'span', 'div', 'a']);
 const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:']);
 
@@ -47,32 +61,24 @@ function sanitizeHtml(html: string): string {
     if (typeof window === 'undefined' || typeof DOMParser === 'undefined') {
         return sanitizeHtmlWithRegexFallback(html);
     }
-
     const parser = new DOMParser();
     const sourceDoc = parser.parseFromString(`<div>${html}</div>`, 'text/html');
     const sourceRoot = sourceDoc.body.firstElementChild;
     if (!sourceRoot) return '';
-
     const outputDoc = document.implementation.createHTMLDocument('');
     const outputRoot = outputDoc.createElement('div');
-
     const sanitizeNode = (node: Node, parent: HTMLElement) => {
         if (node.nodeType === Node.TEXT_NODE) {
             parent.appendChild(outputDoc.createTextNode(node.textContent || ''));
             return;
         }
-        if (node.nodeType !== Node.ELEMENT_NODE) {
-            return;
-        }
-
+        if (node.nodeType !== Node.ELEMENT_NODE) return;
         const el = node as HTMLElement;
         const tag = el.tagName.toLowerCase();
-
         if (!ALLOWED_TAGS.has(tag)) {
             Array.from(el.childNodes).forEach((child) => sanitizeNode(child, parent));
             return;
         }
-
         if (tag === 'a') {
             const safeHref = sanitizeHref(el.getAttribute('href'));
             if (!safeHref) {
@@ -81,38 +87,193 @@ function sanitizeHtml(html: string): string {
             }
             const link = outputDoc.createElement('a');
             link.setAttribute('href', safeHref);
-            if (el.getAttribute('target') === '_blank') {
-                link.setAttribute('target', '_blank');
-            }
+            if (el.getAttribute('target') === '_blank') link.setAttribute('target', '_blank');
             link.setAttribute('rel', 'noopener noreferrer');
             Array.from(el.childNodes).forEach((child) => sanitizeNode(child, link));
             parent.appendChild(link);
             return;
         }
-
         const safeEl = outputDoc.createElement(tag);
         Array.from(el.childNodes).forEach((child) => sanitizeNode(child, safeEl));
         parent.appendChild(safeEl);
     };
-
     Array.from(sourceRoot.childNodes).forEach((child) => sanitizeNode(child, outputRoot));
     return outputRoot.innerHTML;
 }
 
-export default function ChatPanel({ messages, onSendGoal, connected, running, onStop, lang, difficulty, onDifficultyChange }: ChatPanelProps) {
+// ── Milestone detection: messages that belong in the Execution Feed ──
+const MILESTONE_SENDERS = new Set(['Orchestrator', 'Plan', 'File Output']);
+const MILESTONE_ICON_SET = new Set(['🧠', '📋', '✅', '❌', '⚙️', '📁', '🔍', '🏁']);
+
+function isMilestone(msg: ChatMessage): boolean {
+    if (msg.role === 'user') return true;
+    if (msg.sender === 'console') return false;
+    if (msg.sender === 'OpenClaw' || msg.icon === 'OC') return true;
+    if (MILESTONE_SENDERS.has(msg.sender || '')) return true;
+    if (msg.icon && MILESTONE_ICON_SET.has(msg.icon)) return true;
+    // Subtask start/complete messages
+    const content = msg.content || '';
+    if (/^(✅|❌|⚙️)\s/.test(content)) return true;
+    return false;
+}
+
+function stripLeadingMarker(content: string): string {
+    return content
+        .replace(/^[\u2700-\u27BF\u{1F300}-\u{1FAFF}\u{1F1E6}-\u{1F1FF}]+\s*/u, '')
+        .trim();
+}
+
+function messageBadge(msg: ChatMessage, lang: 'en' | 'zh'): { label: string; color: string; bg: string } {
+    if (msg.role === 'user') {
+        return { label: lang === 'zh' ? '目标' : 'Goal', color: 'var(--blue)', bg: 'rgba(79, 143, 255, 0.1)' };
+    }
+    if (msg.icon === '✅' || msg.icon === '🏁') {
+        return { label: lang === 'zh' ? '完成' : 'Done', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)' };
+    }
+    if (msg.icon === '❌') {
+        return { label: lang === 'zh' ? '失败' : 'Failed', color: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)' };
+    }
+    if (msg.icon === '⚙️') {
+        return { label: lang === 'zh' ? '执行中' : 'Running', color: 'var(--blue)', bg: 'rgba(79, 143, 255, 0.1)' };
+    }
+    if (msg.sender === 'Plan' || msg.icon === '📋') {
+        return { label: lang === 'zh' ? '规划' : 'Plan', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.1)' };
+    }
+    if (msg.sender === 'File Output') {
+        return { label: lang === 'zh' ? '产物' : 'Output', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.08)' };
+    }
+    if (msg.sender === 'OpenClaw') {
+        return { label: 'OC', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.1)' };
+    }
+    if (msg.sender === 'Orchestrator' || msg.sender === 'Evermind') {
+        return { label: lang === 'zh' ? '系统' : 'System', color: '#3b82f6', bg: 'rgba(59, 130, 246, 0.08)' };
+    }
+    if (msg.sender === 'Report' || msg.sender === 'Preview') {
+        return { label: lang === 'zh' ? '报告' : 'Report', color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.08)' };
+    }
+    // P1-3: Agent-specific role badges
+    const sLower = (msg.sender || '').toLowerCase();
+    if (sLower.includes('builder'))   return { label: lang === 'zh' ? '编写' : 'Build', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.08)' };
+    if (sLower.includes('reviewer'))  return { label: lang === 'zh' ? '审核' : 'Review', color: '#f59e0b', bg: 'rgba(245, 158, 11, 0.08)' };
+    if (sLower.includes('tester'))    return { label: lang === 'zh' ? '测试' : 'Test', color: '#06b6d4', bg: 'rgba(6, 182, 212, 0.08)' };
+    if (sLower.includes('deployer'))  return { label: lang === 'zh' ? '部署' : 'Deploy', color: '#10b981', bg: 'rgba(16, 185, 129, 0.08)' };
+    if (sLower.includes('validator')) return { label: lang === 'zh' ? '验证' : 'Validate', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.08)' };
+    if (sLower.includes('planner'))   return { label: lang === 'zh' ? '规划' : 'Plan', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.08)' };
+    return { label: lang === 'zh' ? '事件' : 'Event', color: 'var(--text2)', bg: 'var(--glass)' };
+}
+
+// ── Message card style by type ──
+function getCardStyle(msg: ChatMessage): React.CSSProperties {
+    if (msg.role === 'user') {
+        return {
+            background: 'rgba(79, 143, 255, 0.08)',
+            borderLeft: '3px solid var(--blue)',
+            borderRadius: 8,
+        };
+    }
+    // Success milestones
+    if (msg.icon === '✅' || msg.icon === '🏁') {
+        return {
+            background: 'rgba(34, 197, 94, 0.06)',
+            borderLeft: '3px solid #22c55e',
+            borderRadius: 8,
+        };
+    }
+    // Failure milestones
+    if (msg.icon === '❌') {
+        return {
+            background: 'rgba(239, 68, 68, 0.06)',
+            borderLeft: '3px solid #ef4444',
+            borderRadius: 8,
+        };
+    }
+    // Running milestones
+    if (msg.icon === '⚙️') {
+        return {
+            background: 'rgba(79, 143, 255, 0.04)',
+            borderLeft: '3px solid rgba(79, 143, 255, 0.4)',
+            borderRadius: 8,
+        };
+    }
+    // Plan/orchestrator
+    if (msg.icon === '🧠' || msg.icon === '📋') {
+        return {
+            background: 'rgba(168, 85, 247, 0.05)',
+            borderLeft: '3px solid rgba(168, 85, 247, 0.4)',
+            borderRadius: 8,
+        };
+    }
+    return {
+        borderLeft: '3px solid var(--glass-border)',
+        borderRadius: 8,
+    };
+}
+
+export default function ChatPanel({
+    messages,
+    onSendGoal,
+    connected,
+    running,
+    onStop,
+    lang,
+    difficulty,
+    onDifficultyChange,
+    runtimeMode,
+    taskTitle,
+    taskStatus,
+    activeNodeLabels = [],
+    completedNodes = 0,
+    runningNodes = 0,
+    totalNodes = 0,
+    startedAt,
+    onOpenReports,
+    onRevealInFinder,
+    selectedRuntime = 'local',
+    onRuntimeChange,
+}: ChatPanelProps) {
     const [input, setInput] = useState('');
-    const [tab, setTab] = useState<'chat' | 'console'>('chat');
-    const msgsRef = useRef<HTMLDivElement>(null);
+    const [logsExpanded, setLogsExpanded] = useState(false);
+    const [inputFocused, setInputFocused] = useState(false);
+    const [sendFlash, setSendFlash] = useState(false);
+    const feedRef = useRef<HTMLDivElement>(null);
+    const logsRef = useRef<HTMLDivElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
+
+    const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
+
+    // P0-1: Auto-focus input on mount and when run finishes
+    useEffect(() => {
+        if (!running && inputRef.current) {
+            inputRef.current.focus();
+        }
+    }, [running]);
+
+    // Split messages into feed (milestones) and logs (console)
+    const feedMessages = useMemo(
+        () => messages.filter(m => isMilestone(m)),
+        [messages]
+    );
+    const logMessages = useMemo(
+        () => messages.filter(m => m.sender === 'console'),
+        [messages]
+    );
 
     useEffect(() => {
-        if (msgsRef.current) msgsRef.current.scrollTop = msgsRef.current.scrollHeight;
-    }, [messages]);
+        if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
+    }, [feedMessages]);
 
-    const handleSend = () => {
-        if (!input.trim()) return;
+    useEffect(() => {
+        if (logsRef.current && logsExpanded) logsRef.current.scrollTop = logsRef.current.scrollHeight;
+    }, [logMessages, logsExpanded]);
+
+    // P0-2: Send with visual flash confirmation
+    const handleSend = useCallback(() => {
+        if (!input.trim() || !connected) return;
         onSendGoal(input.trim());
         setInput('');
-    };
+        setSendFlash(true);
+        setTimeout(() => setSendFlash(false), 800);
+    }, [input, connected, onSendGoal]);
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -122,57 +283,186 @@ export default function ChatPanel({ messages, onSendGoal, connected, running, on
     };
 
     return (
-        <div className="glass-strong flex flex-col h-full border-l border-white/5" style={{ width: '320px', minWidth: 0, overflow: 'hidden' }}>
-            {/* Tabs */}
-            <div className="flex border-b border-white/5">
-                <button
-                    className={`flex-1 py-2 text-[11px] font-medium transition-colors ${tab === 'chat' ? 'text-[var(--blue)] border-b-2 border-[var(--blue)]' : 'text-[var(--text3)] hover:text-[var(--text2)]'}`}
-                    onClick={() => setTab('chat')}
-                >
-                    💬 {lang === 'zh' ? '任务' : 'Tasks'}
-                </button>
-                <button
-                    className={`flex-1 py-2 text-[11px] font-medium transition-colors ${tab === 'console' ? 'text-[var(--blue)] border-b-2 border-[var(--blue)]' : 'text-[var(--text3)] hover:text-[var(--text2)]'}`}
-                    onClick={() => setTab('console')}
-                >
-                    📋 {lang === 'zh' ? '日志' : 'Console'}
-                </button>
-            </div>
+        <div className="glass-strong flex flex-col h-full border-l border-white/5" style={{ width: '320px', minWidth: 260, flexShrink: 0, overflow: 'hidden' }}>
 
-            {/* Messages area */}
-            <div ref={msgsRef} className="flex-1 overflow-y-auto p-3 space-y-2">
-                {tab === 'chat' ? (
-                    messages.filter(m => m.role !== 'system' || m.sender !== 'console').length === 0 ? (
-                        <div className="text-center py-8 text-[var(--text3)] text-[11px]">
-                            <div className="text-3xl mb-2">🧠</div>
-                            <div className="font-medium mb-1">{lang === 'zh' ? '发送一个目标' : 'Send a goal'}</div>
-                            <div className="text-[9px]">{lang === 'zh' ? 'AI 会自动规划、编写、测试' : 'AI will auto-plan, code, and test'}</div>
-                        </div>
-                    ) : (
-                        messages.filter(m => m.sender !== 'console').map(msg => (
-                            <div key={msg.id} className={`chat-msg ${msg.role}`} style={msg.borderColor ? { borderLeft: `2px solid ${msg.borderColor}` } : {}}>
-                                <div className="chat-sender">{msg.icon} {msg.sender || msg.role}</div>
-                                <div dangerouslySetInnerHTML={{ __html: sanitizeHtml(msg.content) }} />
-                                <div className="chat-time">{msg.timestamp}</div>
-                            </div>
-                        ))
-                    )
+            {/* Layer 1: TaskSummaryStrip */}
+            <TaskSummaryStrip
+                running={running}
+                lang={lang}
+                messages={messages}
+                runtimeMode={runtimeMode}
+                taskTitle={taskTitle}
+                taskStatus={taskStatus}
+                activeNodeLabels={activeNodeLabels}
+                completedNodes={completedNodes}
+                runningNodes={runningNodes}
+                totalNodes={totalNodes}
+                startedAt={startedAt}
+            />
+
+            {/* Layer 2: Execution Feed */}
+            <div ref={feedRef} className="flex-1 overflow-y-auto p-3 space-y-2" style={{ minHeight: 0 }}>
+                {feedMessages.length === 0 ? (
+                    <div className="text-center py-8 text-[var(--text3)] text-[11px]">
+                        <div className="font-medium mb-1">{tr('发送一个目标', 'Send a goal')}</div>
+                        <div className="text-[9px]">{tr('AI 会自动规划、编写、测试', 'AI will auto-plan, code, and test')}</div>
+                    </div>
                 ) : (
-                    /* Console tab */
-                    messages.filter(m => m.sender === 'console').map(msg => (
-                        <div key={msg.id} className={`log-line ${msg.role}`}>
-                            <span className="log-tag">{msg.sender}</span>
-                            <span>{msg.content}</span>
+                    feedMessages.map(msg => {
+                        const badge = messageBadge(msg, lang);
+                        const completionPreviewUrl = msg.completionData?.previewUrl;
+                        return (
+                        <div
+                            key={msg.id}
+                            style={{
+                                ...getCardStyle(msg),
+                                padding: '8px 10px',
+                                transition: 'all 0.15s',
+                            }}
+                        >
+                            <div style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 6,
+                                marginBottom: 2,
+                            }}>
+                                <span style={{
+                                    fontSize: 9,
+                                    fontWeight: 700,
+                                    color: badge.color,
+                                    background: badge.bg,
+                                    borderRadius: 999,
+                                    padding: '2px 6px',
+                                    lineHeight: 1.2,
+                                }}>
+                                    {badge.label}
+                                </span>
+                                <span style={{
+                                    fontSize: 10,
+                                    fontWeight: 600,
+                                    color: msg.borderColor || 'var(--text2)',
+                                }}>
+                                    {msg.role === 'user' ? tr('你', 'You') : (msg.sender || msg.role)}
+                                </span>
+                                <span style={{
+                                    fontSize: 8,
+                                    color: 'var(--text3)',
+                                    marginLeft: 'auto',
+                                }}>
+                                    {msg.timestamp}
+                                </span>
+                            </div>
+                            {msg.completionData ? (
+                                <RunCompletionCard
+                                    {...msg.completionData}
+                                    lang={lang}
+                                    onOpenReports={onOpenReports}
+                                    onRevealInFinder={completionPreviewUrl
+                                        ? () => onRevealInFinder?.(completionPreviewUrl)
+                                        : undefined}
+                                />
+                            ) : (
+                            <div
+                                style={{
+                                    fontSize: 11,
+                                    color: msg.role === 'user' ? 'var(--text1)' : 'var(--text2)',
+                                    lineHeight: 1.5,
+                                    wordBreak: 'break-word',
+                                }}
+                                dangerouslySetInnerHTML={{ __html: sanitizeHtml(stripLeadingMarker(msg.content)) }}
+                            />
+                            )}
                         </div>
-                    ))
+                    )})
                 )}
             </div>
 
-            {/* Difficulty selector + Input area */}
+            {/* Layer 3: Collapsible Raw Log */}
+            <div style={{ borderTop: '1px solid var(--glass-border)' }}>
+                <button
+                    onClick={() => setLogsExpanded(!logsExpanded)}
+                    style={{
+                        width: '100%',
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 6,
+                        padding: '6px 12px',
+                        fontSize: 10,
+                        fontWeight: 600,
+                        color: 'var(--text3)',
+                        background: logsExpanded ? 'rgba(255,255,255,0.02)' : 'transparent',
+                        border: 'none',
+                        cursor: 'pointer',
+                        transition: 'all 0.15s',
+                        textAlign: 'left',
+                    }}
+                >
+                    <span style={{
+                        transform: logsExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                        transition: 'transform 0.15s',
+                        display: 'inline-block',
+                        fontSize: 8,
+                    }}>▶</span>
+                    <span>{tr('诊断日志', 'Diagnostic Logs')}</span>
+                    <span style={{
+                        background: 'var(--glass)',
+                        borderRadius: 8,
+                        padding: '0 5px',
+                        fontSize: 9,
+                        marginLeft: 'auto',
+                    }}>
+                        {logMessages.length}
+                    </span>
+                </button>
+
+                {logsExpanded && (
+                    <div
+                        ref={logsRef}
+                        style={{
+                            maxHeight: 180,
+                            overflow: 'auto',
+                            padding: '4px 8px',
+                            fontSize: 9,
+                            fontFamily: 'monospace',
+                            background: 'rgba(0,0,0,0.15)',
+                        }}
+                    >
+                        {logMessages.map(msg => (
+                            <div key={msg.id} style={{
+                                padding: '2px 0',
+                                color: 'var(--text3)',
+                                borderBottom: '1px solid rgba(255,255,255,0.03)',
+                                wordBreak: 'break-all',
+                                lineHeight: 1.4,
+                            }}>
+                                {msg.content}
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
+
+            {/* Input area */}
             <div className="p-3 border-t border-white/5">
                 {running && (
-                    <button onClick={onStop} className="btn btn-danger w-full mb-2 text-[10px] justify-center">
-                        ⏹ {lang === 'zh' ? '停止执行' : 'Stop execution'}
+                    <button onClick={onStop} style={{
+                        width: '100%',
+                        marginBottom: 8,
+                        padding: '6px 0',
+                        fontSize: 10,
+                        fontWeight: 600,
+                        color: '#ef4444',
+                        background: 'rgba(239, 68, 68, 0.08)',
+                        border: '1px solid rgba(239, 68, 68, 0.2)',
+                        borderRadius: 8,
+                        cursor: 'pointer',
+                        transition: 'all 0.15s',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: 4,
+                    }}>
+                        {tr('停止执行', 'Stop execution')}
                     </button>
                 )}
 
@@ -182,13 +472,13 @@ export default function ChatPanel({ messages, onSendGoal, connected, running, on
                     borderRadius: 8, overflow: 'hidden',
                     border: '1px solid var(--glass-border)',
                 }}>
-                    {([['simple', '⚡', lang === 'zh' ? '极速' : 'Blitz', '2-3'],
-                       ['standard', '🔥', lang === 'zh' ? '平衡' : 'Balanced', '3-4'],
-                       ['pro', '💎', lang === 'zh' ? '深度' : 'Deep', '5-7']] as const).map(([key, icon, label, nodes]) => (
+                    {([['simple', tr('极速', 'Blitz'), '2-3'],
+                       ['standard', tr('平衡', 'Balanced'), '3-4'],
+                       ['pro', tr('深度', 'Deep'), '5-7']] as const).map(([key, label, nodes]) => (
                         <button
                             key={key}
                             onClick={() => onDifficultyChange(key as 'simple' | 'standard' | 'pro')}
-                            title={`${nodes} ${lang === 'zh' ? '个节点' : 'nodes'}`}
+                            title={`${nodes} ${tr('个节点', 'nodes')}`}
                             style={{
                                 flex: 1, padding: '5px 0',
                                 fontSize: 10, fontWeight: 600,
@@ -206,28 +496,124 @@ export default function ChatPanel({ messages, onSendGoal, connected, running, on
                                 transition: 'all 0.15s',
                             }}
                         >
-                            {icon} {label}
+                            {label}
                         </button>
                     ))}
                 </div>
-                <div className="flex gap-2">
+                {/* P1-2: Runtime toggle */}
+                {onRuntimeChange && (
+                    <div style={{
+                        display: 'flex', gap: 0, marginBottom: 6,
+                        borderRadius: 8, overflow: 'hidden',
+                        border: '1px solid var(--glass-border)',
+                    }}>
+                        {([['local', tr('本地执行', 'Local'), 'var(--blue)'],
+                           ['openclaw', tr('OpenClaw', 'OpenClaw'), '#a855f7']] as const).map(([key, label, color]) => (
+                            <button
+                                key={key}
+                                onClick={() => onRuntimeChange(key as 'local' | 'openclaw')}
+                                style={{
+                                    flex: 1, padding: '4px 0',
+                                    fontSize: 10, fontWeight: 600,
+                                    border: 'none', cursor: 'pointer',
+                                    background: selectedRuntime === key ? `${color}1a` : 'transparent',
+                                    color: selectedRuntime === key ? color : 'var(--text3)',
+                                    transition: 'all 0.15s',
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                                }}
+                            >
+                                <span style={{
+                                    width: 6,
+                                    height: 6,
+                                    borderRadius: '50%',
+                                    background: selectedRuntime === key ? color : 'var(--text4)',
+                                    opacity: selectedRuntime === key ? 1 : 0.65,
+                                    flexShrink: 0,
+                                }} />
+                                {label}
+                            </button>
+                        ))}
+                    </div>
+                )}
+                {selectedRuntime === 'openclaw' && (
+                    <div style={{
+                        fontSize: 9,
+                        color: 'var(--text3)',
+                        marginBottom: 8,
+                        padding: '6px 8px',
+                        borderRadius: 8,
+                        background: 'rgba(168, 85, 247, 0.06)',
+                        border: '1px solid rgba(168, 85, 247, 0.14)',
+                        lineHeight: 1.45,
+                    }}>
+                        {tr(
+                            'Direct Mode：任务将直接通过 OpenClaw 派发节点执行，进度自动同步到桌面。',
+                            'Direct Mode: nodes are dispatched directly via OpenClaw. Progress syncs to desktop automatically.',
+                        )}
+                    </div>
+                )}
+
+                <div className="flex gap-2" style={{ position: 'relative', zIndex: 10 }}>
                     <input
+                        ref={inputRef}
                         value={input}
                         onChange={e => setInput(e.target.value)}
                         onKeyDown={handleKeyDown}
+                        onFocus={() => setInputFocused(true)}
+                        onBlur={() => setInputFocused(false)}
+                        disabled={!connected}
+                        autoFocus
                         placeholder={connected
-                            ? (lang === 'zh' ? '输入目标，如: 创建一个登录页面...' : 'Enter goal: Build a login page...')
-                            : (lang === 'zh' ? '后端未连接...' : 'Backend not connected...')}
-                        className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-[11px] text-[var(--text1)] placeholder:text-[var(--text3)] focus:outline-none focus:border-[var(--blue)] transition-colors"
+                            ? tr('输入目标，如: 创建一个登录页面...', 'Enter goal: Build a login page...')
+                            : tr('后端未连接...', 'Backend not connected...')}
+                        style={{
+                            flex: 1,
+                            background: sendFlash ? 'rgba(34, 197, 94, 0.12)' : !connected ? 'rgba(255,255,255,0.02)' : 'rgba(255,255,255,0.05)',
+                            border: inputFocused ? '2px solid var(--blue)' : '1px solid rgba(255,255,255,0.1)',
+                            borderRadius: 8,
+                            padding: inputFocused ? '7px 11px' : '8px 12px',
+                            fontSize: 11,
+                            color: !connected ? 'var(--text3)' : 'var(--text1)',
+                            outline: 'none',
+                            transition: 'all 0.2s ease',
+                            boxShadow: inputFocused ? '0 0 0 3px rgba(79, 143, 255, 0.15)' : sendFlash ? '0 0 12px rgba(34, 197, 94, 0.3)' : 'none',
+                        }}
                     />
-                    <button onClick={handleSend} className="btn btn-primary text-[11px]">
-                        🚀
+                    <button
+                        onClick={handleSend}
+                        disabled={!connected || !input.trim()}
+                        style={{
+                            padding: '6px 14px',
+                            fontSize: 14,
+                            background: !connected || !input.trim() ? 'rgba(255,255,255,0.04)' : sendFlash ? 'rgba(34, 197, 94, 0.2)' : 'rgba(79, 143, 255, 0.12)',
+                            color: !connected || !input.trim() ? 'var(--text3)' : sendFlash ? '#22c55e' : 'var(--blue)',
+                            border: `1px solid ${sendFlash ? 'rgba(34,197,94,0.3)' : 'rgba(79, 143, 255, 0.2)'}`,
+                            borderRadius: 8,
+                            cursor: !connected || !input.trim() ? 'not-allowed' : 'pointer',
+                            transition: 'all 0.2s',
+                            fontWeight: 600,
+                            transform: sendFlash ? 'scale(0.92)' : 'scale(1)',
+                        }}
+                    >
+                        {sendFlash ? '✓' : '→'}
                     </button>
                 </div>
-                <div className="text-[8px] text-[var(--text3)] mt-1.5 text-center">
+                <div style={{
+                    fontSize: 8,
+                    color: 'var(--text3)',
+                    marginTop: 6,
+                    textAlign: 'center',
+                }}>
                     {connected
-                        ? `🟢 ${lang === 'zh' ? '自主模式 — AI 将自动计划、执行、测试' : 'Autonomous — AI will plan, execute, test'}`
-                        : `🔴 ${lang === 'zh' ? '离线 — 启动后端: python server.py' : 'Offline — start backend: python server.py'}`}
+                        ? <>
+                            <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#22c55e', display: 'inline-block', marginRight: 4 }} />
+                            {tr('自主模式 — AI 将自动计划、执行、测试', 'Autonomous — AI will plan, execute, test')}
+                          </>
+                        : <>
+                            <span style={{ width: 5, height: 5, borderRadius: '50%', background: '#ef4444', display: 'inline-block', marginRight: 4 }} />
+                            {tr('离线 — 启动后端: python server.py', 'Offline — start backend: python server.py')}
+                          </>
+                    }
                 </div>
             </div>
         </div>

@@ -33,16 +33,25 @@ export interface NodeData {
     lastOutput?: string;
     outputSummary?: string;
     plugins?: string[];
+    loadedSkills?: string[];
     nodeType?: string;
     label?: string;
     lang?: 'en' | 'zh';
     subtaskId?: string;
     taskDescription?: string;
     nodeExecutionId?: string;
+    rawNodeKey?: string;
+    runtime?: string;
     tokensUsed?: number;
+    promptTokens?: number;
+    completionTokens?: number;
     cost?: number;
     startedAt?: number;
     endedAt?: number;
+    durationSeconds?: number;
+    phase?: string;
+    toolCall?: string;
+    hasModelPartialOutput?: boolean;
     log: LogEntry[];
 }
 
@@ -97,6 +106,24 @@ export interface ChatMessage {
     icon?: string;
     timestamp: string;
     borderColor?: string;
+    /** Structured completion data for RunCompletionCard (P2-3) */
+    completionData?: {
+        success: boolean;
+        completed: number;
+        total: number;
+        retries: number;
+        durationSeconds: number;
+        difficulty: string;
+        subtasks: Array<{
+            id: string;
+            agent: string;
+            status: string;
+            retries: number;
+            filesCreated?: string[];
+            workSummary?: string[];
+        }>;
+        previewUrl?: string;
+    };
 }
 
 export interface ChatHistorySession {
@@ -126,6 +153,7 @@ export interface RunSubtaskReport {
 export interface RunReportRecord {
     id: string;
     taskId?: string;
+    runId?: string;
     createdAt: number;
     goal: string;
     difficulty: 'simple' | 'standard' | 'pro';
@@ -161,28 +189,28 @@ export interface NodeTypeInfo {
 }
 
 export const NODE_TYPES: Record<string, NodeTypeInfo> = {
-    router: { icon: '🔀', color: '#4f8fff', label_en: 'Router', label_zh: '路由器', desc_en: 'Intake & Dispatch', desc_zh: '接收分发', inputs: [{ id: 'task', label: 'Task' }], outputs: [{ id: 'dispatch', label: 'Dispatch' }] },
-    planner: { icon: '📋', color: '#a855f7', label_en: 'Planner', label_zh: '规划师', desc_en: 'Architecture', desc_zh: '架构设计', inputs: [{ id: 'goal', label: 'Goal' }], outputs: [{ id: 'plan', label: 'Plan' }] },
-    builder: { icon: '👷', color: '#40d67c', label_en: 'Builder', label_zh: '构建者', desc_en: 'Engineer', desc_zh: '代码工程', inputs: [{ id: 'spec', label: 'Spec' }], outputs: [{ id: 'code', label: 'Code' }] },
-    tester: { icon: '🧪', color: '#ff9a40', label_en: 'Tester', label_zh: '测试员', desc_en: 'QA', desc_zh: '质量测试', inputs: [{ id: 'code', label: 'Code' }], outputs: [{ id: 'report', label: 'Report' }] },
-    reviewer: { icon: '👁', color: '#06b6d4', label_en: 'Reviewer', label_zh: '审查员', desc_en: 'Gatekeeper', desc_zh: '质量审核', inputs: [{ id: 'input', label: 'Input' }], outputs: [{ id: 'verdict', label: 'Verdict' }] },
-    deployer: { icon: '🚀', color: '#ec4899', label_en: 'Deployer', label_zh: '部署员', desc_en: 'DevOps', desc_zh: '运维部署', inputs: [{ id: 'artifact', label: 'Artifact' }], outputs: [{ id: 'url', label: 'URL' }] },
-    debugger: { icon: '🔧', color: '#f59e0b', label_en: 'Debugger', label_zh: '调试器', desc_en: 'Bug Hunter', desc_zh: '错误追踪', inputs: [{ id: 'error', label: 'Error' }], outputs: [{ id: 'fix', label: 'Fix' }] },
-    analyst: { icon: '📊', color: '#8b5cf6', label_en: 'Analyst', label_zh: '分析师', desc_en: 'Data', desc_zh: '数据分析', inputs: [{ id: 'data', label: 'Data' }], outputs: [{ id: 'report', label: 'Report' }] },
-    scribe: { icon: '📝', color: '#14b8a6', label_en: 'Scribe', label_zh: '记录员', desc_en: 'Writer', desc_zh: '文档撰写', inputs: [{ id: 'content', label: 'Content' }], outputs: [{ id: 'doc', label: 'Doc' }] },
-    monitor: { icon: '📡', color: '#6366f1', label_en: 'Monitor', label_zh: '监控器', desc_en: 'Watch', desc_zh: '系统监控', inputs: [{ id: 'signal', label: 'Signal' }], outputs: [{ id: 'alert', label: 'Alert' }] },
-    localshell: { icon: '💻', color: '#64748b', label_en: 'Shell', label_zh: '终端', desc_en: 'Shell', desc_zh: '终端命令', inputs: [{ id: 'cmd', label: 'Command' }], outputs: [{ id: 'stdout', label: 'Output' }], sec: 'L3' },
-    fileread: { icon: '📄', color: '#78716c', label_en: 'File Read', label_zh: '读文件', desc_en: 'Read', desc_zh: '读取文件', inputs: [{ id: 'path', label: 'Path' }], outputs: [{ id: 'content', label: 'Content' }], sec: 'L1' },
-    filewrite: { icon: '💾', color: '#78716c', label_en: 'File Write', label_zh: '写文件', desc_en: 'Write', desc_zh: '写入文件', inputs: [{ id: 'content', label: 'Content' }], outputs: [{ id: 'path', label: 'Path' }], sec: 'L2' },
-    screenshot: { icon: '📸', color: '#f472b6', label_en: 'Screenshot', label_zh: '截图', desc_en: 'Capture', desc_zh: '屏幕截图', inputs: [{ id: 'trigger', label: 'Trigger' }], outputs: [{ id: 'image', label: 'Image' }], sec: 'L1' },
-    browser: { icon: '🌐', color: '#fb923c', label_en: 'Browser', label_zh: '浏览器', desc_en: 'Web', desc_zh: '网页浏览', inputs: [{ id: 'url', label: 'URL' }], outputs: [{ id: 'page', label: 'Page' }], sec: 'L2' },
-    gitops: { icon: '🔗', color: '#a3e635', label_en: 'Git', label_zh: 'Git操作', desc_en: 'Git', desc_zh: 'Git管理', inputs: [{ id: 'action', label: 'Action' }], outputs: [{ id: 'result', label: 'Result' }], sec: 'L2' },
-    uicontrol: { icon: '🖱', color: '#c084fc', label_en: 'UI Control', label_zh: 'UI控制', desc_en: 'Mouse/KB', desc_zh: '鼠标/键盘', inputs: [{ id: 'action', label: 'Action' }], outputs: [{ id: 'result', label: 'Result' }], sec: 'L3' },
-    imagegen: { icon: '🎨', color: '#f43f5e', label_en: 'Image Gen', label_zh: '图像生成', desc_en: 'Generate', desc_zh: '生成图像', inputs: [{ id: 'prompt', label: 'Prompt' }], outputs: [{ id: 'image', label: 'Image' }] },
-    bgremove: { icon: '✂️', color: '#10b981', label_en: 'BG Remove', label_zh: '去背景', desc_en: 'RemoveBG', desc_zh: '移除背景', inputs: [{ id: 'image', label: 'Image' }], outputs: [{ id: 'result', label: 'Result' }] },
-    spritesheet: { icon: '🖼', color: '#7c3aed', label_en: 'Spritesheet', label_zh: '精灵表', desc_en: 'Pack', desc_zh: '打包精灵', inputs: [{ id: 'images', label: 'Images' }], outputs: [{ id: 'sheet', label: 'Sheet' }] },
-    assetimport: { icon: '📦', color: '#0ea5e9', label_en: 'Asset Import', label_zh: '素材导入', desc_en: 'Import', desc_zh: '导入素材', inputs: [{ id: 'asset', label: 'Asset' }], outputs: [{ id: 'result', label: 'Result' }] },
-    merger: { icon: '🔗', color: '#6b7280', label_en: 'Merger', label_zh: '合并器', desc_en: 'Merge', desc_zh: '合并数据', inputs: [{ id: 'a', label: 'Input A' }, { id: 'b', label: 'Input B' }], outputs: [{ id: 'merged', label: 'Merged' }] },
+    router: { icon: 'RT', color: '#4f8fff', label_en: 'Router', label_zh: '路由器', desc_en: 'Intake & Dispatch', desc_zh: '接收分发', inputs: [{ id: 'task', label: 'Task' }], outputs: [{ id: 'dispatch', label: 'Dispatch' }] },
+    planner: { icon: 'PL', color: '#a855f7', label_en: 'Planner', label_zh: '规划师', desc_en: 'Architecture', desc_zh: '架构设计', inputs: [{ id: 'goal', label: 'Goal' }], outputs: [{ id: 'plan', label: 'Plan' }] },
+    builder: { icon: 'BD', color: '#40d67c', label_en: 'Builder', label_zh: '构建者', desc_en: 'Engineer', desc_zh: '代码工程', inputs: [{ id: 'spec', label: 'Spec' }], outputs: [{ id: 'code', label: 'Code' }] },
+    tester: { icon: 'QA', color: '#ff9a40', label_en: 'Tester', label_zh: '测试员', desc_en: 'QA', desc_zh: '质量测试', inputs: [{ id: 'code', label: 'Code' }], outputs: [{ id: 'report', label: 'Report' }] },
+    reviewer: { icon: 'RV', color: '#06b6d4', label_en: 'Reviewer', label_zh: '审查员', desc_en: 'Gatekeeper', desc_zh: '质量审核', inputs: [{ id: 'input', label: 'Input' }], outputs: [{ id: 'verdict', label: 'Verdict' }] },
+    deployer: { icon: 'DP', color: '#ec4899', label_en: 'Deployer', label_zh: '部署员', desc_en: 'DevOps', desc_zh: '运维部署', inputs: [{ id: 'artifact', label: 'Artifact' }], outputs: [{ id: 'url', label: 'URL' }] },
+    debugger: { icon: 'DB', color: '#f59e0b', label_en: 'Debugger', label_zh: '调试器', desc_en: 'Bug Hunter', desc_zh: '错误追踪', inputs: [{ id: 'error', label: 'Error' }], outputs: [{ id: 'fix', label: 'Fix' }] },
+    analyst: { icon: 'AN', color: '#8b5cf6', label_en: 'Analyst', label_zh: '分析师', desc_en: 'Data', desc_zh: '数据分析', inputs: [{ id: 'data', label: 'Data' }], outputs: [{ id: 'report', label: 'Report' }] },
+    scribe: { icon: 'SC', color: '#14b8a6', label_en: 'Scribe', label_zh: '记录员', desc_en: 'Writer', desc_zh: '文档撰写', inputs: [{ id: 'content', label: 'Content' }], outputs: [{ id: 'doc', label: 'Doc' }] },
+    monitor: { icon: 'MN', color: '#6366f1', label_en: 'Monitor', label_zh: '监控器', desc_en: 'Watch', desc_zh: '系统监控', inputs: [{ id: 'signal', label: 'Signal' }], outputs: [{ id: 'alert', label: 'Alert' }] },
+    localshell: { icon: 'SH', color: '#64748b', label_en: 'Shell', label_zh: '终端', desc_en: 'Shell', desc_zh: '终端命令', inputs: [{ id: 'cmd', label: 'Command' }], outputs: [{ id: 'stdout', label: 'Output' }], sec: 'L3' },
+    fileread: { icon: 'FR', color: '#78716c', label_en: 'File Read', label_zh: '读文件', desc_en: 'Read', desc_zh: '读取文件', inputs: [{ id: 'path', label: 'Path' }], outputs: [{ id: 'content', label: 'Content' }], sec: 'L1' },
+    filewrite: { icon: 'FW', color: '#78716c', label_en: 'File Write', label_zh: '写文件', desc_en: 'Write', desc_zh: '写入文件', inputs: [{ id: 'content', label: 'Content' }], outputs: [{ id: 'path', label: 'Path' }], sec: 'L2' },
+    screenshot: { icon: 'SS', color: '#f472b6', label_en: 'Screenshot', label_zh: '截图', desc_en: 'Capture', desc_zh: '屏幕截图', inputs: [{ id: 'trigger', label: 'Trigger' }], outputs: [{ id: 'image', label: 'Image' }], sec: 'L1' },
+    browser: { icon: 'WB', color: '#fb923c', label_en: 'Browser', label_zh: '浏览器', desc_en: 'Observe / Act / Extract', desc_zh: '观察 / 执行 / 提取', inputs: [{ id: 'url', label: 'URL' }], outputs: [{ id: 'page', label: 'Page' }], sec: 'L2' },
+    gitops: { icon: 'GT', color: '#a3e635', label_en: 'Git', label_zh: 'Git操作', desc_en: 'Git', desc_zh: 'Git管理', inputs: [{ id: 'action', label: 'Action' }], outputs: [{ id: 'result', label: 'Result' }], sec: 'L2' },
+    uicontrol: { icon: 'UI', color: '#c084fc', label_en: 'UI Control', label_zh: 'UI控制', desc_en: 'Mouse/KB', desc_zh: '鼠标/键盘', inputs: [{ id: 'action', label: 'Action' }], outputs: [{ id: 'result', label: 'Result' }], sec: 'L3' },
+    imagegen: { icon: 'IG', color: '#f43f5e', label_en: 'Image Gen', label_zh: '图像生成', desc_en: 'Generate', desc_zh: '生成图像', inputs: [{ id: 'prompt', label: 'Prompt' }], outputs: [{ id: 'image', label: 'Image' }] },
+    bgremove: { icon: 'BG', color: '#10b981', label_en: 'BG Remove', label_zh: '去背景', desc_en: 'RemoveBG', desc_zh: '移除背景', inputs: [{ id: 'image', label: 'Image' }], outputs: [{ id: 'result', label: 'Result' }] },
+    spritesheet: { icon: 'SP', color: '#7c3aed', label_en: 'Spritesheet', label_zh: '精灵表', desc_en: 'Pack', desc_zh: '打包精灵', inputs: [{ id: 'images', label: 'Images' }], outputs: [{ id: 'sheet', label: 'Sheet' }] },
+    assetimport: { icon: 'AI', color: '#0ea5e9', label_en: 'Asset Import', label_zh: '素材导入', desc_en: 'Import', desc_zh: '导入素材', inputs: [{ id: 'asset', label: 'Asset' }], outputs: [{ id: 'result', label: 'Result' }] },
+    merger: { icon: 'MG', color: '#6b7280', label_en: 'Merger', label_zh: '合并器', desc_en: 'Merge', desc_zh: '合并数据', inputs: [{ id: 'a', label: 'Input A' }, { id: 'b', label: 'Input B' }], outputs: [{ id: 'merged', label: 'Merged' }] },
 };
 
 // ─── Kanban Task Board ──────────────────────────
@@ -216,16 +244,25 @@ export interface TaskCard {
     reviewVerdict: string;
     reviewIssues: string[];
     selfcheckItems: SelfCheckItem[];
+    sessionId?: string;
     reports?: RunReportRecord[];
 }
 
 export const TASK_COLUMNS: { key: TaskStatus; label_en: string; label_zh: string; color: string; icon: string }[] = [
-    { key: 'backlog',   label_en: 'Backlog',    label_zh: '待办',   color: '#64748b', icon: '📥' },
-    { key: 'planned',   label_en: 'Planned',    label_zh: '已规划', color: '#a855f7', icon: '📋' },
-    { key: 'executing', label_en: 'Executing',  label_zh: '执行中', color: '#3b82f6', icon: '⚙️' },
-    { key: 'review',    label_en: 'Review',     label_zh: '审核',   color: '#f59e0b', icon: '👁' },
-    { key: 'selfcheck', label_en: 'Self-Check', label_zh: '自检',   color: '#06b6d4', icon: '🧪' },
-    { key: 'done',      label_en: 'Done',       label_zh: '完成',   color: '#22c55e', icon: '✅' },
+    { key: 'backlog',   label_en: 'Backlog',    label_zh: '待办',   color: '#64748b', icon: 'BL' },
+    { key: 'planned',   label_en: 'Planned',    label_zh: '已规划', color: '#a855f7', icon: 'PL' },
+    { key: 'executing', label_en: 'Executing',  label_zh: '执行中', color: '#3b82f6', icon: 'EX' },
+    { key: 'review',    label_en: 'Review',     label_zh: '审核',   color: '#f59e0b', icon: 'RV' },
+    { key: 'selfcheck', label_en: 'Self-Check', label_zh: '自检',   color: '#06b6d4', icon: 'SC' },
+    { key: 'done',      label_en: 'Done',       label_zh: '完成',   color: '#22c55e', icon: 'OK' },
+];
+
+/** Simplified 3-column board view — groups internal statuses for user-facing display. */
+export type BoardColumnKey = 'pending' | 'active' | 'completed';
+export const BOARD_COLUMNS: { key: BoardColumnKey; statuses: TaskStatus[]; label_en: string; label_zh: string; color: string; icon: string }[] = [
+    { key: 'pending',   statuses: ['backlog', 'planned'],                       label_en: 'Pending',    label_zh: '📋 待执行',  color: '#64748b', icon: '📋' },
+    { key: 'active',    statuses: ['executing', 'review', 'selfcheck'],         label_en: 'In Progress', label_zh: '⚡ 执行中', color: '#3b82f6', icon: '⚡' },
+    { key: 'completed', statuses: ['done'],                                     label_en: 'Completed',  label_zh: '✅ 已完成',  color: '#22c55e', icon: '✅' },
 ];
 
 // ─────────────────────────────────────────
@@ -233,11 +270,12 @@ export const TASK_COLUMNS: { key: TaskStatus; label_en: string; label_zh: string
 // ─────────────────────────────────────────
 export type RunStatus = 'queued' | 'running' | 'waiting_review' | 'waiting_selfcheck' | 'failed' | 'done' | 'cancelled';
 export type NodeExecutionStatus = 'queued' | 'running' | 'passed' | 'failed' | 'blocked' | 'waiting_approval' | 'skipped' | 'cancelled';
-export type TriggerSource = 'openclaw' | 'ui' | 'api' | 'retry' | 'resume';
+export type TriggerSource = 'openclaw' | 'openclaw_planner' | 'ui' | 'api' | 'retry' | 'resume';
 export type RunRuntime = 'local' | 'openclaw';
 export type ReviewDecision = 'approve' | 'reject' | 'needs_fix' | 'blocked';
 export type ValidationStatus = 'passed' | 'failed' | 'skipped' | 'blocked';
 export type ArtifactType = 'changed_files' | 'diff_summary' | 'report' | 'review_result' | 'test_output' | 'build_output' | 'run_summary' | 'risk_report' | 'deployment_notes' | 'raw_log' | 'preview_ref';
+export type SkillOrigin = 'builtin' | 'community';
 
 export interface RunRecord {
     id: string;
@@ -283,6 +321,9 @@ export interface NodeExecutionRecord {
     updated_at: number;
     progress?: number;
     phase?: string;
+    loaded_skills?: string[];
+    activity_log?: LogEntry[];
+    reference_urls?: string[];
     version?: number;
     timeout_seconds?: number;
     depends_on_keys?: string[];
@@ -298,6 +339,22 @@ export interface ArtifactRecord {
     content: string;
     metadata: Record<string, unknown>;
     created_at: number;
+}
+
+export interface SkillLibraryRecord {
+    name: string;
+    title: string;
+    summary: string;
+    category: string;
+    tags: string[];
+    keywords: string[];
+    node_types: string[];
+    origin: SkillOrigin;
+    source_name: string;
+    source_url: string;
+    license_note: string;
+    example_goal: string;
+    installed_at: number;
 }
 
 export interface ReviewDecisionRecord {

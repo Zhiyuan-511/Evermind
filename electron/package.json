@@ -26,6 +26,7 @@
         "asar": true,
         "mac": {
             "category": "public.app-category.developer-tools",
+            "icon": "icon.icns",
             "target": [
                 {
                     "target": "dir",
@@ -36,6 +37,12 @@
             ],
             "darkModeSupport": true
         },
+        "protocols": [
+            {
+                "name": "Evermind",
+                "schemes": ["evermind"]
+            }
+        ],
         "files": [
             "main.js",
             "preload.js",
@@ -49,10 +56,15 @@
                 "to": "backend",
                 "filter": [
                     "**/*.py",
+                    "agent_skills/**",
                     "requirements.txt",
                     ".env.example",
                     "plugins/**"
                 ]
+            },
+            {
+                "from": "../OPENCLAW_GUIDE.md",
+                "to": "OPENCLAW_GUIDE.md"
             },
             {
                 "from": "../frontend/.next/standalone",

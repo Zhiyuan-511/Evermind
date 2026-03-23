@@ -35,8 +35,8 @@ VALID_STATUSES = {"backlog", "planned", "executing", "review", "selfcheck", "don
 VALID_TRANSITIONS: Dict[str, List[str]] = {
     "backlog":   ["planned", "executing"],
     "planned":   ["executing", "backlog"],
-    "executing": ["review", "selfcheck", "planned"],
-    "review":    ["selfcheck", "executing"],  # reject → back to executing
+    "executing": ["review", "selfcheck", "done", "planned"],
+    "review":    ["selfcheck", "executing", "done"],  # reject → back to executing
     "selfcheck": ["done", "executing"],       # fail → back to executing
     "done":      ["backlog"],                 # reopen
 }
@@ -85,6 +85,40 @@ def _normalize_string_list(value: Any, *, limit: int = 100, item_limit: int = 50
     return normalized
 
 
+def _normalize_activity_log(value: Any, *, limit: int = 80, message_limit: int = 600) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        value = [] if value in (None, "") else [value]
+
+    items: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in value:
+        if isinstance(raw, dict):
+            ts = _coerce_int(raw.get("ts"), int(time.time() * 1000))
+            msg = _truncate_text(raw.get("msg", ""), message_limit).strip()
+            item_type = _truncate_text(raw.get("type", "info"), 16).strip().lower() or "info"
+        else:
+            ts = int(time.time() * 1000)
+            msg = _truncate_text(raw, message_limit).strip()
+            item_type = "info"
+        if not msg:
+            continue
+        if item_type not in {"info", "error", "warn", "ok", "sys"}:
+            item_type = "info"
+        key = f"{item_type}:{msg}"
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append({
+            "ts": max(0, ts),
+            "msg": msg,
+            "type": item_type,
+        })
+        if len(items) >= limit:
+            break
+    items.sort(key=lambda item: _coerce_int(item.get("ts"), 0))
+    return items[-limit:]
+
+
 def _normalize_selfcheck_items(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -128,6 +162,7 @@ class TaskRecord:
     created_at: float = 0.0
     updated_at: float = 0.0
     version: int = 0
+    session_id: str = ""  # Per-session scoping
     run_ids: List[str] = field(default_factory=list)
     related_files: List[str] = field(default_factory=list)
     latest_summary: str = ""
@@ -151,6 +186,7 @@ class TaskRecord:
 class RunReport:
     id: str = ""
     task_id: str = ""
+    run_id: str = ""
     created_at: float = 0.0
     goal: str = ""
     difficulty: str = "standard"
@@ -185,7 +221,7 @@ VALID_RUN_TRANSITIONS: Dict[str, List[str]] = {
     "queued":             ["running", "cancelled"],
     "running":            ["waiting_review", "waiting_selfcheck", "failed", "done", "cancelled"],
     "waiting_review":     ["running", "failed", "cancelled"],
-    "waiting_selfcheck":  ["running", "failed", "cancelled"],
+    "waiting_selfcheck":  ["running", "failed", "done", "cancelled"],
     "failed":             ["queued"],       # retry creates new run or re-queues
     "done":               [],               # terminal
     "cancelled":          ["queued"],        # reopen
@@ -207,7 +243,7 @@ VALID_NODE_TRANSITIONS: Dict[str, List[str]] = {
     "cancelled":         [],   # terminal; rerun creates new NodeExecution
 }
 
-VALID_TRIGGER_SOURCES = {"openclaw", "ui", "api", "retry", "resume"}
+VALID_TRIGGER_SOURCES = {"openclaw", "openclaw_planner", "ui", "api", "retry", "resume"}
 VALID_RUNTIMES = {"local", "openclaw"}
 MAX_NODE_RETRY_COUNT = 5
 
@@ -276,6 +312,11 @@ class NodeExecutionRecord:
     artifact_ids: List[str] = field(default_factory=list)
     created_at: float = 0.0
     updated_at: float = 0.0
+    progress: int = 0
+    phase: str = ""
+    loaded_skills: List[str] = field(default_factory=list)
+    activity_log: List[Dict[str, Any]] = field(default_factory=list)
+    reference_urls: List[str] = field(default_factory=list)
     version: int = 0
     timeout_seconds: int = 0  # 0 = use default (600s for node)
     depends_on_keys: List[str] = field(default_factory=list)  # P3: node_key deps from template
@@ -435,10 +476,13 @@ class TaskStore:
                 logger.info(f"Saved {len(data)} tasks to {TASKS_FILE}")
             return ok
 
-    def list_tasks(self) -> List[Dict]:
-        """Return all tasks as dicts, sorted by updated_at desc."""
+    def list_tasks(self, session_id: Optional[str] = None) -> List[Dict]:
+        """Return tasks as dicts, optionally filtered by session_id, sorted by updated_at desc."""
         self._ensure_loaded()
-        tasks = sorted(self._tasks.values(), key=lambda t: t.updated_at, reverse=True)
+        tasks = list(self._tasks.values())
+        if session_id:
+            tasks = [t for t in tasks if t.session_id == session_id]
+        tasks = sorted(tasks, key=lambda t: t.updated_at, reverse=True)
         return [t.to_dict() for t in tasks]
 
     def get_task(self, task_id: str) -> Optional[Dict]:
@@ -457,6 +501,7 @@ class TaskStore:
             description=_truncate_text(data.get("description", ""), 2000),
             status=_normalize_enum(data.get("status"), VALID_STATUSES, "backlog"),
             mode=_normalize_enum(data.get("mode"), VALID_MODES, "standard"),
+            session_id=_truncate_text(data.get("session_id", ""), 120),
             owner=_truncate_text(data.get("owner", ""), 100),
             progress=_clamp_progress(data.get("progress", 0)),
             priority=_normalize_enum(data.get("priority"), VALID_PRIORITIES, "medium"),
@@ -561,6 +606,18 @@ class TaskStore:
             return True
         return False
 
+    def delete_tasks_by_session(self, session_id: str) -> int:
+        """Delete all tasks belonging to a session. Returns count deleted."""
+        self._ensure_loaded()
+        to_delete = [tid for tid, t in self._tasks.items() if t.session_id == session_id]
+        if not to_delete:
+            return 0
+        for tid in to_delete:
+            del self._tasks[tid]
+        self.save()
+        logger.info(f"Deleted {len(to_delete)} tasks for session {session_id}")
+        return len(to_delete)
+
     def link_run(self, task_id: str, run_id: str, summary: str = "", risk: str = "", files: Optional[List[str]] = None) -> Optional[Dict]:
         """Link a run report to a task and update summary/risk/files."""
         self._ensure_loaded()
@@ -570,8 +627,9 @@ class TaskStore:
 
         changed = False
 
-        if run_id not in task.run_ids:
-            task.run_ids.append(run_id)
+        normalized_run_id = _truncate_text(run_id, 120).strip()
+        if normalized_run_id and normalized_run_id not in task.run_ids:
+            task.run_ids.append(normalized_run_id)
             changed = True
         if summary:
             normalized_summary = _truncate_text(summary, 1000)
@@ -644,13 +702,13 @@ class TaskStore:
             # Mapping: run terminal status → target task status
             # waiting_review → review
             # waiting_selfcheck → selfcheck
-            # done (success) → review (for human review step)
+            # done (success) → done
             # failed → executing (back to rework)
             # cancelled → backlog (manual/system stop)
             task_status_map = {
                 "waiting_review": "review",
                 "waiting_selfcheck": "selfcheck",
-                "done": "review",
+                "done": "done",
                 "failed": "executing",
                 "cancelled": "backlog",
             }
@@ -998,6 +1056,11 @@ class NodeExecutionStore:
             artifact_ids=[],
             created_at=now,
             updated_at=now,
+            progress=_clamp_progress(data.get("progress", 0)),
+            phase=_truncate_text(data.get("phase", ""), 120),
+            loaded_skills=_normalize_string_list(data.get("loaded_skills"), limit=20, item_limit=80),
+            activity_log=_normalize_activity_log(data.get("activity_log"), limit=80),
+            reference_urls=_normalize_string_list(data.get("reference_urls"), limit=20, item_limit=500),
             version=1,
             timeout_seconds=max(0, _coerce_int(data.get("timeout_seconds", 0))),
             depends_on_keys=_normalize_string_list(data.get("depends_on_keys"), limit=20, item_limit=100),
@@ -1037,8 +1100,10 @@ class NodeExecutionStore:
         if new_status == "running" and node.started_at == 0.0:
             node.started_at = now
             node.ended_at = 0.0
+            node.progress = max(node.progress, 5)
         if new_status in ("passed", "failed", "skipped", "cancelled"):
             node.ended_at = now
+            node.progress = 100
         node.updated_at = now
         node.version += 1
         self.save()
@@ -1050,6 +1115,12 @@ class NodeExecutionStore:
         node = self._nodes.get(node_id)
         if not node:
             return None
+        if "assigned_model" in data:
+            node.assigned_model = _truncate_text(data["assigned_model"], 100)
+        if "assigned_provider" in data:
+            node.assigned_provider = _truncate_text(data["assigned_provider"], 100)
+        if "input_summary" in data:
+            node.input_summary = _truncate_text(data["input_summary"], 2000)
         if "output_summary" in data:
             node.output_summary = _truncate_text(data["output_summary"], 2000)
         if "error_message" in data:
@@ -1058,6 +1129,25 @@ class NodeExecutionStore:
             node.tokens_used = _coerce_int(data["tokens_used"])
         if "cost" in data:
             node.cost = float(data.get("cost", 0.0) or 0.0)
+        if "progress" in data:
+            node.progress = _clamp_progress(data["progress"], node.progress)
+        if "phase" in data:
+            node.phase = _truncate_text(data["phase"], 120)
+        if "loaded_skills" in data:
+            node.loaded_skills = _normalize_string_list(data["loaded_skills"], limit=20, item_limit=80)
+        if "activity_log" in data:
+            node.activity_log = _normalize_activity_log(data["activity_log"], limit=80)
+        if "activity_log_append" in data:
+            merged_log = list(node.activity_log) + _normalize_activity_log(data["activity_log_append"], limit=40)
+            node.activity_log = _normalize_activity_log(merged_log, limit=80)
+        if "reference_urls" in data:
+            node.reference_urls = _normalize_string_list(data["reference_urls"], limit=20, item_limit=500)
+        if "reference_urls_append" in data:
+            node.reference_urls = _normalize_string_list(
+                list(node.reference_urls) + _normalize_string_list(data["reference_urls_append"], limit=20, item_limit=500),
+                limit=20,
+                item_limit=500,
+            )
         if "retry_count" in data:
             node.retry_count = _coerce_int(data["retry_count"])
         if "retried_from_id" in data:

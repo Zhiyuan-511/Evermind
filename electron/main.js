@@ -6,12 +6,13 @@
  * We fix this by injecting common tool paths and trying to load the user's shell PATH.
  */
 
-const { app, BrowserWindow, dialog, shell } = require('electron');
+const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const { spawn, execSync } = require('child_process');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
+const url = require('url');
 
 // tree-kill for reliable child process cleanup
 let treeKill;
@@ -24,6 +25,11 @@ try {
         if (cb) cb();
     };
 }
+
+// ── Deep Link Queue ──
+// macOS may fire open-url BEFORE app.whenReady(), so we queue the goal
+// and inject it once the main window's React app is ready.
+let pendingDeepLinkGoal = null;  // string | null
 
 // ── Paths ──
 const IS_DEV = !app.isPackaged;
@@ -50,6 +56,26 @@ let frontendProcess = null;
 
 const BACKEND_PORT = 8765;
 const FRONTEND_PORT = 3000;
+
+ipcMain.handle('evermind:reveal-in-finder', async (_event, targetPath) => {
+    const resolvedPath = typeof targetPath === 'string' ? targetPath.trim() : '';
+    if (!resolvedPath) return false;
+    try {
+        if (fs.existsSync(resolvedPath)) {
+            shell.showItemInFolder(resolvedPath);
+            return true;
+        }
+        const parentDir = path.dirname(resolvedPath);
+        if (parentDir && fs.existsSync(parentDir)) {
+            shell.openPath(parentDir);
+            return true;
+        }
+        return false;
+    } catch (error) {
+        console.warn('[Electron] reveal-in-finder failed:', error);
+        return false;
+    }
+});
 
 // ═══════════════════════════════════════════
 // macOS PATH Fix — CRITICAL for packaged .app
@@ -440,8 +466,8 @@ function startFrontend() {
         PORT: String(FRONTEND_PORT),
         HOSTNAME: '0.0.0.0',
         NODE_ENV: hasStandalone ? 'production' : 'development',
-        NEXT_PUBLIC_API_URL: `http://localhost:${BACKEND_PORT}`,
-        NEXT_PUBLIC_WS_URL: `ws://localhost:${BACKEND_PORT}/ws`,
+        NEXT_PUBLIC_API_URL: `http://127.0.0.1:${BACKEND_PORT}`,
+        NEXT_PUBLIC_WS_URL: `ws://127.0.0.1:${BACKEND_PORT}/ws`,
     };
 
     frontendProcess = spawn(cmd, args, {
@@ -488,10 +514,18 @@ function showSplash() {
 // ───────────────────────────────────────────
 // Update splash status message
 // ───────────────────────────────────────────
-function updateSplashStatus(msg) {
+function updateSplashStatus(msg, progress) {
     if (splashWindow && !splashWindow.isDestroyed()) {
+        const safeMsg = JSON.stringify(String(msg || ''));
+        const progressScript = typeof progress === 'number'
+            ? `const progressEl = document.getElementById('progress-bar'); if (progressEl) progressEl.style.width = '${Math.max(0, Math.min(100, progress))}%';`
+            : '';
         splashWindow.webContents.executeJavaScript(
-            `document.querySelector('.status span').textContent = '${msg}';`
+            `
+                const statusEl = document.getElementById('status-text');
+                if (statusEl) statusEl.textContent = ${safeMsg};
+                ${progressScript}
+            `
         ).catch(() => { });
     }
 }
@@ -505,7 +539,7 @@ function createMainWindow() {
         height: 900,
         minWidth: 900,
         minHeight: 600,
-        title: 'Evermind',
+        title: IS_DEV ? 'Evermind (DEV)' : 'Evermind Desktop',
         titleBarStyle: 'hiddenInset',
         trafficLightPosition: { x: 15, y: 15 },
         backgroundColor: '#0f1117',
@@ -517,7 +551,9 @@ function createMainWindow() {
         },
     });
 
-    mainWindow.loadURL(`http://127.0.0.1:${FRONTEND_PORT}/editor`);
+    // §2.1: Pass instance type to frontend so UI can display DEV/PACKAGED badge
+    const envTag = IS_DEV ? 'dev' : 'packaged';
+    mainWindow.loadURL(`http://127.0.0.1:${FRONTEND_PORT}/editor?env=${envTag}`);
 
     mainWindow.once('ready-to-show', () => {
         if (splashWindow && !splashWindow.isDestroyed()) {
@@ -526,6 +562,17 @@ function createMainWindow() {
         }
         mainWindow.show();
         mainWindow.focus();
+    });
+
+    // ── Deep Link: inject queued goal after page fully loads ──
+    mainWindow.webContents.on('did-finish-load', () => {
+        console.log('[Electron] Main window did-finish-load');
+        if (pendingDeepLinkGoal) {
+            console.log(`[Electron] Injecting queued deep link goal: ${pendingDeepLinkGoal}`);
+            // Wait for React to mount and register event listeners
+            _injectDeepLinkGoal(pendingDeepLinkGoal);
+            pendingDeepLinkGoal = null;
+        }
     });
 
     // Open external links in browser
@@ -544,16 +591,22 @@ app.whenReady().then(async () => {
     // 0. Fix PATH for macOS — MUST be first
     fixMacOSPath();
 
+    // 0.5. Register evermind:// protocol so OpenClaw can launch the app directly
+    if (!app.isDefaultProtocolClient('evermind')) {
+        app.setAsDefaultProtocolClient('evermind');
+        console.log('[Electron] Registered evermind:// protocol');
+    }
+
     // 1. Show splash
     showSplash();
 
     // 1.5. Kill any zombie processes on our ports
-    updateSplashStatus('正在清理端口...');
+    updateSplashStatus('正在清理端口...', 10);
     killPortProcess(BACKEND_PORT);
     killPortProcess(FRONTEND_PORT);
 
     // 2. Find Python
-    updateSplashStatus('正在检查 Python...');
+    updateSplashStatus('正在检查 Python...', 24);
     const pythonCmd = findPython();
     if (!pythonCmd) {
         dialog.showErrorBox(
@@ -569,21 +622,21 @@ app.whenReady().then(async () => {
     }
 
     // 3. Install deps if needed
-    updateSplashStatus('正在检查依赖...');
+    updateSplashStatus('正在检查依赖...', 38);
     ensurePythonDeps(pythonCmd);
 
     // 4. Start services
     try {
-        updateSplashStatus('正在启动后端服务...');
+        updateSplashStatus('正在启动后端服务...', 56);
         startBackend(pythonCmd);
         await waitForService(BACKEND_PORT, 'Backend', 90000);
 
-        updateSplashStatus('正在启动前端服务...');
+        updateSplashStatus('正在启动前端服务...', 76);
         startFrontend();
         await waitForService(FRONTEND_PORT, 'Frontend', 90000);
 
         // 5. Show main window
-        updateSplashStatus('正在加载编辑器...');
+        updateSplashStatus('正在加载编辑器...', 92);
         createMainWindow();
     } catch (err) {
         console.error('[Electron] Startup error:', err);
@@ -604,6 +657,99 @@ app.whenReady().then(async () => {
 // macOS: re-create window when clicking dock icon
 app.on('activate', () => {
     if (!mainWindow) createMainWindow();
+});
+
+// ── Deep Link: inject goal into frontend React app ──
+// Retries up to 3 times with 2s delays to wait for React mounting
+function _injectDeepLinkGoal(goal, attempt = 0) {
+    if (!goal || !mainWindow || mainWindow.isDestroyed()) {
+        console.warn(`[DeepLink] Cannot inject: goal=${!!goal} mainWindow=${!!mainWindow}`);
+        return;
+    }
+    const maxAttempts = 3;
+    const retryDelay = 2000; // ms
+    const jsCode = `
+        (function() {
+            console.log('[DeepLink] Injecting goal (attempt ${attempt + 1}/${maxAttempts}): ' + ${JSON.stringify(goal)});
+            window.__EVERMIND_DEEPLINK_GOAL = ${JSON.stringify(goal)};
+            window.dispatchEvent(new CustomEvent('evermind-deeplink', { detail: { goal: ${JSON.stringify(goal)} } }));
+            return 'dispatched';
+        })()
+    `;
+    mainWindow.webContents.executeJavaScript(jsCode)
+        .then((result) => {
+            console.log(`[DeepLink] executeJavaScript result (attempt ${attempt + 1}): ${result}`);
+            // Schedule a retry in case React hasn't mounted its listener yet
+            if (attempt < maxAttempts - 1) {
+                setTimeout(() => {
+                    // Only retry if the goal hasn't been consumed yet
+                    if (!mainWindow || mainWindow.isDestroyed()) return;
+                    mainWindow.webContents.executeJavaScript(
+                        `window.__EVERMIND_DEEPLINK_GOAL`
+                    ).then((val) => {
+                        if (val && val === goal) {
+                            console.log(`[DeepLink] Goal still pending, retrying (attempt ${attempt + 2})...`);
+                            _injectDeepLinkGoal(goal, attempt + 1);
+                        } else {
+                            console.log(`[DeepLink] Goal was consumed or changed, no retry needed`);
+                        }
+                    }).catch(() => {
+                        // Page might have navigated, retry anyway
+                        _injectDeepLinkGoal(goal, attempt + 1);
+                    });
+                }, retryDelay);
+            }
+        })
+        .catch((err) => {
+            console.error(`[DeepLink] executeJavaScript failed (attempt ${attempt + 1}):`, err.message);
+            if (attempt < maxAttempts - 1) {
+                setTimeout(() => _injectDeepLinkGoal(goal, attempt + 1), retryDelay);
+            }
+        });
+}
+
+// macOS: handle evermind:// deep link (OpenClaw or other apps)
+// NOTE: This event can fire BEFORE app.whenReady() on cold start!
+app.on('open-url', (event, deepLinkUrl) => {
+    event.preventDefault();
+    console.log(`[Electron] open-url received: ${deepLinkUrl}`);
+    console.log(`[Electron] App state: mainWindow=${!!mainWindow}, isReady=${app.isReady()}`);
+
+    // Parse goal from URL
+    let goal = null;
+    try {
+        const parsed = new URL(deepLinkUrl);
+        // evermind://run?goal=... → hostname='run', searchParams has 'goal'
+        // evermind:///run?goal=... → pathname='/run', searchParams has 'goal'
+        if (parsed.hostname === 'run' || parsed.pathname === '/run' || parsed.pathname === 'run') {
+            goal = parsed.searchParams.get('goal');
+        }
+    } catch (e) {
+        console.warn('[Electron] Failed to parse deep link URL:', e.message);
+    }
+
+    console.log(`[Electron] Parsed deep link goal: ${goal ? goal.substring(0, 80) : '(none)'}`);
+
+    if (goal) {
+        // Queue the goal — it will be injected when the window is ready
+        pendingDeepLinkGoal = goal;
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            // App is already running — bring to front and inject immediately
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+            _injectDeepLinkGoal(goal);
+        } else {
+            console.log('[Electron] mainWindow not ready, goal queued for did-finish-load');
+            // Goal will be injected by the did-finish-load handler in createMainWindow
+        }
+    } else {
+        // No goal — just bring window to front
+        if (mainWindow && !mainWindow.isDestroyed()) {
+            if (mainWindow.isMinimized()) mainWindow.restore();
+            mainWindow.focus();
+        }
+    }
 });
 
 // ── Cleanup ──

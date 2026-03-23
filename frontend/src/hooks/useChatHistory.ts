@@ -32,8 +32,54 @@ function isDefaultSessionTitle(title: string): boolean {
 function inferSessionTitle(messages: ChatMessage[], lang: 'en' | 'zh', existingTitle: string): string {
     if (existingTitle && !isDefaultSessionTitle(existingTitle)) return existingTitle;
     const firstUser = messages.find((m) => m.role === 'user' && m.content.trim());
-    if (!firstUser) return existingTitle || defaultSessionTitle(lang);
-    return firstUser.content.replace(/\s+/g, ' ').trim().slice(0, 42);
+    if (firstUser) return firstUser.content.replace(/\s+/g, ' ').trim().slice(0, 42);
+    // Fallback: use first meaningful agent/system message (skip generic headers)
+    const skipPrefixes = ['预览已就绪', 'Preview ready', '后端已连接', 'Connected'];
+    const firstMeaningful = messages.find((m) =>
+        m.content.trim().length > 5
+        && !skipPrefixes.some(p => m.content.startsWith(p))
+        && !m.content.startsWith('<b>')
+    );
+    if (firstMeaningful) return firstMeaningful.content.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim().slice(0, 42);
+    return existingTitle || defaultSessionTitle(lang);
+}
+
+function normalizeCompletionData(value: unknown): ChatMessage['completionData'] | undefined {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    const subtasks = Array.isArray(record.subtasks)
+        ? record.subtasks.reduce<NonNullable<ChatMessage['completionData']>['subtasks']>((acc, item) => {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) return acc;
+            const subtask = item as Record<string, unknown>;
+            const id = String(subtask.id || '').trim();
+            const agent = String(subtask.agent || '').trim();
+            if (!id || !agent) return acc;
+            acc.push({
+                id,
+                agent,
+                status: String(subtask.status || 'unknown').trim() || 'unknown',
+                retries: Math.max(0, Number(subtask.retries || 0)),
+                filesCreated: Array.isArray(subtask.filesCreated)
+                    ? subtask.filesCreated.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+                    : undefined,
+                workSummary: Array.isArray(subtask.workSummary)
+                    ? subtask.workSummary.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+                    : undefined,
+            });
+            return acc;
+        }, [])
+        : [];
+
+    return {
+        success: Boolean(record.success),
+        completed: Math.max(0, Number(record.completed || 0)),
+        total: Math.max(0, Number(record.total || 0)),
+        retries: Math.max(0, Number(record.retries || 0)),
+        durationSeconds: Math.max(0, Number(record.durationSeconds || 0)),
+        difficulty: String(record.difficulty || 'standard'),
+        subtasks,
+        previewUrl: typeof record.previewUrl === 'string' ? record.previewUrl : undefined,
+    };
 }
 
 function normalizeMessage(msg: unknown): ChatMessage | null {
@@ -49,6 +95,7 @@ function normalizeMessage(msg: unknown): ChatMessage | null {
         icon: typeof value.icon === 'string' ? value.icon : undefined,
         timestamp: typeof value.timestamp === 'string' ? value.timestamp : now(),
         borderColor: typeof value.borderColor === 'string' ? value.borderColor : undefined,
+        completionData: normalizeCompletionData(value.completionData),
     };
 }
 
@@ -88,7 +135,7 @@ export interface UseChatHistoryReturn {
     historySessions: ChatHistorySession[];
     activeSessionId: string;
     workflowName: string;
-    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string) => void;
+    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: ChatMessage['completionData']) => void;
     handleCreateSession: () => void;
     handleSelectSession: (sessionId: string) => void;
     handleDeleteSession: (sessionId: string) => void;
@@ -116,11 +163,33 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
                 .slice(0, MAX_HISTORY_SESSIONS);
             const sessions = normalized.length > 0 ? normalized : [createSession(lang)];
             const savedActiveId = window.localStorage.getItem(ACTIVE_CHAT_SESSION_STORAGE_KEY) || '';
-            const active = sessions.find((s) => s.id === savedActiveId) || sessions[0];
-            setHistorySessions(sessions);
-            setActiveSessionId(active.id);
-            setMessages(active.messages);
-            if (active.title) setWorkflowName(active.title);
+            const preferredActive = sessions.find((s) => s.id === savedActiveId) || sessions[0];
+            const reusableEmpty = sessions.find((s) => s.messages.length === 0) || null;
+
+            // §3.3: Reuse an existing empty session or create a fresh one on first app open in this tab.
+            const freshFlag = window.sessionStorage.getItem('evermind-fresh-session');
+            if (!freshFlag && reusableEmpty) {
+                setHistorySessions(sessions);
+                setActiveSessionId(reusableEmpty.id);
+                setMessages([]);
+                setWorkflowName(reusableEmpty.title);
+                window.sessionStorage.setItem('evermind-fresh-session', '1');
+            } else if (!freshFlag && preferredActive?.messages.length > 0) {
+                const fresh = createSession(lang);
+                const allSessions = [fresh, ...sessions].slice(0, MAX_HISTORY_SESSIONS);
+                setHistorySessions(allSessions);
+                setActiveSessionId(fresh.id);
+                setMessages([]);
+                setWorkflowName(fresh.title);
+                window.sessionStorage.setItem('evermind-fresh-session', '1');
+            } else {
+                const active = reusableEmpty && !freshFlag ? reusableEmpty : preferredActive;
+                setHistorySessions(sessions);
+                setActiveSessionId(active.id);
+                setMessages(active.messages);
+                if (active.title) setWorkflowName(active.title);
+                if (!freshFlag) window.sessionStorage.setItem('evermind-fresh-session', '1');
+            }
         } catch {
             const fallback = createSession(lang);
             setHistorySessions([fallback]);
@@ -163,6 +232,7 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
                         && m.role === normalizedMessages[i]?.role
                         && m.content === normalizedMessages[i]?.content
                         && m.timestamp === normalizedMessages[i]?.timestamp
+                        && JSON.stringify(m.completionData || null) === JSON.stringify(normalizedMessages[i]?.completionData || null)
                     ));
                 const nextTitle = inferSessionTitle(normalizedMessages, lang, session.title);
                 if (sameMessages && nextTitle === session.title) return session;
@@ -181,6 +251,7 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
         sender?: string,
         icon?: string,
         borderColor?: string,
+        completionData?: ChatMessage['completionData'],
     ) => {
         const msg: ChatMessage = {
             id: Date.now().toString(36) + Math.random().toString(36).slice(2),
@@ -188,6 +259,7 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
             content: content.slice(0, 12000),
             sender, icon, borderColor,
             timestamp: now(),
+            completionData,
         };
         setMessages((prev) => [...prev, msg].slice(-MAX_MESSAGES_PER_SESSION));
     }, []);

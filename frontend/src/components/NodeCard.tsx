@@ -11,7 +11,7 @@ interface NodeCardProps {
 }
 
 export default function NodeCard({ node, selected, onSelect, onDragStart, lang }: NodeCardProps) {
-    const info = NODE_TYPES[node.type] || { icon: '❓', color: '#666', label_en: node.type, label_zh: node.type };
+    const info = NODE_TYPES[node.type] || { icon: '??', color: '#666', label_en: node.type, label_zh: node.type };
     const statusColors: Record<string, string> = {
         idle: 'transparent',
         running: 'var(--blue)',

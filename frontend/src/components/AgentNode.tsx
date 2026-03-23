@@ -4,6 +4,7 @@ import React, { memo, useState, useCallback, useRef, useEffect } from 'react';
 import { Handle, Position, useReactFlow, type NodeProps } from '@xyflow/react';
 import { NODE_TYPES } from '@/lib/types';
 import type { CanvasNodeStatus } from '@/lib/types';
+import { buildReadableNodePreview } from '@/lib/nodeOutputHumanizer';
 
 // ── V1 Status Config ──
 const STATUS_CONFIG: Record<CanvasNodeStatus, {
@@ -89,17 +90,31 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const model = (data.model as string) || '';
     const assignedModel = (data.assignedModel as string) || '';
     const displayModel = assignedModel || model || 'gpt-5.4';
+    const lang = (data.lang as string) || 'en';
     const lastOutput = data.lastOutput as string || '';
     const outputSummary = data.outputSummary as string || '';
-    const displayOutput = outputSummary || lastOutput;
     const tokensUsed = data.tokensUsed as number || 0;
     const cost = data.cost as number || 0;
     const startedAt = data.startedAt as number || 0;
     const endedAt = data.endedAt as number || 0;
-    const lang = (data.lang as string) || 'en';
+    const durationText = startedAt > 0 ? formatDuration(startedAt, endedAt) : '';
+    const displayOutput = buildReadableNodePreview({
+        lang: lang === 'zh' ? 'zh' : 'en',
+        nodeType,
+        status: rawStatus,
+        phase: (data.phase as string) || '',
+        taskDescription: (data.taskDescription as string) || '',
+        loadedSkills: ((data.loadedSkills as string[]) || []).filter(Boolean),
+        outputSummary,
+        lastOutput,
+        logs: Array.isArray(data.log) ? (data.log as Array<{ ts?: number; msg?: string; type?: string }>) : [],
+        durationText,
+    });
     const label = lang === 'zh' ? info.label_zh : info.label_en;
     const desc = lang === 'zh' ? info.desc_zh : info.desc_en;
     const name = (data.label as string) || label;
+    const taskDescription = (data.taskDescription as string) || '';
+    const loadedSkills = (data.loadedSkills as string[]) || [];
     const c = info.color;
     const nodeMark = getNodeMark(name, nodeType);
 
@@ -107,6 +122,7 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const sc = getStatusConfig(rawStatus);
     const isRunning = rawStatus === 'running';
     const hasMetrics = tokensUsed > 0 || cost > 0 || startedAt > 0;
+    const isOpenClaw = String(data.runtime || '').toLowerCase() === 'openclaw';
 
     // Model selector state
     const [modelOpen, setModelOpen] = useState(false);
@@ -143,20 +159,30 @@ function AgentNode({ id, data, selected }: NodeProps) {
         return () => clearInterval(timer);
     }, [isRunning, startedAt]);
 
+    // P0-3: Track if node just mounted (for entrance animation)
+    const [justMounted, setJustMounted] = useState(true);
+    useEffect(() => {
+        const t = setTimeout(() => setJustMounted(false), 500);
+        return () => clearTimeout(t);
+    }, []);
+
     return (
         <div className="agent-node-card" style={{
             '--node-accent': c,
             width: 220,
             borderRadius: 12,
             overflow: 'visible',
-            border: `1.5px solid ${selected ? c + '60' : sc.color + '25'}`,
-            boxShadow: selected
-                ? `0 0 0 1.5px ${c}40, var(--node-shadow)`
-                : `${sc.glow}, var(--node-shadow)`,
+            border: `1.5px solid ${selected ? c + '60' : isRunning ? sc.color + '50' : sc.color + '25'}`,
+            boxShadow: isRunning
+                ? `0 0 0 1px ${sc.color}30, 0 0 16px ${sc.color}20, var(--node-shadow)`
+                : selected
+                    ? `0 0 0 1.5px ${c}40, var(--node-shadow)`
+                    : `${sc.glow}, var(--node-shadow)`,
             transition: 'all 0.25s ease',
             fontSize: 0,
             position: 'relative',
             background: 'var(--node-bg)',
+            animation: isRunning ? 'nodeRunGlow 2s ease-in-out infinite' : justMounted ? 'nodeEntrance 0.4s ease-out' : 'none',
         } as React.CSSProperties}>
 
             {/* ── Header ── */}
@@ -250,6 +276,15 @@ function AgentNode({ id, data, selected }: NodeProps) {
                         background: `${c}0c`, color: c + 'bb',
                         border: `1px solid ${c}15`,
                     }}>{nodeType}</span>
+                    {isOpenClaw && (
+                        <span style={{
+                            padding: '1px 4px', borderRadius: 3, fontSize: 7, fontWeight: 700,
+                            background: 'rgba(168, 85, 247, 0.12)',
+                            color: '#a855f7',
+                            border: '1px solid rgba(168, 85, 247, 0.2)',
+                            letterSpacing: '0.03em',
+                        }}>OC</span>
+                    )}
 
                     {/* Model dropdown */}
                     {modelOpen && (
@@ -301,6 +336,46 @@ function AgentNode({ id, data, selected }: NodeProps) {
                         </div>
                     )}
                 </div>
+
+                {/* ── Task Description — shows what the planner assigned ── */}
+                {taskDescription && (
+                    <div style={{
+                        padding: '3px 10px', fontSize: 8, color: 'var(--text3)',
+                        lineHeight: 1.35, overflow: 'hidden', textOverflow: 'ellipsis',
+                        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as const,
+                        borderBottom: '1px solid var(--node-divider)',
+                        background: 'rgba(79,143,255,0.04)',
+                    }}>
+                        <span style={{ color: 'var(--text4)', fontWeight: 600, fontSize: 7, marginRight: 3 }}>
+                            {lang === 'zh' ? '任务' : 'Task'}:
+                        </span>
+                        {taskDescription.length > 80 ? taskDescription.substring(0, 80) + '…' : taskDescription}
+                    </div>
+                )}
+
+                {/* ── Loaded Skills — shows which skills are active ── */}
+                {loadedSkills.length > 0 && (
+                    <div style={{
+                        padding: '3px 10px', display: 'flex', flexWrap: 'wrap', gap: 2,
+                        borderBottom: '1px solid var(--node-divider)',
+                    }}>
+                        <span style={{ fontSize: 7, color: 'var(--text4)', fontWeight: 600, marginRight: 2 }}>
+                            {lang === 'zh' ? '技能' : 'Skills'}:
+                        </span>
+                        {loadedSkills.slice(0, 3).map((skill: string) => (
+                            <span key={skill} style={{
+                                padding: '1px 4px', borderRadius: 3, fontSize: 7,
+                                background: 'rgba(168,85,247,0.1)',
+                                color: '#a855f7',
+                                border: '1px solid rgba(168,85,247,0.15)',
+                                whiteSpace: 'nowrap',
+                            }}>{skill.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase()).substring(0, 22)}</span>
+                        ))}
+                        {loadedSkills.length > 3 && (
+                            <span style={{ fontSize: 7, color: 'var(--text4)' }}>+{loadedSkills.length - 3}</span>
+                        )}
+                    </div>
+                )}
 
                 {/* Input Ports */}
                 {info.inputs.map((port) => (
@@ -364,17 +439,36 @@ function AgentNode({ id, data, selected }: NodeProps) {
                     </div>
                 ))}
 
-                {/* ── Progress Bar ── */}
-                {progress > 0 && isRunning && (
+                {/* ── Progress Bar — shows whenever node is active ── */}
+                {rawStatus !== 'idle' && (
                     <div style={{
-                        margin: '4px 10px 0', height: 3, borderRadius: 2,
-                        background: 'var(--node-divider)', overflow: 'hidden',
+                        margin: '4px 10px 0', borderRadius: 2,
+                        overflow: 'hidden',
                     }}>
                         <div style={{
-                            height: '100%', borderRadius: 2, width: `${Math.min(progress, 100)}%`,
-                            background: `linear-gradient(90deg, ${sc.color}, #a855f7)`,
-                            transition: 'width 0.3s ease',
-                        }} />
+                            height: 3, borderRadius: 2,
+                            background: 'var(--node-divider)',
+                            position: 'relative',
+                        }}>
+                            <div style={{
+                                height: '100%', borderRadius: 2, width: `${Math.min(Math.max(progress, isRunning ? 5 : 0), 100)}%`,
+                                background: isRunning
+                                    ? `linear-gradient(90deg, ${sc.color}, #a855f7)`
+                                    : rawStatus === 'passed' || rawStatus === 'done'
+                                        ? 'var(--green, #40d67c)'
+                                        : `linear-gradient(90deg, ${sc.color}, ${sc.color}80)`,
+                                transition: 'width 0.5s ease-out',
+                                animation: isRunning ? 'progressShimmer 1.5s ease-in-out infinite' : 'none',
+                            }} />
+                        </div>
+                        {(isRunning || progress > 0) && (
+                            <div style={{
+                                fontSize: 7, color: sc.color, textAlign: 'right',
+                                marginTop: 1, fontWeight: 600, opacity: 0.8,
+                            }}>
+                                {Math.round(progress)}%
+                            </div>
+                        )}
                     </div>
                 )}
 
@@ -394,7 +488,7 @@ function AgentNode({ id, data, selected }: NodeProps) {
                                 fontSize: 7, color: 'var(--text3)',
                                 display: 'inline-flex', alignItems: 'center', gap: 2,
                             }}>
-                                {lang === 'zh' ? '耗时' : 'Time'} {formatDuration(startedAt, endedAt)}
+                                {lang === 'zh' ? '耗时' : 'Time'} {durationText}
                             </span>
                         )}
 
@@ -444,9 +538,9 @@ function AgentNode({ id, data, selected }: NodeProps) {
                             cursor: 'pointer',
                             ...(outputExpanded ? {
                                 maxHeight: 120, overflowY: 'auto' as const, whiteSpace: 'pre-wrap' as const,
-                                wordBreak: 'break-all' as const,
-                                background: 'rgba(0,0,0,0.2)', borderRadius: 4, padding: '4px 6px',
-                                fontFamily: 'monospace',
+                                wordBreak: 'break-word' as const,
+                                background: 'rgba(255,255,255,0.04)', borderRadius: 4, padding: '4px 6px',
+                                border: '1px solid var(--node-divider)',
                             } : {
                                 overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const,
                             }),
@@ -454,13 +548,27 @@ function AgentNode({ id, data, selected }: NodeProps) {
                         onClick={(e) => { e.stopPropagation(); setOutputExpanded(!outputExpanded); }}
                         title={lang === 'zh' ? '点击展开/收起' : 'Click to expand/collapse'}
                     >
-                        {outputExpanded ? displayOutput.substring(0, 1000) : `${displayOutput.substring(0, 60)}${displayOutput.length > 60 ? '...' : ''}`}
+                        {outputExpanded ? displayOutput.substring(0, 600) : `${displayOutput.substring(0, 72)}${displayOutput.length > 72 ? '...' : ''}`}
                     </div>
                 )}
             </div>
 
             <style>{`
                 @keyframes agentPulse { 0%,100% { opacity:1 } 50% { opacity:0.3 } }
+                @keyframes nodeRunGlow {
+                    0%, 100% { box-shadow: 0 0 0 1px rgba(79,143,255,0.18), 0 0 12px rgba(79,143,255,0.12), var(--node-shadow); }
+                    50% { box-shadow: 0 0 0 1.5px rgba(79,143,255,0.32), 0 0 20px rgba(79,143,255,0.22), var(--node-shadow); }
+                }
+                @keyframes nodeEntrance {
+                    0% { opacity: 0; transform: scale(0.85); }
+                    60% { opacity: 1; transform: scale(1.03); }
+                    100% { opacity: 1; transform: scale(1); }
+                }
+                @keyframes progressShimmer {
+                    0% { opacity: 0.85; }
+                    50% { opacity: 1; filter: brightness(1.3); }
+                    100% { opacity: 0.85; }
+                }
             `}</style>
         </div>
     );

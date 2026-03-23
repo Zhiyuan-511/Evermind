@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8765';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
 
 interface ArtifactFileItem {
     name: string;
@@ -76,10 +76,10 @@ export default function ArtifactsModal({ open, onClose, lang }: ArtifactsModalPr
         <div className="modal-overlay" onClick={onClose}>
             <div className="modal-container modal-wide" onClick={(e) => e.stopPropagation()}>
                 <div className="modal-header">
-                    <h3>📁 {t('Artifacts Center', '文件产物中心')}</h3>
+                    <h3>{t('Artifacts Center', '文件产物中心')}</h3>
                     <div style={{ display: 'flex', gap: 8 }}>
                         <button className="btn text-[11px]" onClick={() => void refresh()}>
-                            🔄 {t('Refresh', '刷新')}
+                            {t('Refresh', '刷新')}
                         </button>
                         <button className="modal-close" onClick={onClose}>✕</button>
                     </div>
@@ -135,7 +135,7 @@ export default function ArtifactsModal({ open, onClose, lang }: ArtifactsModalPr
                                             className="btn btn-primary text-[10px]"
                                             onClick={() => window.open(`${API_BASE}${activeTask.preview_url}`, '_blank', 'noopener,noreferrer')}
                                         >
-                                            🌐 {t('Open Preview', '打开预览')}
+                                            {t('Open Preview', '打开预览')}
                                         </button>
                                     )}
                                 </div>
@@ -182,14 +182,14 @@ export default function ArtifactsModal({ open, onClose, lang }: ArtifactsModalPr
                                                             className="btn text-[10px]"
                                                             onClick={() => window.open(previewUrl, '_blank', 'noopener,noreferrer')}
                                                         >
-                                                            👁 {t('Preview', '预览')}
+                                                            {t('Preview', '预览')}
                                                         </button>
                                                     ) : (
                                                         <button
                                                             className="btn text-[10px]"
                                                             onClick={() => window.open(rawUrl, '_blank', 'noopener,noreferrer')}
                                                         >
-                                                            📄 {t('Open', '打开')}
+                                                            {t('Open', '打开')}
                                                         </button>
                                                     )}
                                                 </div>

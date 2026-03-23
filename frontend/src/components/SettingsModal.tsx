@@ -26,14 +26,14 @@ interface ApiKeys {
 
 type TabId = 'conn' | 'perm' | 'ui' | 'quality';
 
-const TABS: { id: TabId; icon: string; label_en: string; label_zh: string }[] = [
-    { id: 'conn', icon: '🔌', label_en: 'Connection', label_zh: '连接' },
-    { id: 'perm', icon: '🔐', label_en: 'Permissions', label_zh: '权限' },
-    { id: 'quality', icon: '🔬', label_en: 'Quality', label_zh: '验收策略' },
-    { id: 'ui', icon: '🎨', label_en: 'Interface', label_zh: '界面' },
+const TABS: { id: TabId; label_en: string; label_zh: string }[] = [
+    { id: 'conn', label_en: 'Connection', label_zh: '连接' },
+    { id: 'perm', label_en: 'Permissions', label_zh: '权限' },
+    { id: 'quality', label_en: 'Quality', label_zh: '验收策略' },
+    { id: 'ui', label_en: 'Interface', label_zh: '界面' },
 ];
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8765';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
 
 // ── Security: mask API key for display ──
 function maskKey(key: string): string {
@@ -54,6 +54,7 @@ export default function SettingsModal({
 }: SettingsModalProps) {
     const [tab, setTab] = useState<TabId>('conn');
     const [apiKeys, setApiKeys] = useState<ApiKeys>({ kimi: '', gemini: '', openai: '', claude: '', deepseek: '', qwen: '' });
+    const [apiBases, setApiBases] = useState<Record<string, string>>({ openai: '', claude: '', gemini: '', kimi: '', deepseek: '', qwen: '' });
     const [autoL2, setAutoL2] = useState(true);
     const [l4Pass, setL4Pass] = useState('godmode');
     const [allowedDirs, setAllowedDirs] = useState('~/Desktop, ~/Documents');
@@ -66,6 +67,9 @@ export default function SettingsModal({
     const [forceVisibleReview, setForceVisibleReview] = useState(true);
     const [maxRetries, setMaxRetries] = useState(3);
     const [browserResearch, setBrowserResearch] = useState(false);
+    const [comfyUiUrl, setComfyUiUrl] = useState('');
+    const [comfyWorkflowTemplate, setComfyWorkflowTemplate] = useState('');
+    const [imageBackendAvailable, setImageBackendAvailable] = useState(false);
     // Track which keys the user is actively editing (show real value)
     const [editingKey, setEditingKey] = useState<string | null>(null);
     // Track which keys have been loaded from backend (display as masked)
@@ -102,6 +106,25 @@ export default function SettingsModal({
                 if (typeof data.browser_headful === 'boolean') setBrowserHeadful(data.browser_headful);
                 if (typeof data.reviewer_tester_force_headful === 'boolean') setForceVisibleReview(data.reviewer_tester_force_headful);
                 if (typeof data.max_retries === 'number') setMaxRetries(Math.max(1, Math.min(8, data.max_retries)));
+                if (data.image_generation && typeof data.image_generation === 'object') {
+                    const imageCfg = data.image_generation as Record<string, unknown>;
+                    if (typeof imageCfg.comfyui_url === 'string') setComfyUiUrl(imageCfg.comfyui_url);
+                    if (typeof imageCfg.workflow_template === 'string') setComfyWorkflowTemplate(imageCfg.workflow_template);
+                }
+                if (typeof data.image_generation_available === 'boolean') setImageBackendAvailable(data.image_generation_available);
+                // Load relay base URLs
+                if (data.api_bases && typeof data.api_bases === 'object') {
+                    const bases: Record<string, string> = { openai: '', claude: '', gemini: '', kimi: '', deepseek: '', qwen: '' };
+                    const baseMapping: Record<string, string> = {
+                        openai: 'openai', anthropic: 'claude', gemini: 'gemini',
+                        kimi: 'kimi', deepseek: 'deepseek', qwen: 'qwen',
+                    };
+                    for (const [bk, bv] of Object.entries(data.api_bases)) {
+                        const fk = baseMapping[bk] || bk;
+                        if (fk in bases && typeof bv === 'string') bases[fk] = bv;
+                    }
+                    setApiBases(bases);
+                }
             }).catch(() => { /* offline */ });
     }, [open]);
 
@@ -145,11 +168,23 @@ export default function SettingsModal({
                 credentials: 'omit',
                 body: JSON.stringify({
                     api_keys: restKeys,
+                    api_bases: {
+                        openai: apiBases.openai || '',
+                        anthropic: apiBases.claude || '',
+                        gemini: apiBases.gemini || '',
+                        kimi: apiBases.kimi || '',
+                        deepseek: apiBases.deepseek || '',
+                        qwen: apiBases.qwen || '',
+                    },
                     builder_enable_browser: browserResearch,
                     tester_run_smoke: smokeEnabled,
                     browser_headful: browserHeadful,
                     reviewer_tester_force_headful: forceVisibleReview,
                     max_retries: maxRetries,
+                    image_generation: {
+                        comfyui_url: comfyUiUrl,
+                        workflow_template: comfyWorkflowTemplate,
+                    },
                 }),
             });
 
@@ -167,6 +202,10 @@ export default function SettingsModal({
                             browser_headful: browserHeadful,
                             reviewer_tester_force_headful: forceVisibleReview,
                             max_retries: maxRetries,
+                            image_generation: {
+                                comfyui_url: comfyUiUrl,
+                                workflow_template: comfyWorkflowTemplate,
+                            },
                         },
                     }));
                 }
@@ -174,6 +213,9 @@ export default function SettingsModal({
                 // 3) Show available models
                 if (result.available_models) {
                     setAvailableModels(result.available_models);
+                }
+                if (typeof result.image_generation_available === 'boolean') {
+                    setImageBackendAvailable(result.image_generation_available);
                 }
 
                 setSaveStatus('success');
@@ -191,7 +233,7 @@ export default function SettingsModal({
         }
         setSaving(false);
         setTimeout(() => setSaveStatus('idle'), 5000);
-    }, [apiKeys, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries]);
+    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate]);
 
     // Handle key input change with sanitization
     const handleKeyChange = useCallback((key: keyof ApiKeys, value: string) => {
@@ -216,7 +258,7 @@ export default function SettingsModal({
             <div className="modal-container" onClick={e => e.stopPropagation()}>
                 {/* Header */}
                 <div className="modal-header">
-                    <h3>⚙️ {t('Settings', '设置')}</h3>
+                    <h3>{t('Settings', '设置')}</h3>
                     <button className="modal-close" onClick={handleClose}>✕</button>
                 </div>
 
@@ -228,7 +270,7 @@ export default function SettingsModal({
                             className={`settings-tab ${tab === tb.id ? 'active' : ''}`}
                             onClick={() => setTab(tb.id)}
                         >
-                            {tb.icon} {lang === 'zh' ? tb.label_zh : tb.label_en}
+                            {lang === 'zh' ? tb.label_zh : tb.label_en}
                         </button>
                     ))}
                 </div>
@@ -239,7 +281,7 @@ export default function SettingsModal({
                         <>
                             {/* Connection Status */}
                             <div className="s-section">
-                                <div className="s-section-title">📡 {t('Connection Status', '连接状态')}</div>
+                                <div className="s-section-title">{t('Connection Status', '连接状态')}</div>
                                 <div className="s-row">
                                     <span className={`s-dot ${connected ? 'on' : 'off'}`} />
                                     <span className={`s-badge ${connected ? 'green' : 'red'}`}>
@@ -258,39 +300,56 @@ export default function SettingsModal({
 
                             {/* API Keys */}
                             <div className="s-section">
-                                <div className="s-section-title">🔑 {t('API Keys', 'API 密钥')}</div>
+                                <div className="s-section-title">{t('API Keys', 'API 密钥')}</div>
                                 <div className="s-hint" style={{ marginBottom: 8 }}>
-                                    🔒 {t('Keys are sent directly to your local backend. Never shared with third parties.', '密钥仅发送到本地后端，绝不会发送给第三方。')}
+                                    {t(
+                                        'Keys are sent directly to your local backend. Never shared with third parties. For relay/proxy APIs, fill in the Base URL below each key.',
+                                        '密钥仅发送到本地后端，绝不会发送给第三方。如使用中转 API，请在每个密钥下方填写中转地址（Base URL）。'
+                                    )}
                                 </div>
                                 {(['openai', 'claude', 'gemini', 'kimi', 'deepseek', 'qwen'] as const).map(k => {
                                     const isEditing = editingKey === k;
                                     const hasValue = !!apiKeys[k];
-                                    const isConfigured = loadedKeys.has(k); // key exists on backend
+                                    const isConfigured = loadedKeys.has(k);
                                     const displayValue = isEditing ? apiKeys[k] : (hasValue ? maskKey(apiKeys[k]) : '');
                                     return (
-                                        <div className="s-row" key={k}>
-                                            <label>{k.charAt(0).toUpperCase() + k.slice(1)}</label>
-                                            <input
-                                                className="s-input"
-                                                type={isEditing ? 'text' : 'password'}
-                                                value={displayValue}
-                                                onChange={e => handleKeyChange(k, e.target.value)}
-                                                onFocus={() => setEditingKey(k)}
-                                                onBlur={() => setEditingKey(null)}
-                                                placeholder={isConfigured && !hasValue ? '••• (已配置)' : 'sk-...'}
-                                                {...keyInputProps}
-                                            />
-                                            {(hasValue || isConfigured) && (
-                                                <span style={{
-                                                    fontSize: 8, color: 'var(--green)', fontWeight: 600,
-                                                }}>{hasValue ? '✓ 新' : '✓'}</span>
-                                            )}
+                                        <div key={k} style={{ marginBottom: 6 }}>
+                                            <div className="s-row">
+                                                <label>{k.charAt(0).toUpperCase() + k.slice(1)}</label>
+                                                <input
+                                                    className="s-input"
+                                                    type={isEditing ? 'text' : 'password'}
+                                                    value={displayValue}
+                                                    onChange={e => handleKeyChange(k, e.target.value)}
+                                                    onFocus={() => setEditingKey(k)}
+                                                    onBlur={() => setEditingKey(null)}
+                                                    placeholder={isConfigured && !hasValue ? '••• (已配置)' : 'sk-...'}
+                                                    {...keyInputProps}
+                                                />
+                                                {(hasValue || isConfigured) && (
+                                                    <span style={{ fontSize: 8, color: 'var(--green)', fontWeight: 600 }}>
+                                                        {hasValue ? '✓ 新' : '✓'}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="s-row" style={{ paddingLeft: 16, opacity: 0.85, marginTop: 2 }}>
+                                                <label style={{ fontSize: 9, color: 'var(--text3)' }}>
+                                                    {t('Base URL', '中转地址')}
+                                                </label>
+                                                <input
+                                                    className="s-input"
+                                                    value={apiBases[k] || ''}
+                                                    onChange={e => setApiBases(prev => ({ ...prev, [k]: sanitizeInput(e.target.value) }))}
+                                                    placeholder={t('Leave empty for official endpoint', '留空使用官方地址')}
+                                                    style={{ fontSize: 10 }}
+                                                />
+                                            </div>
                                         </div>
                                     );
                                 })}
                                 <div className="flex items-center gap-2 mt-2">
                                     <button className="btn btn-primary text-[10px]" onClick={saveToBackend} disabled={saving}>
-                                        {saving ? '⏳' : '☁️'} {t('Save to Backend', '保存到后端')}
+                                        {saving ? t('Saving...', '保存中...') : t('Save to Backend', '保存到后端')}
                                     </button>
                                     {saveStatus === 'success' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Saved!', '已保存!')}</span>}
                                     {saveStatus === 'error' && <span className="text-[9px]" style={{ color: 'var(--red)' }}>✗ {t('Failed', '保存失败')}</span>}
@@ -300,7 +359,7 @@ export default function SettingsModal({
                                 {Object.keys(availableModels).length > 0 && (
                                     <div className="s-section" style={{ marginTop: 12, padding: '8px 10px', background: 'rgba(79,143,255,0.05)', borderRadius: 8, border: '1px solid rgba(79,143,255,0.15)' }}>
                                         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--blue)', marginBottom: 6 }}>
-                                            🤖 {t('Available Models', '可用模型')}
+                                            {t('Available Models', '可用模型')}
                                         </div>
                                         {Object.entries(availableModels).map(([provider, models]) => {
                                             const providerNames: Record<string, string> = {
@@ -310,7 +369,7 @@ export default function SettingsModal({
                                             return (
                                                 <div key={provider} style={{ marginBottom: 4 }}>
                                                     <span style={{ fontSize: 9, color: 'var(--green)', fontWeight: 600 }}>
-                                                        ✅ {providerNames[provider] || provider}:
+                                                        {providerNames[provider] || provider}:
                                                     </span>
                                                     <span style={{ fontSize: 9, color: 'var(--text2)', marginLeft: 4 }}>
                                                         {(models as string[]).join(', ')}
@@ -319,7 +378,7 @@ export default function SettingsModal({
                                             );
                                         })}
                                         <div style={{ fontSize: 8, color: 'var(--text3)', marginTop: 4 }}>
-                                            💡 {t('You can select these models on each node', '你可以在每个节点上选择这些模型')}
+                                            {t('You can select these models on each node', '你可以在每个节点上选择这些模型')}
                                         </div>
                                     </div>
                                 )}
@@ -330,7 +389,7 @@ export default function SettingsModal({
                     {tab === 'perm' && (
                         <>
                             <div className="s-section">
-                                <div className="s-section-title">🔐 {t('Security Config', '安全配置')}</div>
+                                <div className="s-section-title">{t('Security Config', '安全配置')}</div>
                                 <div className="s-row">
                                     <label>L4 {t('Password', '密码')}</label>
                                     <input className="s-input" type="password" value={l4Pass} onChange={e => setL4Pass(e.target.value)} autoComplete="off" />
@@ -344,7 +403,7 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">📋 {t('Execution Whitelist', '执行白名单')}</div>
+                                <div className="s-section-title">{t('Execution Whitelist', '执行白名单')}</div>
                                 <div className="s-row">
                                     <label>{t('Allowed Dirs', '允许目录')}</label>
                                     <input className="s-input" value={allowedDirs} onChange={e => setAllowedDirs(e.target.value)} />
@@ -360,7 +419,7 @@ export default function SettingsModal({
                     {tab === 'quality' && (
                         <>
                             <div className="s-section">
-                                <div className="s-section-title">🔬 {t('Visual Verification', '视觉验收')}</div>
+                                <div className="s-section-title">{t('Visual Verification', '视觉验收')}</div>
                                 <div className="s-toggle">
                                     <label>{t('Playwright Smoke Test', 'Playwright 烟雾测试')}</label>
                                     <input type="checkbox" checked={smokeEnabled} onChange={e => setSmokeEnabled(e.target.checked)} />
@@ -388,7 +447,7 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">🔄 {t('Retry Strategy', '重试策略')}</div>
+                                <div className="s-section-title">{t('Retry Strategy', '重试策略')}</div>
                                 <div className="s-row">
                                     <label>{t('Max Retries', '最大重试')}</label>
                                     <select className="s-input" value={maxRetries} onChange={e => setMaxRetries(Number(e.target.value))} style={{ width: 'auto' }}>
@@ -404,7 +463,7 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">🌐 {t('Builder Enhancement', 'Builder 增强')}</div>
+                                <div className="s-section-title">{t('Builder Enhancement', 'Builder 增强')}</div>
                                 <div className="s-toggle">
                                     <label>{t('Web Research Mode', '联网参考模式')}</label>
                                     <input type="checkbox" checked={browserResearch} onChange={e => setBrowserResearch(e.target.checked)} />
@@ -415,18 +474,46 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">⚡ {t('Model Strategy', '模型策略')}</div>
+                                <div className="s-section-title">{t('Image Generation Backend', '图像生成后端')}</div>
+                                <div className="s-row">
+                                    <label>ComfyUI URL</label>
+                                    <input
+                                        className="s-input"
+                                        value={comfyUiUrl}
+                                        onChange={e => setComfyUiUrl(sanitizeInput(e.target.value))}
+                                        placeholder="http://127.0.0.1:8188"
+                                    />
+                                </div>
+                                <div className="s-row">
+                                    <label>{t('Workflow Template', '工作流模板')}</label>
+                                    <input
+                                        className="s-input"
+                                        value={comfyWorkflowTemplate}
+                                        onChange={e => setComfyWorkflowTemplate(sanitizeInput(e.target.value))}
+                                        placeholder="/path/to/workflow.json"
+                                    />
+                                </div>
+                                <div className="s-hint" style={{ lineHeight: 1.7 }}>
+                                    {imageBackendAvailable
+                                        ? t('Configured: planner may auto-insert imagegen / spritesheet / assetimport for asset-heavy goals.',
+                                            '已配置：规划器在素材密集型任务里会自动插入 imagegen / spritesheet / assetimport。')
+                                        : t('Not configured: image nodes will not be auto-inserted. The system will fall back to prompt packs and placeholder assets.',
+                                            '未配置：系统不会自动插入图像节点，会退回到提示词包和占位素材方案。')}
+                                </div>
+                            </div>
+                            <div className="s-section">
+                                <div className="s-section-title">{t('Model Strategy', '模型策略')}</div>
                                 <div className="s-hint" style={{ lineHeight: 1.6 }}>
-                                    ⚡ Simple → {t('fastest model (kimi/deepseek)', '最快模型 (kimi/deepseek)')}<br/>
-                                    🔥 Standard → {t('default model', '默认模型')}<br/>
-                                    💎 Pro → {t('strongest model (gpt-5.4/claude-4)', '最强模型 (gpt-5.4/claude-4)')}<br/>
+                                    Simple → {t('fastest model (kimi/deepseek)', '最快模型 (kimi/deepseek)')}<br/>
+                                    Standard → {t('default model', '默认模型')}<br/>
+                                    Pro → {t('strongest model (gpt-5.4/claude-4)', '最强模型 (gpt-5.4/claude-4)')}<br/>
                                     <span style={{ fontSize: 8, color: 'var(--text3)' }}>
                                         {t('Auto-selects based on configured API keys', '根据已配置的 API 密钥自动选择')}
                                     </span>
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">🧭 {t('What these settings mean', '这些设置具体是什么意思')}</div>
+                                <div className="s-section-title">{t('What these settings mean', '这些设置具体是什么意思')}</div>
                                 <div className="s-hint" style={{ lineHeight: 1.7 }}>
                                     • {t('Smoke Test: visual browser check in tester stage. Off = faster, On = stricter page validation.',
                                            'Smoke Test：Tester 阶段做真实浏览器可视化检查。关闭更快，开启更严格。')}<br/>
@@ -439,7 +526,7 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">🖥️ {t('Browser Engine Permissions', '浏览器引擎权限')}</div>
+                                <div className="s-section-title">{t('Browser Engine Permissions', '浏览器引擎权限')}</div>
                                 <div className="s-hint" style={{ lineHeight: 1.7 }}>
                                     <b>{t('Headless mode (default)', 'Headless 模式（默认）')}</b><br/>
                                     • {t('No macOS permissions required', '不需要任何 macOS 系统权限')}<br/>
@@ -450,13 +537,20 @@ export default function SettingsModal({
                                     • {t('Desktop-control of other apps (not this browser test) may require those permissions', '如果是控制其他桌面应用（非本浏览器测试），才可能需要这些权限')}
                                 </div>
                             </div>
+                            <div className="flex items-center gap-2 mt-2">
+                                <button className="btn btn-primary text-[10px]" onClick={saveToBackend} disabled={saving}>
+                                    {saving ? t('Saving...', '保存中...') : t('Save Quality Settings', '保存质量设置')}
+                                </button>
+                                {saveStatus === 'success' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Saved!', '已保存!')}</span>}
+                                {saveStatus === 'error' && <span className="text-[9px]" style={{ color: 'var(--red)' }}>✗ {t('Failed', '保存失败')}</span>}
+                            </div>
                         </>
                     )}
 
                     {tab === 'ui' && (
                         <>
                             <div className="s-section">
-                                <div className="s-section-title">🌐 {t('Language', '语言')}</div>
+                                <div className="s-section-title">{t('Language', '语言')}</div>
                                 <div className="s-row">
                                     <label>{t('Language', '语言')}</label>
                                     <select className="s-input" value={lang} onChange={e => onLangChange(e.target.value as 'en' | 'zh')} style={{ width: 'auto' }}>
@@ -466,7 +560,7 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">🎨 {t('Theme', '主题')}</div>
+                                <div className="s-section-title">{t('Theme', '主题')}</div>
                                 <div className="s-row">
                                     <label>{t('Theme', '主题')}</label>
                                     <select className="s-input" value={theme} onChange={e => onThemeChange(e.target.value as 'dark' | 'light')} style={{ width: 'auto' }}>

@@ -88,9 +88,13 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
 
 _COMMON_RULES = (
     "RULES: ONE index.html with inline <style>+<script>. "
-    "CSS vars, @media responsive, Inter font, SVG icons. "
-    "Target 100-300 lines. Start <!DOCTYPE html>, end </html>. "
-    "SPEED: output complete working code fast — don't overthink.\n"
+    "Use CSS vars, responsive @media rules, and deliberate typography choices that fit the product. "
+    "Prefer inline SVG, CSS illustration, or bespoke visual treatment over generic icon shortcuts. "
+    "Implement as much code as the task actually needs; do not force a tiny low-quality output. "
+    "Start <!DOCTYPE html>, end </html>. "
+    "NEVER use emoji characters as UI icons, bullet decorations, status markers, or illustrations inside generated pages. "
+    "Use inline SVG, CSS shapes, or typography instead. "
+    "Before finishing, self-check for blank sections, placeholder copy, broken interactions, and weak visual polish.\n"
 )
 
 _COMMON_DELIVERY = (
@@ -131,15 +135,19 @@ PROFILES: Dict[str, TaskProfile] = {
         ),
         quality="Must look like a premium landing page by a pro designer. Not a student project.",
         analyst_hint=(
-            "Visit 1-2 high-quality reference sites related to the goal. "
-            "Extract: color scheme, layout pattern, typography. Deliver a SHORT design brief. "
-            "Be FAST — spend at most 2 browser visits, then summarize."
+            "Visit 2-3 high-quality reference sites related to the goal. "
+            "If a site has captcha or bot-detection, skip it and try a different URL. "
+            "Extract: color scheme, layout pattern, typography, key features. Deliver a SHORT design brief. "
+            "Try at least 3 different sites to ensure sufficient reference material."
         ),
         tester_hint=(
             "Step1: file-check (index.html exists); "
             "Step2: MUST USE browser tool to navigate to http://127.0.0.1:8765/preview/ and take full-page screenshot; "
-            "Step3: MUST USE browser tool to scroll down 500px and take another screenshot; "
-            "Step4: give PASS/FAIL with concrete visual assessment."
+            "Step3: MUST USE browser snapshot to inspect visible links/buttons/forms before interacting; "
+            "Step4: MUST USE browser tool to scroll down 500px and take another screenshot; "
+            "Step5: click at least one real interactive element and MUST verify changed state with wait_for or a second snapshot; "
+            "Step6: a PASS verdict is invalid without post-action verification evidence; "
+            "Step7: FAIL if browser diagnostics show runtime errors; give PASS/FAIL with concrete visual assessment."
         ),
     ),
 
@@ -165,6 +173,8 @@ PROFILES: Dict[str, TaskProfile] = {
             "L. Game over screen with score + high score (localStorage) + restart button (clickable)\n"
             "M. Keyboard listeners MUST be on document.addEventListener('keydown', ...) not on canvas\n"
             "N. Auto-focus: when game starts, call canvas.focus() and add tabindex='0' to canvas\n"
+            "O. If custom art is required but no external asset generator is attached, create high-quality SVG or pixel placeholders\n"
+            "   with a clear asset manifest so imagegen / spritesheet nodes can replace them later without re-architecting the game\n"
         ),
         blueprint=(
             "STRUCTURE:\n"
@@ -179,14 +189,27 @@ PROFILES: Dict[str, TaskProfile] = {
             "Responsive controls. Visual feedback on every action. No jank."
         ),
         analyst_hint=(
-            "Visit 1-2 similar HTML5 browser games. Note game mechanics and visual style. "
-            "Be FAST — summarize in a short brief."
+            "Research implementation-grade game references. Prioritize GitHub repositories, "
+            "technical tutorials, devlogs, postmortems, collision/game-loop writeups, "
+            "level-design breakdowns, and official docs for browser game techniques. "
+            "You may inspect showcase pages for visual direction, but DO NOT spend time playing "
+            "online browser games or treating gameplay as the main research method. "
+            "If a site has captcha or bot-detection, skip it and try a different URL. "
+            "Summarize mechanics, rendering patterns, controls, asset strategy, and production risks."
         ),
         tester_hint=(
-            "Step1: file-check; "
+            "Step1: file-check /tmp/evermind_output/ for HTML game files; "
             "Step2: browser navigate to http://127.0.0.1:8765/preview/, take screenshot of start screen; "
-            "Step3: check if game loads without JS errors (browser console); "
-            "Step4: PASS/FAIL — does it look like a playable game with start button?"
+            "Step3: browser snapshot to find start/play controls and HUD; "
+            "Step4: check browser console for JS errors; "
+            "Step5: CLICK the start/play button to begin the game; "
+            "Step6: TEST CONTROLS — use press_sequence with Arrow keys/WASD/Space for at least 15 seconds; "
+            "Step7: MUST verify changed state hash or visible HUD/score/player movement after gameplay input; "
+            "Step8: VERIFY GAMEPLAY — does the player move? Do enemies/obstacles appear? Does scoring work? "
+            "Take a screenshot MID-GAMEPLAY showing active gameplay (not the start screen); "
+            "Step9: Try to trigger game over and check if game over screen appears; "
+            "Step10: PASS only if game is ACTUALLY PLAYABLE — player can move, interact, and game responds to input. "
+            "FAIL if: game doesn't start, controls don't work, no gameplay visible, state never changes, or JS errors prevent play."
         ),
     ),
 
@@ -220,14 +243,18 @@ PROFILES: Dict[str, TaskProfile] = {
             "Clean data hierarchy. Scannable at a glance. Pixel-perfect alignment."
         ),
         analyst_hint=(
-            "Visit 1-2 premium dashboard examples (real SaaS or Dribbble). "
-            "Note layout pattern, card styles, chart types. SHORT summary."
+            "Visit 2-3 premium dashboard examples (real SaaS products, Dribbble, or admin templates). "
+            "If a site has captcha or bot-detection, skip it and try a different URL. "
+            "Note layout pattern, card styles, chart types. SHORT summary with concrete examples."
         ),
         tester_hint=(
             "Step1: file-check; "
             "Step2: browser navigate, screenshot full layout; "
-            "Step3: check sidebar + cards + table render correctly; "
-            "Step4: PASS/FAIL with visual assessment."
+            "Step3: browser snapshot to inspect tabs/filters/buttons; "
+            "Step4: click at least one filter/tab/control and MUST verify visible state changes with wait_for or a second snapshot; "
+            "Step5: a PASS verdict is invalid without post-action verification evidence; "
+            "Step6: check sidebar + cards + table render correctly; "
+            "Step7: FAIL if browser diagnostics show runtime errors; PASS/FAIL with visual assessment."
         ),
     ),
 
@@ -260,8 +287,9 @@ PROFILES: Dict[str, TaskProfile] = {
             "Instant responsiveness. Zero confusion about what to do."
         ),
         analyst_hint=(
-            "Visit 1-2 similar tools online. Note UX pattern and input/output layout. "
-            "SHORT summary — prioritize speed."
+            "Visit 2-3 similar tools online (search for alternatives). "
+            "If a site has captcha or bot-detection, skip it and try a different URL. "
+            "Note UX pattern, input/output layout, key interactions. SHORT summary."
         ),
         tester_hint=(
             "Step1: file-check; "
@@ -337,8 +365,9 @@ PROFILES: Dict[str, TaskProfile] = {
             "smooth, interactive, and surprising. 60fps minimum."
         ),
         analyst_hint=(
-            "Visit 1-2 creative coding examples (CodePen). "
-            "Note animation technique and color strategy. SHORT summary."
+            "Visit 2-3 creative coding examples (CodePen, Shadertoy, or similar). "
+            "If a site has captcha or bot-detection, skip it and try a different URL. "
+            "Note animation technique, color strategy, and interaction patterns. SHORT summary."
         ),
         tester_hint=(
             "Step1: file-check; "
@@ -423,14 +452,87 @@ def builder_task_description(goal: str) -> str:
         f"Build a commercial-grade single-file {type_label} for: {goal}. "
         "Save final HTML via file_ops write to /tmp/evermind_output/index.html. "
         "Follow the design system and structure rules from your system prompt. "
-        "After saving, briefly describe what you built."
+        "Treat any upstream planner/analyst notes, loaded skills, reviewer blockers, and acceptance criteria as hard requirements, not optional inspiration. "
+        "Do not use emoji glyphs in the generated product; use SVG/CSS alternatives instead. "
+        "Make the result materially complete: real sections, real content, real interactions, and visible polish. "
+        "For game or asset-heavy tasks, preserve a clean asset manifest / placeholder structure so dedicated asset nodes can upgrade art without rewriting the core logic. "
+        "After saving, briefly describe exactly what you built and what quality checks you satisfied."
     )
 
 
 def analyst_description(goal: str) -> str:
     """Generate analyst task description based on task type."""
     profile = classify(goal)
-    return f"{profile.analyst_hint} Goal: {goal}"
+    game_research_rule = ""
+    if profile.task_type == "game":
+        game_research_rule = (
+            "GAME RESEARCH OVERRIDE:\n"
+            "- Do NOT browse playable web games as your primary workflow\n"
+            "- Do NOT get stuck interacting with game portals or gameplay embeds\n"
+            "- Prefer GitHub repos, source code, technical articles, tutorials, devlogs, postmortems, and engine/docs pages\n"
+            "- If you inspect a reference page, extract mechanics/UI/asset insights quickly and move on\n\n"
+        )
+    return (
+        f"{profile.analyst_hint}\n\n"
+        "MANDATORY: You MUST search and visit AT LEAST 2-3 different reference websites. "
+        "Do NOT stop after visiting just 1 site. If a site blocks you (captcha, 403, etc), "
+        "skip it immediately and try another URL. Include ALL visited URLs in your report.\n\n"
+        "REFERENCE MIX REQUIREMENT:\n"
+        "- For implementation-heavy tasks, include at least 1 GitHub/source-code reference when possible\n"
+        "- Include at least 1 tutorial / official doc / technical writeup when possible\n"
+        "- Include visual/product references only as supporting evidence, not the whole report\n\n"
+        "CRITICAL ROLE: You are not only researching. You are writing optimized downstream execution briefs "
+        "for the other agents. Your report will be injected directly into builder/reviewer/tester/debugger prompts.\n\n"
+        "Prompt-engineering standard you MUST follow:\n"
+        "- state the concrete objective before style notes\n"
+        "- separate hard constraints from optional inspiration\n"
+        "- convert vague taste words into executable instructions\n"
+        "- define what success looks like so reviewer/tester can enforce it\n\n"
+        "OPERATING MODEL:\n"
+        "- Treat this as a lightweight SOP package for the downstream nodes, not a loose inspiration memo\n"
+        "- Explicitly define deliverables, completion criteria, integration order, and likely risks\n\n"
+        "HARD CONSTRAINTS YOU MUST ENFORCE:\n"
+        "- Generated pages must NEVER use emoji glyphs as icons, bullets, or decorative illustrations\n"
+        "- Use inline SVG / CSS shapes / type treatment instead of emoji or cheap stock icon shortcuts\n"
+        "- Favor premium, commercially credible layouts over generic student-project structure\n"
+        "- Recommendations must be specific enough that two parallel builders can execute different scopes cleanly\n\n"
+        f"{game_research_rule}"
+        "Output MUST use the exact XML tags below so downstream nodes can parse them:\n"
+        "<reference_sites>\n"
+        "- each visited URL + what it is useful for\n"
+        "</reference_sites>\n"
+        "<design_direction>\n"
+        "- color system\n"
+        "- typography direction\n"
+        "- layout rhythm\n"
+        "- motion principles\n"
+        "</design_direction>\n"
+        "<non_negotiables>\n"
+        "- concrete quality bar and hard constraints\n"
+        "</non_negotiables>\n"
+        "<deliverables_contract>\n"
+        "- exactly what artifacts / sections / interactions must exist before this task counts as done\n"
+        "</deliverables_contract>\n"
+        "<risk_register>\n"
+        "- likely failure points, hidden risks, and what the downstream nodes should watch carefully\n"
+        "</risk_register>\n"
+        "<builder_1_handoff>\n"
+        "- scope, priorities, must-build sections, visual rules, implementation hints\n"
+        "</builder_1_handoff>\n"
+        "<builder_2_handoff>\n"
+        "- scope, priorities, must-build sections, visual rules, implementation hints\n"
+        "</builder_2_handoff>\n"
+        "<reviewer_handoff>\n"
+        "- what quality issues to be strict about\n"
+        "</reviewer_handoff>\n"
+        "<tester_handoff>\n"
+        "- what interactions and edge cases must be verified\n"
+        "</tester_handoff>\n"
+        "<debugger_handoff>\n"
+        "- likely failure points and how to repair them quickly\n"
+        "</debugger_handoff>\n\n"
+        f"Goal: {goal}"
+    )
 
 
 def tester_description() -> str:

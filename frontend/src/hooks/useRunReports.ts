@@ -15,8 +15,20 @@ function normalizeRunReport(raw: unknown): RunReportRecord | null {
     if (!value.goal || typeof value.goal !== 'string') return null;
     const difficulty = (value.difficulty === 'simple' || value.difficulty === 'pro') ? value.difficulty : 'standard';
     const subtasks = Array.isArray(value.subtasks) ? (value.subtasks as Array<Partial<RunSubtaskReport>>) : [];
+    const taskId = typeof value.taskId === 'string'
+        ? value.taskId
+        : typeof (value as { task_id?: unknown }).task_id === 'string'
+            ? String((value as { task_id?: unknown }).task_id)
+            : undefined;
+    const runId = typeof value.runId === 'string'
+        ? value.runId
+        : typeof (value as { run_id?: unknown }).run_id === 'string'
+            ? String((value as { run_id?: unknown }).run_id)
+            : undefined;
     return {
         id: value.id,
+        taskId,
+        runId,
         createdAt: typeof value.createdAt === 'number' ? value.createdAt : Date.now(),
         goal: value.goal.slice(0, 1200),
         difficulty,
@@ -27,24 +39,45 @@ function normalizeRunReport(raw: unknown): RunReportRecord | null {
         totalRetries: Math.max(0, Number(value.totalRetries || 0)),
         durationSeconds: Math.max(0, Number(value.durationSeconds || 0)),
         previewUrl: typeof value.previewUrl === 'string' ? value.previewUrl : undefined,
-        subtasks: subtasks.slice(0, 30).map((st, idx: number) => ({
-            id: String(st?.id ?? idx + 1),
-            agent: String(st?.agent || 'agent'),
-            status: String(st?.status || 'unknown'),
-            retries: Math.max(0, Number(st?.retries || 0)),
-            task: String(st?.task || '').slice(0, 1200),
-            outputPreview: String(st?.outputPreview || '').slice(0, 2000),
-            error: String(st?.error || '').slice(0, 800),
-            durationSeconds: Number.isFinite(Number(st?.durationSeconds)) ? Math.max(0, Number(st.durationSeconds)) : undefined,
-            startedAt: Number.isFinite(Number(st?.startedAt)) ? Number(st.startedAt) : undefined,
-            endedAt: Number.isFinite(Number(st?.endedAt)) ? Number(st.endedAt) : undefined,
-            timelineEvents: Array.isArray(st?.timelineEvents)
-                ? st.timelineEvents
+        subtasks: subtasks.slice(0, 30).map((st, idx: number) => {
+            const workSummarySource = Array.isArray(st?.workSummary)
+                ? st.workSummary
+                : Array.isArray((st as { work_summary?: unknown }).work_summary)
+                    ? ((st as { work_summary?: string[] }).work_summary ?? [])
+                    : [];
+            const filesCreatedSource = Array.isArray(st?.filesCreated)
+                ? st.filesCreated
+                : Array.isArray((st as { files_created?: unknown }).files_created)
+                    ? ((st as { files_created?: string[] }).files_created ?? [])
+                    : [];
+
+            return {
+                id: String(st?.id ?? idx + 1),
+                agent: String(st?.agent || 'agent'),
+                status: String(st?.status || 'unknown'),
+                retries: Math.max(0, Number(st?.retries || 0)),
+                task: String(st?.task || '').slice(0, 1200),
+                outputPreview: String(st?.outputPreview || '').slice(0, 2000),
+                error: String(st?.error || '').slice(0, 800),
+                durationSeconds: Number.isFinite(Number(st?.durationSeconds)) ? Math.max(0, Number(st.durationSeconds)) : undefined,
+                startedAt: Number.isFinite(Number(st?.startedAt)) ? Number(st.startedAt) : undefined,
+                endedAt: Number.isFinite(Number(st?.endedAt)) ? Number(st.endedAt) : undefined,
+                timelineEvents: Array.isArray(st?.timelineEvents)
+                    ? st.timelineEvents
+                        .filter((item: unknown) => typeof item === 'string' && item.trim())
+                        .map((item: string) => item.slice(0, 260))
+                        .slice(0, 30)
+                    : undefined,
+                workSummary: workSummarySource
                     .filter((item: unknown) => typeof item === 'string' && item.trim())
                     .map((item: string) => item.slice(0, 260))
-                    .slice(0, 30)
-                : undefined,
-        })),
+                    .slice(0, 30),
+                filesCreated: filesCreatedSource
+                    .filter((item: unknown) => typeof item === 'string' && item.trim())
+                    .map((item: string) => item.slice(0, 500))
+                    .slice(0, 50),
+            };
+        }),
     };
 }
 
