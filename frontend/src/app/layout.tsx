@@ -3,6 +3,11 @@ import Script from 'next/script';
 import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 
+const FRONTEND_BUILD_ID =
+  process.env.NEXT_PUBLIC_EVERMIND_BUILD_ID || '2026-03-25-runtime-sync-20';
+
+export const dynamic = 'force-dynamic';
+
 const inter = Inter({
   subsets: ['latin'],
   variable: '--font-sans',
@@ -25,6 +30,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
+        <meta name="evermind-frontend-build" content={FRONTEND_BUILD_ID} />
         <Script id="evermind-theme-init" strategy="beforeInteractive">
           {`
             try {

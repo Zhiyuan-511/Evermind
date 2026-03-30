@@ -8,11 +8,13 @@
 
 const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const { spawn, execSync } = require('child_process');
+const crypto = require('crypto');
 const path = require('path');
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const url = require('url');
+const { registerQaSessionHandlers } = require('./qa-session');
 
 // tree-kill for reliable child process cleanup
 let treeKill;
@@ -34,6 +36,8 @@ let pendingDeepLinkGoal = null;  // string | null
 // ── Paths ──
 const IS_DEV = !app.isPackaged;
 const HOME = os.homedir();
+const LOG_DIR = path.join(HOME, '.evermind', 'logs');
+const MAIN_LOG_PATH = path.join(LOG_DIR, 'evermind-desktop.log');
 const RESOURCES = IS_DEV
     ? path.join(__dirname, '..')   // dev: project root
     : process.resourcesPath;       // production: .app/Contents/Resources
@@ -48,6 +52,76 @@ const FRONTEND_STANDALONE = IS_DEV
 
 const SPLASH_HTML = path.join(__dirname, 'splash.html');
 
+function _safeBuildToken(filePath) {
+    try {
+        const stat = fs.statSync(filePath);
+        return `${path.basename(filePath)}:${Math.trunc(stat.mtimeMs)}`;
+    } catch {
+        return `${path.basename(filePath)}:0`;
+    }
+}
+
+function computeDesktopBuildId() {
+    const version = typeof app.getVersion === 'function' ? app.getVersion() : '0.0.0';
+    const signature = [
+        __filename,
+        path.join(BACKEND_DIR, 'server.py'),
+        path.join(BACKEND_DIR, 'orchestrator.py'),
+        path.join(BACKEND_DIR, 'ai_bridge.py'),
+        path.join(BACKEND_DIR, 'workflow_templates.py'),
+        path.join(FRONTEND_STANDALONE, 'server.js'),
+        path.join(FRONTEND_STANDALONE, '.next', 'BUILD_ID'),
+        path.join(RESOURCES, 'frontend', '.next', 'BUILD_ID'),
+    ].map(_safeBuildToken).join('|');
+    const digest = crypto.createHash('sha1').update(signature).digest('hex').slice(0, 12);
+    return `desktop-${version}-${digest}`;
+}
+
+function serializeLogArg(value) {
+    if (value instanceof Error) {
+        return value.stack || value.message;
+    }
+    if (typeof value === 'string') {
+        return value;
+    }
+    try {
+        return JSON.stringify(value);
+    } catch {
+        return String(value);
+    }
+}
+
+function writeDesktopLog(level, args) {
+    try {
+        fs.mkdirSync(LOG_DIR, { recursive: true });
+        const line = `[${new Date().toISOString()}] [${level.toUpperCase()}] ${args.map(serializeLogArg).join(' ')}\n`;
+        fs.appendFileSync(MAIN_LOG_PATH, line, 'utf8');
+    } catch {
+        // ignore log write failures
+    }
+}
+
+const originalConsole = {
+    log: console.log.bind(console),
+    warn: console.warn.bind(console),
+    error: console.error.bind(console),
+};
+
+console.log = (...args) => {
+    writeDesktopLog('log', args);
+    originalConsole.log(...args);
+};
+
+console.warn = (...args) => {
+    writeDesktopLog('warn', args);
+    originalConsole.warn(...args);
+};
+
+console.error = (...args) => {
+    writeDesktopLog('error', args);
+    originalConsole.error(...args);
+};
+
 // ── State ──
 let mainWindow = null;
 let splashWindow = null;
@@ -56,6 +130,29 @@ let frontendProcess = null;
 
 const BACKEND_PORT = 8765;
 const FRONTEND_PORT = 3000;
+const managedServices = {
+    backend: { label: 'backend', port: BACKEND_PORT, pid: null, source: '' },
+    frontend: { label: 'frontend', port: FRONTEND_PORT, pid: null, source: '' },
+};
+const DESKTOP_BUILD_ID = computeDesktopBuildId();
+const FRONTEND_BUILD_ID = DESKTOP_BUILD_ID;
+const DESKTOP_BUILD_MARKER_FILE = 'desktop-build-id.txt';
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+let cleanupPromise = null;
+let cleanupCompleted = false;
+let appShutdownRequested = false;
+let forcedExitTimer = null;
+
+if (!gotSingleInstanceLock) {
+    app.quit();
+}
+
+app.on('second-instance', () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.focus();
+    }
+});
 
 ipcMain.handle('evermind:reveal-in-finder', async (_event, targetPath) => {
     const resolvedPath = typeof targetPath === 'string' ? targetPath.trim() : '';
@@ -75,6 +172,29 @@ ipcMain.handle('evermind:reveal-in-finder', async (_event, targetPath) => {
         console.warn('[Electron] reveal-in-finder failed:', error);
         return false;
     }
+});
+
+ipcMain.handle('evermind:pick-folder', async (event, defaultPath = '') => {
+    try {
+        const ownerWindow = BrowserWindow.fromWebContents(event.sender) || undefined;
+        const normalizedDefault = typeof defaultPath === 'string' ? defaultPath.trim() : '';
+        const result = await dialog.showOpenDialog(ownerWindow, {
+            title: 'Select Workspace Folder',
+            defaultPath: normalizedDefault || app.getPath('home'),
+            properties: ['openDirectory', 'createDirectory'],
+        });
+        if (result.canceled || !Array.isArray(result.filePaths) || result.filePaths.length === 0) {
+            return '';
+        }
+        return String(result.filePaths[0] || '');
+    } catch (error) {
+        console.warn('[Electron] pick-folder failed:', error);
+        return '';
+    }
+});
+
+registerQaSessionHandlers({
+    getParentWindow: () => mainWindow,
 });
 
 // ═══════════════════════════════════════════
@@ -149,23 +269,126 @@ function fixMacOSPath() {
 // Kill any zombie process on a port
 // ───────────────────────────────────────────
 function killPortProcess(port) {
-    try {
-        // Use absolute path for lsof since PATH might not include /usr/sbin
-        const lsofCmd = fs.existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : 'lsof';
-        const pids = execSync(`${lsofCmd} -ti :${port}`, { encoding: 'utf8' }).trim();
-        if (pids) {
-            for (const pid of pids.split('\n')) {
-                try {
-                    process.kill(Number(pid), 'SIGKILL');
-                    console.log(`[Electron] Killed zombie process ${pid} on port ${port}`);
-                } catch { /* already dead */ }
-            }
-            // Give OS a moment to release the port
-            execSync('sleep 0.5');
+    const pids = listPortPids(port);
+    if (pids.length === 0) return;
+
+    for (const pid of pids) {
+        try {
+            process.kill(pid, 'SIGKILL');
+            console.log(`[Electron] Killed zombie process ${pid} on port ${port}`);
+        } catch {
+            // already dead
         }
-    } catch {
-        // No process on this port — good
     }
+
+    try {
+        // Give OS a moment to release the port
+        execSync('sleep 0.5');
+    } catch {
+        // ignore sleep failures
+    }
+}
+
+function listPortPids(port) {
+    try {
+        const lsofCmd = fs.existsSync('/usr/sbin/lsof') ? '/usr/sbin/lsof' : 'lsof';
+        const raw = execSync(`${lsofCmd} -ti :${port}`, { encoding: 'utf8' }).trim();
+        if (!raw) return [];
+        return Array.from(new Set(
+            raw.split('\n')
+                .map((pid) => Number(pid))
+                .filter((pid) => Number.isInteger(pid) && pid > 0)
+        ));
+    } catch {
+        return [];
+    }
+}
+
+function rememberManagedService(name, pid, source) {
+    const service = managedServices[name];
+    const normalizedPid = Number(pid || 0);
+    if (!service || !normalizedPid) return;
+    service.pid = normalizedPid;
+    service.source = source;
+    console.log(`[Electron] Tracking ${service.label} pid=${normalizedPid} (${source})`);
+}
+
+function releaseManagedService(name, pid = 0) {
+    const service = managedServices[name];
+    if (!service) return;
+    const normalizedPid = Number(pid || 0);
+    if (normalizedPid && service.pid && service.pid !== normalizedPid) return;
+    service.pid = null;
+    service.source = '';
+}
+
+function delay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isPidRunning(pid) {
+    const normalizedPid = Number(pid || 0);
+    if (!normalizedPid) return false;
+    try {
+        process.kill(normalizedPid, 0);
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function treeKillAsync(pid, signal) {
+    return new Promise((resolve) => {
+        treeKill(pid, signal, (err) => {
+            if (err && !String(err.message || err).includes('ESRCH')) {
+                console.warn(`[Electron] tree-kill ${signal} failed for pid ${pid}:`, err.message || err);
+            }
+            resolve();
+        });
+    });
+}
+
+async function terminatePid(pid, label) {
+    const normalizedPid = Number(pid || 0);
+    if (!normalizedPid) return;
+
+    if (!isPidRunning(normalizedPid)) {
+        return;
+    }
+
+    await treeKillAsync(normalizedPid, 'SIGTERM');
+    const gracefulDeadline = Date.now() + 4000;
+    while (Date.now() < gracefulDeadline) {
+        if (!isPidRunning(normalizedPid)) return;
+        await delay(200);
+    }
+
+    console.warn(`[Electron] ${label} pid ${normalizedPid} did not exit after SIGTERM, forcing SIGKILL`);
+    await treeKillAsync(normalizedPid, 'SIGKILL');
+    const forceDeadline = Date.now() + 2000;
+    while (Date.now() < forceDeadline) {
+        if (!isPidRunning(normalizedPid)) return;
+        await delay(100);
+    }
+}
+
+async function stopManagedService(name) {
+    const service = managedServices[name];
+    if (!service) return;
+
+    const targetPids = Array.from(new Set([
+        Number(service.pid || 0),
+        ...listPortPids(service.port),
+    ].filter((pid) => Number.isInteger(pid) && pid > 0)));
+
+    if (targetPids.length === 0) {
+        releaseManagedService(name);
+        return;
+    }
+
+    console.log(`[Electron] Stopping ${service.label} service (pids=${targetPids.join(', ')}, source=${service.source || 'unknown'})`);
+    await Promise.allSettled(targetPids.map((pid) => terminatePid(pid, service.label)));
+    releaseManagedService(name);
 }
 
 // ───────────────────────────────────────────
@@ -341,6 +564,155 @@ function waitForService(port, label, timeoutMs = 90000) {
     });
 }
 
+function requestText(targetUrl, timeoutMs = 3000) {
+    return new Promise((resolve, reject) => {
+        const req = http.get(targetUrl, (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => { body += chunk; });
+            res.on('end', () => {
+                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(body);
+                    return;
+                }
+                reject(new Error(`HTTP ${res.statusCode || 'unknown'}`));
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+    });
+}
+
+function requestJson(targetUrl, timeoutMs = 3000) {
+    return new Promise((resolve, reject) => {
+        const req = http.get(targetUrl, (res) => {
+            let body = '';
+            res.setEncoding('utf8');
+            res.on('data', (chunk) => { body += chunk; });
+            res.on('end', () => {
+                if (res.statusCode && res.statusCode >= 200 && res.statusCode < 300) {
+                    try {
+                        resolve(body ? JSON.parse(body) : {});
+                    } catch (error) {
+                        reject(error);
+                    }
+                    return;
+                }
+                reject(new Error(`HTTP ${res.statusCode || 'unknown'}`));
+            });
+        });
+        req.on('error', reject);
+        req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+    });
+}
+
+function requestOk(targetUrl, timeoutMs = 3000) {
+    return new Promise((resolve) => {
+        const req = http.get(targetUrl, (res) => {
+            res.resume();
+            resolve(Boolean(res.statusCode && res.statusCode < 500));
+        });
+        req.on('error', () => resolve(false));
+        req.setTimeout(timeoutMs, () => req.destroy(new Error('timeout')));
+    });
+}
+
+function resolveFrontendStandaloneDir() {
+    const candidates = Array.from(new Set([
+        FRONTEND_STANDALONE,
+        !IS_DEV ? path.join(RESOURCES, 'app.asar.unpacked', 'frontend-standalone') : '',
+        !IS_DEV ? path.join(path.dirname(process.execPath), '..', 'Resources', 'frontend-standalone') : '',
+    ].filter(Boolean).map((candidate) => path.resolve(candidate))));
+
+    for (const candidate of candidates) {
+        const standaloneServer = path.join(candidate, 'server.js');
+        if (fs.existsSync(standaloneServer)) {
+            return { dir: candidate, standaloneServer, candidates };
+        }
+    }
+
+    return { dir: '', standaloneServer: '', candidates };
+}
+
+async function probeBackendDiagnostics() {
+    try {
+        const data = await requestJson(`http://127.0.0.1:${BACKEND_PORT}/api/diagnostics`, 2500);
+        return data && data.status === 'ok' ? data : null;
+    } catch {
+        return null;
+    }
+}
+
+async function probeFrontendReady() {
+    return requestOk(`http://127.0.0.1:${FRONTEND_PORT}`, 2500);
+}
+
+function extractFrontendBuildId(html) {
+    if (!html) return '';
+    const direct = html.match(/<meta\s+name=["']evermind-frontend-build["']\s+content=["']([^"']+)["']/i);
+    if (direct?.[1]) return direct[1].trim();
+    const reversed = html.match(/<meta\s+content=["']([^"']+)["']\s+name=["']evermind-frontend-build["']/i);
+    return reversed?.[1]?.trim() || '';
+}
+
+async function probeFrontendIdentity() {
+    try {
+        const html = await requestText(`http://127.0.0.1:${FRONTEND_PORT}/editor?env=packaged&healthcheck=1`, 3000);
+        const detectedBuildId = extractFrontendBuildId(html);
+        return {
+            ok: Boolean(detectedBuildId) && detectedBuildId === FRONTEND_BUILD_ID,
+            detectedBuildId,
+        };
+    } catch {
+        return {
+            ok: false,
+            detectedBuildId: '',
+        };
+    }
+}
+
+function clearDesktopCachesIfBuildChanged() {
+    const userDataDir = app.getPath('userData');
+    const markerPath = path.join(userDataDir, DESKTOP_BUILD_MARKER_FILE);
+    let previousBuildId = '';
+
+    try {
+        if (fs.existsSync(markerPath)) {
+            previousBuildId = fs.readFileSync(markerPath, 'utf8').trim();
+        }
+    } catch (error) {
+        console.warn('[Electron] Failed to read desktop build marker:', error.message);
+    }
+
+    if (previousBuildId === DESKTOP_BUILD_ID) return;
+
+    console.log(`[Electron] Desktop build changed (${previousBuildId || 'none'} → ${DESKTOP_BUILD_ID}), clearing renderer caches`);
+    const cacheTargets = [
+        'Cache',
+        'Code Cache',
+        'GPUCache',
+        'DawnGraphiteCache',
+        'DawnWebGPUCache',
+        'Shared Dictionary',
+        'Session Storage',
+    ];
+
+    for (const relativePath of cacheTargets) {
+        const targetPath = path.join(userDataDir, relativePath);
+        try {
+            fs.rmSync(targetPath, { recursive: true, force: true });
+        } catch (error) {
+            console.warn(`[Electron] Failed to clear cache path ${targetPath}:`, error.message);
+        }
+    }
+
+    try {
+        fs.writeFileSync(markerPath, DESKTOP_BUILD_ID, 'utf8');
+    } catch (error) {
+        console.warn('[Electron] Failed to write desktop build marker:', error.message);
+    }
+}
+
 // ───────────────────────────────────────────
 // Install Python dependencies if needed
 // ───────────────────────────────────────────
@@ -388,25 +760,41 @@ function startBackend(pythonCmd) {
     console.log(`[Electron] Starting backend in: ${BACKEND_DIR}`);
     console.log(`[Electron] Backend command: ${pythonCmd} server.py`);
 
+    const outputDir = path.join(app.getPath('temp'), 'evermind_output');
     const env = {
         ...process.env,
+        PYTHONDONTWRITEBYTECODE: '1',
         HOST: '127.0.0.1',
         PORT: String(BACKEND_PORT),
         WORKSPACE: path.join(HOME, 'Desktop'),
-        OUTPUT_DIR: path.join(app.getPath('temp'), 'evermind_output'),
+        EVERMIND_DESKTOP_BUILD_ID: DESKTOP_BUILD_ID,
+        EVERMIND_OUTPUT_DIR: outputDir,
+        OUTPUT_DIR: outputDir,
         ALLOWED_DIRS: [
             path.join(HOME, 'Desktop'),
             path.join(HOME, 'Documents'),
-            path.join(app.getPath('temp'), 'evermind_output'),
+            outputDir,
             '/tmp',
         ].join(','),
         SHELL_TIMEOUT: '30',
+        EVERMIND_ORCH_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '210',
+        EVERMIND_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '90',
+        EVERMIND_BUILDER_MULTI_PAGE_FIRST_WRITE_SEC: '105',
+        EVERMIND_BUILDER_RETRY_FIRST_WRITE_SEC: '75',
+        EVERMIND_BUILDER_STREAM_STALL_SEC: '120',
+        EVERMIND_BUILDER_MULTI_PAGE_STREAM_STALL_SEC: '90',
+        EVERMIND_BUILDER_RETRY_STREAM_STALL_SEC: '60',
+        EVERMIND_BUILDER_FORCE_TEXT_STREAK: '2',
+        EVERMIND_BUILDER_MULTI_PAGE_FORCE_TEXT_STREAK: '2',
+        EVERMIND_BUILDER_RETRY_FORCE_TEXT_STREAK: '2',
+        EVERMIND_BUILDER_MAX_TOOL_ITERS: '8',
+        EVERMIND_BUILDER_POST_WRITE_IDLE_TIMEOUT_SEC: '60',
+        EVERMIND_PROGRESS_HEARTBEAT_SEC: '10',
         // Ensure Python can find user-installed packages
         PYTHONPATH: BACKEND_DIR,
     };
 
     // Ensure output dir exists
-    const outputDir = env.OUTPUT_DIR;
     if (!fs.existsSync(outputDir)) {
         fs.mkdirSync(outputDir, { recursive: true });
     }
@@ -417,6 +805,8 @@ function startBackend(pythonCmd) {
         stdio: ['ignore', 'pipe', 'pipe'],
         detached: false,
     });
+    const backendPid = backendProcess.pid;
+    rememberManagedService('backend', backendPid, 'spawned');
 
     backendProcess.stdout.on('data', (d) => console.log(`[Backend] ${d.toString().trim()}`));
     backendProcess.stderr.on('data', (d) => console.error(`[Backend] ${d.toString().trim()}`));
@@ -425,6 +815,7 @@ function startBackend(pythonCmd) {
     });
     backendProcess.on('exit', (code, signal) => {
         console.log(`[Backend] Exited with code ${code}, signal ${signal}`);
+        releaseManagedService('backend', backendPid);
         backendProcess = null;
     });
 }
@@ -433,17 +824,18 @@ function startBackend(pythonCmd) {
 // Start Next.js Frontend
 // ───────────────────────────────────────────
 function startFrontend() {
-    const standaloneServer = path.join(FRONTEND_STANDALONE, 'server.js');
-    const hasStandalone = fs.existsSync(standaloneServer);
+    const resolvedStandalone = resolveFrontendStandaloneDir();
+    const hasStandalone = Boolean(resolvedStandalone.standaloneServer);
 
     let cmd, args, cwd;
 
     if (hasStandalone) {
         console.log('[Electron] Starting frontend (standalone build)');
-        console.log(`[Electron] Standalone server: ${standaloneServer}`);
+        console.log(`[Electron] Standalone server: ${resolvedStandalone.standaloneServer}`);
+        console.log(`[Electron] Standalone search candidates: ${resolvedStandalone.candidates.join(' | ')}`);
         cmd = findNode();
-        args = [standaloneServer];
-        cwd = FRONTEND_STANDALONE;
+        args = [resolvedStandalone.standaloneServer];
+        cwd = resolvedStandalone.dir;
     } else if (IS_DEV) {
         console.log('[Electron] Starting frontend (dev mode)');
         cmd = 'npx';
@@ -455,7 +847,9 @@ function startFrontend() {
             'Evermind 桌面版需要 Next.js standalone 构建。\n\n'
             + '请在项目目录中运行：\n'
             + '  cd frontend && npm run build\n\n'
-            + '然后重新打包 Electron 应用。'
+            + '然后重新打包 Electron 应用。\n\n'
+            + '已检查以下路径：\n'
+            + resolvedStandalone.candidates.map((candidate) => `  - ${path.join(candidate, 'server.js')}`).join('\n')
         );
         app.quit();
         return;
@@ -468,6 +862,7 @@ function startFrontend() {
         NODE_ENV: hasStandalone ? 'production' : 'development',
         NEXT_PUBLIC_API_URL: `http://127.0.0.1:${BACKEND_PORT}`,
         NEXT_PUBLIC_WS_URL: `ws://127.0.0.1:${BACKEND_PORT}/ws`,
+        NEXT_PUBLIC_EVERMIND_BUILD_ID: FRONTEND_BUILD_ID,
     };
 
     frontendProcess = spawn(cmd, args, {
@@ -476,6 +871,8 @@ function startFrontend() {
         stdio: ['ignore', 'pipe', 'pipe'],
         shell: !hasStandalone, // only use shell for npx (dev mode)
     });
+    const frontendPid = frontendProcess.pid;
+    rememberManagedService('frontend', frontendPid, 'spawned');
 
     frontendProcess.stdout.on('data', (d) => console.log(`[Frontend] ${d.toString().trim()}`));
     frontendProcess.stderr.on('data', (d) => {
@@ -489,6 +886,7 @@ function startFrontend() {
     });
     frontendProcess.on('exit', (code, signal) => {
         console.log(`[Frontend] Exited with code ${code}, signal ${signal}`);
+        releaseManagedService('frontend', frontendPid);
         frontendProcess = null;
     });
 }
@@ -564,6 +962,24 @@ function createMainWindow() {
         mainWindow.focus();
     });
 
+    mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+        const location = sourceId ? `${sourceId}:${line}` : `line:${line}`;
+        const logMethod = level >= 2 ? 'error' : 'log';
+        console[logMethod](`[Renderer] ${message} (${location})`);
+    });
+
+    mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+        console.error(`[Electron] did-fail-load code=${errorCode} mainFrame=${isMainFrame} url=${validatedURL} desc=${errorDescription}`);
+    });
+
+    mainWindow.webContents.on('render-process-gone', (_event, details) => {
+        console.error('[Electron] Renderer process gone:', details);
+    });
+
+    mainWindow.on('unresponsive', () => {
+        console.error('[Electron] Main window became unresponsive');
+    });
+
     // ── Deep Link: inject queued goal after page fully loads ──
     mainWindow.webContents.on('did-finish-load', () => {
         console.log('[Electron] Main window did-finish-load');
@@ -590,6 +1006,7 @@ function createMainWindow() {
 app.whenReady().then(async () => {
     // 0. Fix PATH for macOS — MUST be first
     fixMacOSPath();
+    clearDesktopCachesIfBuildChanged();
 
     // 0.5. Register evermind:// protocol so OpenClaw can launch the app directly
     if (!app.isDefaultProtocolClient('evermind')) {
@@ -600,10 +1017,8 @@ app.whenReady().then(async () => {
     // 1. Show splash
     showSplash();
 
-    // 1.5. Kill any zombie processes on our ports
-    updateSplashStatus('正在清理端口...', 10);
-    killPortProcess(BACKEND_PORT);
-    killPortProcess(FRONTEND_PORT);
+    // 1.5. Prefer reusing healthy services instead of killing active runs.
+    updateSplashStatus('正在检查现有服务...', 10);
 
     // 2. Find Python
     updateSplashStatus('正在检查 Python...', 24);
@@ -627,13 +1042,60 @@ app.whenReady().then(async () => {
 
     // 4. Start services
     try {
-        updateSplashStatus('正在启动后端服务...', 56);
-        startBackend(pythonCmd);
-        await waitForService(BACKEND_PORT, 'Backend', 90000);
+        const expectedOutputDir = path.join(app.getPath('temp'), 'evermind_output');
+        const backendDiagnostics = await probeBackendDiagnostics();
+        const reuseExistingBackend =
+            backendDiagnostics
+            && backendDiagnostics.output_dir === expectedOutputDir
+            && backendDiagnostics.runtime?.desktop_build_id === DESKTOP_BUILD_ID;
+        if (reuseExistingBackend) {
+            const runtimeId = backendDiagnostics.runtime?.runtime_id || 'unknown';
+            const outputDir = backendDiagnostics.output_dir || '(unknown)';
+            updateSplashStatus('检测到现有后端，正在复用...', 56);
+            console.log(`[Electron] Reusing healthy backend ${runtimeId} on port ${BACKEND_PORT}`);
+            console.log(`[Electron] Existing backend output dir: ${outputDir}`);
+            rememberManagedService('backend', backendDiagnostics.runtime?.pid, 'reused');
+        } else {
+            if (backendDiagnostics) {
+                console.log('[Electron] Existing backend mismatch detected; restarting with current desktop build');
+                console.log(`[Electron] Existing backend build=${backendDiagnostics.runtime?.desktop_build_id || '(missing)'}`);
+                console.log(`[Electron] Existing backend output=${backendDiagnostics.output_dir || '(missing)'}`);
+                console.log(`[Electron] Expected build=${DESKTOP_BUILD_ID}`);
+                console.log(`[Electron] Expected output=${expectedOutputDir}`);
+            }
+            updateSplashStatus('正在启动后端服务...', 56);
+            killPortProcess(BACKEND_PORT);
+            startBackend(pythonCmd);
+            await waitForService(BACKEND_PORT, 'Backend', 90000);
+        }
 
-        updateSplashStatus('正在启动前端服务...', 76);
-        startFrontend();
-        await waitForService(FRONTEND_PORT, 'Frontend', 90000);
+        const frontendIdentity = await probeFrontendIdentity();
+        if (frontendIdentity.ok) {
+            updateSplashStatus('检测到当前前端，正在复用...', 76);
+            console.log(`[Electron] Reusing healthy frontend build ${frontendIdentity.detectedBuildId} on port ${FRONTEND_PORT}`);
+            const frontendPid = listPortPids(FRONTEND_PORT)[0] || 0;
+            if (frontendPid) {
+                rememberManagedService('frontend', frontendPid, 'reused');
+            } else {
+                console.warn('[Electron] Frontend reuse succeeded but no PID was found on port 3000');
+            }
+        } else {
+            if (frontendIdentity.detectedBuildId) {
+                console.log('[Electron] Existing frontend mismatch detected; restarting with packaged frontend');
+                console.log(`[Electron] Existing frontend build=${frontendIdentity.detectedBuildId || '(missing)'}`);
+                console.log(`[Electron] Expected frontend build=${FRONTEND_BUILD_ID}`);
+            }
+            updateSplashStatus('正在启动前端服务...', 76);
+            killPortProcess(FRONTEND_PORT);
+            startFrontend();
+            await waitForService(FRONTEND_PORT, 'Frontend', 90000);
+            const startedFrontendIdentity = await probeFrontendIdentity();
+            if (!startedFrontendIdentity.ok) {
+                throw new Error(
+                    `前端已启动，但 build 校验失败（expected ${FRONTEND_BUILD_ID}, got ${startedFrontendIdentity.detectedBuildId || 'unknown'}）`
+                );
+            }
+        }
 
         // 5. Show main window
         updateSplashStatus('正在加载编辑器...', 92);
@@ -649,8 +1111,8 @@ app.whenReady().then(async () => {
             + '3. Node.js 是否已安装 (node --version)\n\n'
             + `当前 PATH:\n${process.env.PATH.split(':').slice(0, 10).join('\n')}`
         );
-        cleanup();
-        app.quit();
+        await cleanup('startup-error');
+        app.exit(1);
     }
 });
 
@@ -753,27 +1215,64 @@ app.on('open-url', (event, deepLinkUrl) => {
 });
 
 // ── Cleanup ──
-function cleanup() {
-    console.log('[Electron] Cleaning up...');
-    if (backendProcess && backendProcess.pid) {
-        treeKill(backendProcess.pid, 'SIGTERM', (err) => {
-            if (err) console.error('[Electron] Failed to kill backend:', err);
-        });
+async function cleanup(reason = 'shutdown') {
+    if (cleanupCompleted) return;
+    if (cleanupPromise) return cleanupPromise;
+
+    console.log(`[Electron] Cleaning up (${reason})...`);
+    cleanupPromise = (async () => {
+        await Promise.allSettled([
+            stopManagedService('backend'),
+            stopManagedService('frontend'),
+        ]);
         backendProcess = null;
-    }
-    if (frontendProcess && frontendProcess.pid) {
-        treeKill(frontendProcess.pid, 'SIGTERM', (err) => {
-            if (err) console.error('[Electron] Failed to kill frontend:', err);
-        });
         frontendProcess = null;
-    }
+        cleanupCompleted = true;
+    })().finally(() => {
+        cleanupPromise = null;
+    });
+
+    return cleanupPromise;
 }
 
-app.on('before-quit', cleanup);
+function requestAppShutdown(origin) {
+    if (appShutdownRequested) return;
+    appShutdownRequested = true;
+    console.log(`[Electron] Shutdown requested (${origin})`);
+
+    forcedExitTimer = setTimeout(() => {
+        console.error('[Electron] Cleanup timed out, forcing app exit');
+        app.exit(1);
+    }, 12000);
+
+    cleanup(origin)
+        .catch((error) => {
+            console.error('[Electron] Cleanup failed during shutdown:', error);
+        })
+        .finally(() => {
+            if (forcedExitTimer) {
+                clearTimeout(forcedExitTimer);
+                forcedExitTimer = null;
+            }
+            app.exit(0);
+        });
+}
+
+app.on('before-quit', (event) => {
+    if (cleanupCompleted) return;
+    event.preventDefault();
+    if (!appShutdownRequested) {
+        requestAppShutdown('before-quit');
+    }
+});
+
 app.on('window-all-closed', () => {
-    cleanup();
     app.quit();
 });
 
-process.on('SIGINT', () => { cleanup(); process.exit(0); });
-process.on('SIGTERM', () => { cleanup(); process.exit(0); });
+process.on('SIGINT', () => {
+    cleanup('SIGINT').finally(() => process.exit(0));
+});
+process.on('SIGTERM', () => {
+    cleanup('SIGTERM').finally(() => process.exit(0));
+});

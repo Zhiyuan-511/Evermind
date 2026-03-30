@@ -9,4 +9,8 @@ contextBridge.exposeInMainWorld('evermind', {
     isDesktop: true,
     version: '2.0.0',
     revealInFinder: (targetPath) => ipcRenderer.invoke('evermind:reveal-in-finder', targetPath),
+    pickFolder: (defaultPath) => ipcRenderer.invoke('evermind:pick-folder', defaultPath),
+    qa: {
+        runSession: (config) => ipcRenderer.invoke('evermind:qa-run-session', config),
+    },
 });

@@ -19,8 +19,8 @@ const FEATURE_GUIDE = [
     {
         title: { en: 'Difficulty Mode', zh: '难度模式' },
         detail: {
-            en: 'Simple uses 2-3 nodes for speed, Standard uses 3-4 nodes for balance, Pro uses 5-7 nodes for higher quality and stricter review.',
-            zh: 'Simple 使用 2-3 个节点追求速度；Standard 使用 3-4 个节点做平衡；Pro 使用 5-7 个节点追求更高质量与更严格审查。',
+            en: 'Simple uses 2-3 nodes for speed, Standard uses 3-4 nodes for balance, and Deep uses 7-10 nodes. In Deep mode the app expands the chain automatically when the brief is more complex.',
+            zh: 'Simple 使用 2-3 个节点追求速度；Standard 使用 3-4 个节点做平衡；深度模式使用 7-10 个节点，并会根据需求复杂度自动扩展链路。',
         },
     },
     {

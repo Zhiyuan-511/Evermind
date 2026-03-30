@@ -253,6 +253,25 @@ class TestTaskStorePersistence(unittest.TestCase):
         self.assertEqual(len(store.list_tasks()), 0)
 
 
+class TestAtomicJsonWrite(unittest.TestCase):
+    def test_write_json_file_cleans_up_tempfile_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            store_dir = Path(td)
+            target = store_dir / "tasks.json"
+            target.write_text('[{"id":"stable"}]', encoding="utf-8")
+
+            with patch.object(task_store, "STORE_DIR", store_dir):
+                with patch("task_store.os.replace", side_effect=OSError("replace failed")):
+                    ok = task_store._write_json_file(target, [{"id": "t1"}])
+
+            self.assertFalse(ok)
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8")),
+                [{"id": "stable"}],
+            )
+            self.assertEqual(list(store_dir.glob(".tasks_*.tmp")), [])
+
+
 class TestTaskStoreLinking(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()

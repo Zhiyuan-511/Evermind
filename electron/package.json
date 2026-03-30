@@ -8,9 +8,13 @@
     "scripts": {
         "start": "electron .",
         "build:frontend": "cd ../frontend && npm run build",
-        "pack": "electron-builder --dir",
-        "dist": "electron-builder",
-        "build": "npm run build:frontend && npm run dist"
+        "prepare:frontend-bundle": "node scripts/prepare_frontend_bundle.js",
+        "sign:app": "node scripts/ad_hoc_sign_app.js",
+        "sync:desktop": "node scripts/sync_desktop_app.js",
+        "pack": "npm run build:frontend && npm run prepare:frontend-bundle && electron-builder --dir && npm run sign:app",
+        "pack:desktop": "npm run pack && npm run sync:desktop",
+        "dist": "npm run build:frontend && npm run prepare:frontend-bundle && electron-builder && npm run sign:app",
+        "build": "npm run dist"
     },
     "dependencies": {
         "electron-is-dev": "^2.0.0",
@@ -45,6 +49,7 @@
         ],
         "files": [
             "main.js",
+            "qa-session.js",
             "preload.js",
             "splash.html",
             "package.json",
@@ -67,16 +72,8 @@
                 "to": "OPENCLAW_GUIDE.md"
             },
             {
-                "from": "../frontend/.next/standalone",
+                "from": ".packaged/frontend-standalone",
                 "to": "frontend-standalone"
-            },
-            {
-                "from": "../frontend/.next/static",
-                "to": "frontend-standalone/.next/static"
-            },
-            {
-                "from": "../frontend/public",
-                "to": "frontend-standalone/public"
             },
             {
                 "from": "../evermind_godmode_final.html",

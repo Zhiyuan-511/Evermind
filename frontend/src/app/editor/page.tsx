@@ -433,6 +433,11 @@ function EditorPageInner() {
     const [reportsOpen, setReportsOpen] = useState(false);
     const [nodeDetailOpen, setNodeDetailOpen] = useState(false);
     const [selectedNodeData, setSelectedNodeData] = useState<Record<string, unknown> | null>(null);
+    const [openedFile, setOpenedFile] = useState<{ path: string; root: string; content: string; ext: string } | null>(null);
+
+    const handleOpenFile = useCallback((filePath: string, root: string, content: string, ext: string) => {
+        setOpenedFile({ path: filePath, root, content, ext });
+    }, []);
 
     const buildNodeDetailSnapshot = useCallback((rawData: Record<string, unknown>) => {
         const nodeExecutionId = String(rawData.nodeExecutionId || '').trim();
@@ -540,7 +545,7 @@ function EditorPageInner() {
                 onOpenArtifacts={() => setArtifactsOpen(true)}
                 onOpenReports={() => setReportsOpen(true)}
                 onOpenSkillsLibrary={() => setSkillsLibraryOpen(true)}
-
+                onOpenFile={handleOpenFile}
             />
 
             <div className="flex-1 flex flex-col min-w-0">
@@ -743,6 +748,77 @@ function EditorPageInner() {
                 lastEventAt={runtime.connectorLastEventAt}
                 onReconnect={runtime.reconnect}
             />
+
+            {/* ── File Viewer Overlay ── */}
+            {openedFile && (
+                <div style={{
+                    position: 'fixed', inset: 0, zIndex: 9999,
+                    background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(6px)',
+                    display: 'flex', flexDirection: 'column',
+                }}>
+                    {/* Header */}
+                    <div style={{
+                        display: 'flex', alignItems: 'center', gap: 10,
+                        padding: '10px 16px',
+                        background: 'rgba(15,17,23,0.95)',
+                        borderBottom: '1px solid rgba(255,255,255,0.08)',
+                        flexShrink: 0,
+                    }}>
+                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text1)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {openedFile.path}
+                        </span>
+                        <span style={{ fontSize: 10, color: 'var(--text4)', textTransform: 'uppercase', fontWeight: 700 }}>
+                            {openedFile.ext.replace('.', '')}
+                        </span>
+                        <button
+                            onClick={() => setOpenedFile(null)}
+                            style={{
+                                background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
+                                borderRadius: 6, padding: '4px 12px', cursor: 'pointer',
+                                color: 'var(--text2)', fontSize: 11, fontWeight: 600,
+                            }}
+                        >
+                            {lang === 'zh' ? '关闭' : 'Close'} ✕
+                        </button>
+                    </div>
+                    {/* Content */}
+                    <div style={{ flex: 1, overflow: 'auto', background: 'rgba(15,17,23,0.98)' }}>
+                        {['.html', '.htm'].includes(openedFile.ext) ? (
+                            <iframe
+                                srcDoc={openedFile.content}
+                                style={{ width: '100%', height: '100%', border: 'none', background: '#fff' }}
+                                sandbox="allow-scripts allow-same-origin"
+                                title={openedFile.path}
+                            />
+                        ) : ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(openedFile.ext) ? (
+                            openedFile.ext === '.svg' ? (
+                                <div style={{ padding: 32, display: 'flex', justifyContent: 'center' }}>
+                                    <div dangerouslySetInnerHTML={{ __html: openedFile.content }} style={{ maxWidth: '80%' }} />
+                                </div>
+                            ) : (
+                                <div style={{ padding: 32, display: 'flex', justifyContent: 'center' }}>
+                                    <img
+                                        src={`data:image/${openedFile.ext.replace('.', '')};base64,${openedFile.content}`}
+                                        alt={openedFile.path}
+                                        style={{ maxWidth: '90%', maxHeight: '80vh', objectFit: 'contain', borderRadius: 8 }}
+                                    />
+                                </div>
+                            )
+                        ) : (
+                            <pre style={{
+                                margin: 0, padding: '16px 20px',
+                                fontSize: 12, lineHeight: 1.7,
+                                fontFamily: 'var(--font-mono), "SF Mono", "Fira Code", monospace',
+                                color: 'var(--text1)',
+                                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                                minHeight: '100%',
+                            }}>
+                                {openedFile.content}
+                            </pre>
+                        )}
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

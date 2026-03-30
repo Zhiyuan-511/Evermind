@@ -321,19 +321,27 @@ class TestNodeExecutionStoreTransitions(_TempDirMixin, unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertGreater(result["node_execution"]["ended_at"], 0)
 
-    def test_passed_is_terminal(self):
+    def test_passed_can_be_reopened_for_retry(self):
         ne = self.store.create_node_execution({"run_id": "r1", "node_key": "builder"})
         self.store.transition_node(ne["id"], "running")
         self.store.transition_node(ne["id"], "passed")
         result = self.store.transition_node(ne["id"], "running")
-        self.assertFalse(result["success"])
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "running")
+        self.assertEqual(result["node_execution"]["progress"], 5)
+        self.assertEqual(result["node_execution"]["ended_at"], 0.0)
 
-    def test_failed_is_terminal(self):
+    def test_failed_can_be_reopened_for_retry(self):
         ne = self.store.create_node_execution({"run_id": "r1", "node_key": "builder"})
         self.store.transition_node(ne["id"], "running")
         self.store.transition_node(ne["id"], "failed")
         result = self.store.transition_node(ne["id"], "running")
-        self.assertFalse(result["success"])
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "running")
+        self.assertEqual(result["node_execution"]["progress"], 5)
+        self.assertEqual(result["node_execution"]["ended_at"], 0.0)
+        self.assertEqual(result["node_execution"]["retry_count"], 1)
+        self.assertEqual(result["node_execution"]["error_message"], "")
 
     def test_waiting_approval_to_passed(self):
         ne = self.store.create_node_execution({"run_id": "r1", "node_key": "reviewer"})
@@ -348,6 +356,35 @@ class TestNodeExecutionStoreTransitions(_TempDirMixin, unittest.TestCase):
         self.store.transition_node(ne["id"], "blocked")
         result = self.store.transition_node(ne["id"], "running")
         self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["ended_at"], 0.0)
+
+    def test_queued_to_blocked_sets_terminal_fields(self):
+        ne = self.store.create_node_execution({"run_id": "r1", "node_key": "tester"})
+        result = self.store.transition_node(ne["id"], "blocked")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "blocked")
+        self.assertEqual(result["node_execution"]["progress"], 0)  # blocked = never executed
+        self.assertGreater(result["node_execution"]["ended_at"], 0)
+
+    def test_passed_can_be_requeued_for_reviewer_requeue(self):
+        ne = self.store.create_node_execution({"run_id": "r1", "node_key": "builder"})
+        self.store.transition_node(ne["id"], "running")
+        self.store.transition_node(ne["id"], "passed")
+        result = self.store.transition_node(ne["id"], "queued")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "queued")
+        self.assertEqual(result["node_execution"]["progress"], 0)
+        self.assertEqual(result["node_execution"]["started_at"], 0.0)
+        self.assertEqual(result["node_execution"]["ended_at"], 0.0)
+
+    def test_failed_can_soft_skip_to_skipped(self):
+        ne = self.store.create_node_execution({"run_id": "r1", "node_key": "polisher"})
+        self.store.transition_node(ne["id"], "running")
+        self.store.transition_node(ne["id"], "failed")
+        result = self.store.transition_node(ne["id"], "skipped")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "skipped")
+        self.assertGreater(result["node_execution"]["ended_at"], 0)
 
     def test_queued_to_skipped(self):
         ne = self.store.create_node_execution({"run_id": "r1", "node_key": "deployer"})

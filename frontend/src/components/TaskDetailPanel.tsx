@@ -172,7 +172,7 @@ const REVIEW_DECISION_CONFIG: Record<string, { label_en: string; label_zh: strin
 const FALLBACK_TEMPLATES: WorkflowTemplateSummary[] = [
     { id: 'simple', label: 'Simple (3 nodes)', description: '', nodeCount: 3 },
     { id: 'standard', label: 'Standard (4 nodes)', description: '', nodeCount: 4 },
-    { id: 'pro', label: 'Pro (7 nodes)', description: '', nodeCount: 7 },
+    { id: 'pro', label: 'Pro (7-10 nodes)', description: '', nodeCount: 7 },
 ];
 
 export default function TaskDetailPanel({ task, lang, onClose, onBoardClose, onTransition, onUpdate, onRunActivity, runReports }: TaskDetailPanelProps) {

@@ -209,6 +209,14 @@ function getCardStyle(msg: ChatMessage): React.CSSProperties {
     };
 }
 
+function isNearBottom(element: HTMLDivElement, threshold = 48): boolean {
+    return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
+function scrollToBottom(element: HTMLDivElement): void {
+    element.scrollTop = element.scrollHeight;
+}
+
 export default function ChatPanel({
     messages,
     onSendGoal,
@@ -238,6 +246,8 @@ export default function ChatPanel({
     const feedRef = useRef<HTMLDivElement>(null);
     const logsRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const feedShouldAutoScrollRef = useRef(true);
+    const logsShouldAutoScrollRef = useRef(true);
 
     const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
 
@@ -257,14 +267,28 @@ export default function ChatPanel({
         () => messages.filter(m => m.sender === 'console'),
         [messages]
     );
+    const latestFeedMessageId = feedMessages[feedMessages.length - 1]?.id || '';
+    const latestLogMessageId = logMessages[logMessages.length - 1]?.id || '';
+
+    const handleFeedScroll = useCallback(() => {
+        if (!feedRef.current) return;
+        feedShouldAutoScrollRef.current = isNearBottom(feedRef.current);
+    }, []);
+
+    const handleLogsScroll = useCallback(() => {
+        if (!logsRef.current) return;
+        logsShouldAutoScrollRef.current = isNearBottom(logsRef.current);
+    }, []);
 
     useEffect(() => {
-        if (feedRef.current) feedRef.current.scrollTop = feedRef.current.scrollHeight;
-    }, [feedMessages]);
+        if (!feedRef.current || !feedShouldAutoScrollRef.current) return;
+        scrollToBottom(feedRef.current);
+    }, [feedMessages.length, latestFeedMessageId]);
 
     useEffect(() => {
-        if (logsRef.current && logsExpanded) logsRef.current.scrollTop = logsRef.current.scrollHeight;
-    }, [logMessages, logsExpanded]);
+        if (!logsRef.current || !logsExpanded || !logsShouldAutoScrollRef.current) return;
+        scrollToBottom(logsRef.current);
+    }, [logMessages.length, latestLogMessageId, logsExpanded]);
 
     // P0-2: Send with visual flash confirmation
     const handleSend = useCallback(() => {
@@ -301,7 +325,7 @@ export default function ChatPanel({
             />
 
             {/* Layer 2: Execution Feed */}
-            <div ref={feedRef} className="flex-1 overflow-y-auto p-3 space-y-2" style={{ minHeight: 0 }}>
+            <div ref={feedRef} onScroll={handleFeedScroll} className="flex-1 overflow-y-auto p-3 space-y-2" style={{ minHeight: 0 }}>
                 {feedMessages.length === 0 ? (
                     <div className="text-center py-8 text-[var(--text3)] text-[11px]">
                         <div className="font-medium mb-1">{tr('发送一个目标', 'Send a goal')}</div>
@@ -418,6 +442,7 @@ export default function ChatPanel({
                 {logsExpanded && (
                     <div
                         ref={logsRef}
+                        onScroll={handleLogsScroll}
                         style={{
                             maxHeight: 180,
                             overflow: 'auto',
@@ -474,7 +499,7 @@ export default function ChatPanel({
                 }}>
                     {([['simple', tr('极速', 'Blitz'), '2-3'],
                        ['standard', tr('平衡', 'Balanced'), '3-4'],
-                       ['pro', tr('深度', 'Deep'), '5-7']] as const).map(([key, label, nodes]) => (
+                       ['pro', tr('深度', 'Deep'), '7-10']] as const).map(([key, label, nodes]) => (
                         <button
                             key={key}
                             onClick={() => onDifficultyChange(key as 'simple' | 'standard' | 'pro')}

@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import type { NodeExecutionRecord, ArtifactRecord, NodeExecutionStatus } from '@/lib/types';
-import { listArtifacts, getNodeExecution, retryNodeExecution } from '@/lib/api';
+import { listArtifacts, getNodeExecution, getPluginDefaults, getPlugins, retryNodeExecution } from '@/lib/api';
 import { buildReadableCurrentWork, formatSkillLabel, getStructuredOutputSections } from '@/lib/nodeOutputHumanizer';
 
 interface NodeInspectorPanelProps {
@@ -37,6 +37,12 @@ const ARTIFACT_TYPE_META: Record<string, { mark: string; label_en: string; label
     deployment_notes: { mark: 'DP', label_en: 'Deploy Notes',     label_zh: '部署说明' },
     raw_log:          { mark: 'LG', label_en: 'Raw Log',           label_zh: '原始日志' },
     preview_ref:      { mark: 'PV', label_en: 'Preview',          label_zh: '预览' },
+    browser_trace:    { mark: 'TR', label_en: 'Browser Trace',    label_zh: '浏览器 Trace' },
+    browser_capture:  { mark: 'CP', label_en: 'Browser Capture',  label_zh: '浏览器截图证据' },
+    state_snapshot:   { mark: 'ST', label_en: 'State Snapshot',   label_zh: '状态快照' },
+    qa_session_capture: { mark: 'QC', label_en: 'QA Capture',     label_zh: 'QA 截图证据' },
+    qa_session_video: { mark: 'QV', label_en: 'QA Video',         label_zh: 'QA 录屏' },
+    qa_session_log:   { mark: 'QL', label_en: 'QA Session Log',   label_zh: 'QA 会话日志' },
 };
 
 function formatTs(epochSec: number, lang: 'en' | 'zh'): string {
@@ -58,6 +64,42 @@ function durationStr(startSec: number, endSec: number): string {
     return `${m}m ${s}s`;
 }
 
+function isPrimitiveMetadataValue(value: unknown): value is string | number | boolean {
+    return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function formatMetadataValue(value: unknown): string {
+    if (value == null) return '--';
+    if (isPrimitiveMetadataValue(value)) return String(value);
+    try {
+        return JSON.stringify(value, null, 2);
+    } catch {
+        return String(value);
+    }
+}
+
+function normalizeNodeRole(value: unknown): string {
+    const raw = String(value || '').trim().toLowerCase();
+    if (!raw) return 'builder';
+    const withoutNumericSuffix = raw.replace(/(?:[_-]?\d+)+$/, '');
+    const normalized = withoutNumericSuffix || raw;
+    if (normalized.startsWith('builder')) return 'builder';
+    if (normalized.startsWith('polisher')) return 'polisher';
+    if (normalized.startsWith('reviewer')) return 'reviewer';
+    if (normalized.startsWith('tester')) return 'tester';
+    if (normalized.startsWith('deployer')) return 'deployer';
+    if (normalized.startsWith('debugger')) return 'debugger';
+    if (normalized.startsWith('analyst')) return 'analyst';
+    if (normalized.startsWith('scribe')) return 'scribe';
+    if (normalized.startsWith('uidesign')) return 'uidesign';
+    if (normalized.startsWith('imagegen')) return 'imagegen';
+    if (normalized.startsWith('spritesheet')) return 'spritesheet';
+    if (normalized.startsWith('assetimport')) return 'assetimport';
+    if (normalized.startsWith('planner')) return 'planner';
+    if (normalized.startsWith('router')) return 'router';
+    return normalized;
+}
+
 export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClose, onRetry }: NodeInspectorPanelProps) {
     const [ne, setNe] = useState<NodeExecutionRecord>(initNe);
     const [artifacts, setArtifacts] = useState<ArtifactRecord[]>([]);
@@ -65,6 +107,8 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
     const [expandedArt, setExpandedArt] = useState<string | null>(null);
     const [retrying, setRetrying] = useState(false);
     const [retryError, setRetryError] = useState('');
+    const [pluginMeta, setPluginMeta] = useState<Record<string, { display_name: string }>>({});
+    const [defaultPluginMap, setDefaultPluginMap] = useState<Record<string, string[]>>({});
     const currentNodeIdRef = useRef(initNe.id);
 
     const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
@@ -94,6 +138,8 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
     const loadedSkills = Array.isArray(ne.loaded_skills) ? ne.loaded_skills : [];
     const activityLog = Array.isArray(ne.activity_log) ? ne.activity_log : [];
     const referenceUrls = Array.isArray(ne.reference_urls) ? ne.reference_urls : [];
+    const normalizedNodeType = normalizeNodeRole(ne.node_key || 'builder');
+    const defaultTools = Array.isArray(defaultPluginMap[normalizedNodeType]) ? defaultPluginMap[normalizedNodeType] : [];
 
     useEffect(() => {
         currentNodeIdRef.current = initNe.id;
@@ -134,6 +180,28 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
         void refreshNode(initNe.id);
         void fetchArtifacts(initNe.id);
     }, [initNe.id, refreshNode, fetchArtifacts]);
+
+    useEffect(() => {
+        let cancelled = false;
+        void Promise.all([getPlugins(), getPluginDefaults()])
+            .then(([pluginsResp, defaultsResp]) => {
+                if (cancelled) return;
+                const pluginMap = (pluginsResp.plugins || []).reduce<Record<string, { display_name: string }>>((acc, plugin) => {
+                    acc[String(plugin.name)] = { display_name: String(plugin.display_name || plugin.name) };
+                    return acc;
+                }, {});
+                setPluginMeta(pluginMap);
+                setDefaultPluginMap(defaultsResp.defaults || {});
+            })
+            .catch(() => {
+                if (cancelled) return;
+                setPluginMeta({});
+                setDefaultPluginMap({});
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     // Poll while running
     useEffect(() => {
@@ -362,6 +430,29 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                     </div>
                 )}
 
+                {defaultTools.length > 0 && (
+                    <div className="s-section" style={{ marginBottom: 12 }}>
+                        <div className="s-section-title">{tr('默认工具', 'Default Tools')}</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                            {defaultTools.map((tool) => (
+                                <span
+                                    key={tool}
+                                    style={{
+                                        padding: '4px 8px',
+                                        borderRadius: 999,
+                                        fontSize: 9,
+                                        color: '#bfdbfe',
+                                        background: 'rgba(59,130,246,0.12)',
+                                        border: '1px solid rgba(59,130,246,0.2)',
+                                    }}
+                                >
+                                    {pluginMeta[tool]?.display_name || tool}
+                                </span>
+                            ))}
+                        </div>
+                    </div>
+                )}
+
                 {referenceUrls.length > 0 && (
                     <div className="s-section" style={{ marginBottom: 12 }}>
                         <div className="s-section-title">{tr('参考网址', 'Reference URLs')}</div>
@@ -454,6 +545,9 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                             {artifacts.map((art) => {
                                 const aMeta = ARTIFACT_TYPE_META[art.artifact_type] || { mark: 'DOC', label_en: art.artifact_type, label_zh: art.artifact_type };
                                 const isExpanded = expandedArt === art.id;
+                                const metadataEntries = art.metadata ? Object.entries(art.metadata) : [];
+                                const primitiveMetadata = metadataEntries.filter(([, value]) => isPrimitiveMetadataValue(value));
+                                const complexMetadata = metadataEntries.filter(([, value]) => !isPrimitiveMetadataValue(value));
 
                                 return (
                                     <div key={art.id} style={{
@@ -537,17 +631,91 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                                                         {tr('内容为空或存储在文件路径中', 'Content empty or stored at file path')}
                                                     </div>
                                                 )}
-                                                {art.metadata && Object.keys(art.metadata).length > 0 && (
-                                                    <div style={{
-                                                        marginTop: 6, fontSize: 8, color: 'var(--text3)',
-                                                    }}>
-                                                        {Object.entries(art.metadata).map(([k, v]) => (
-                                                            <span key={k} style={{
-                                                                marginRight: 8, padding: '1px 4px',
-                                                                borderRadius: 3, background: 'var(--glass)',
+                                                {metadataEntries.length > 0 && (
+                                                    <div style={{ marginTop: 8 }}>
+                                                        <div style={{ fontSize: 8, color: 'var(--text3)', marginBottom: 6 }}>
+                                                            {tr('元数据', 'Metadata')}
+                                                        </div>
+                                                        {primitiveMetadata.length > 0 && (
+                                                            <div style={{
+                                                                display: 'flex',
+                                                                flexWrap: 'wrap',
+                                                                gap: 6,
+                                                                marginBottom: complexMetadata.length > 0 ? 8 : 0,
                                                             }}>
-                                                                {k}: {String(v)}
-                                                            </span>
+                                                                {primitiveMetadata.map(([key, value]) => (
+                                                                    <span key={key} style={{
+                                                                        padding: '2px 6px',
+                                                                        borderRadius: 6,
+                                                                        background: 'var(--glass)',
+                                                                        border: '1px solid var(--glass-border)',
+                                                                        fontSize: 8,
+                                                                        color: 'var(--text3)',
+                                                                    }}>
+                                                                        {key}: {String(value)}
+                                                                    </span>
+                                                                ))}
+                                                            </div>
+                                                        )}
+                                                        {complexMetadata.map(([key, value]) => (
+                                                            <div key={key} style={{ marginTop: 6 }}>
+                                                                <div style={{
+                                                                    fontSize: 8,
+                                                                    color: 'var(--text3)',
+                                                                    marginBottom: 4,
+                                                                    textTransform: 'uppercase',
+                                                                    letterSpacing: '0.05em',
+                                                                }}>
+                                                                    {key}
+                                                                </div>
+                                                                {key === 'captures' && Array.isArray(value) ? (
+                                                                    <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                                        {value.slice(0, 6).map((item, index) => {
+                                                                            const capture = item && typeof item === 'object'
+                                                                                ? item as Record<string, unknown>
+                                                                                : {} as Record<string, unknown>;
+                                                                            return (
+                                                                                <div
+                                                                                    key={`${String(capture['name'] || 'capture')}-${index}`}
+                                                                                    style={{
+                                                                                        borderRadius: 8,
+                                                                                        padding: '8px 10px',
+                                                                                        background: 'rgba(255,255,255,0.03)',
+                                                                                        border: '1px solid var(--glass-border)',
+                                                                                    }}
+                                                                                >
+                                                                                    <div style={{ fontSize: 9, fontWeight: 700, color: 'var(--text1)', marginBottom: 4 }}>
+                                                                                        {String(capture['name'] || `capture_${index + 1}`)}
+                                                                                    </div>
+                                                                                    <div style={{ fontSize: 8, color: 'var(--text2)', lineHeight: 1.6 }}>
+                                                                                        {capture['changed_ratio'] != null && <div>changed_ratio: {String(capture['changed_ratio'])}</div>}
+                                                                                        {capture['diff_area_ratio'] != null && <div>diff_area_ratio: {String(capture['diff_area_ratio'])}</div>}
+                                                                                        {capture['height_change_ratio'] != null && <div>height_change_ratio: {String(capture['height_change_ratio'])}</div>}
+                                                                                        {capture['diff_region'] != null && <div>diff_region: {String(capture['diff_region'])}</div>}
+                                                                                        {capture['diff_path'] != null && <div style={{ wordBreak: 'break-all' }}>diff_path: {String(capture['diff_path'])}</div>}
+                                                                                    </div>
+                                                                                </div>
+                                                                            );
+                                                                        })}
+                                                                    </div>
+                                                                ) : (
+                                                                    <div style={{
+                                                                        fontSize: 8,
+                                                                        color: 'var(--text2)',
+                                                                        lineHeight: 1.6,
+                                                                        background: 'rgba(0,0,0,0.12)',
+                                                                        borderRadius: 6,
+                                                                        padding: '8px 10px',
+                                                                        whiteSpace: 'pre-wrap',
+                                                                        wordBreak: 'break-word',
+                                                                        maxHeight: 220,
+                                                                        overflow: 'auto',
+                                                                        fontFamily: 'var(--font-mono), monospace',
+                                                                    }}>
+                                                                        {formatMetadataValue(value)}
+                                                                    </div>
+                                                                )}
+                                                            </div>
                                                         ))}
                                                     </div>
                                                 )}

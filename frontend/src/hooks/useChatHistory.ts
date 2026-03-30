@@ -175,12 +175,12 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
                 setWorkflowName(reusableEmpty.title);
                 window.sessionStorage.setItem('evermind-fresh-session', '1');
             } else if (!freshFlag && preferredActive?.messages.length > 0) {
-                const fresh = createSession(lang);
-                const allSessions = [fresh, ...sessions].slice(0, MAX_HISTORY_SESSIONS);
-                setHistorySessions(allSessions);
-                setActiveSessionId(fresh.id);
-                setMessages([]);
-                setWorkflowName(fresh.title);
+                // §FIX: Previously created a new empty session here, losing all chat history
+                // during page reloads. Now load the active session's messages directly.
+                setHistorySessions(sessions);
+                setActiveSessionId(preferredActive.id);
+                setMessages(preferredActive.messages);
+                if (preferredActive.title) setWorkflowName(preferredActive.title);
                 window.sessionStorage.setItem('evermind-fresh-session', '1');
             } else {
                 const active = reusableEmpty && !freshFlag ? reusableEmpty : preferredActive;

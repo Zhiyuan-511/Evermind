@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { NODE_TYPES } from '@/lib/types';
 
 interface SettingsModalProps {
     open: boolean;
@@ -24,16 +25,66 @@ interface ApiKeys {
     qwen: string;
 }
 
-type TabId = 'conn' | 'perm' | 'ui' | 'quality';
+interface ModelCatalogItem {
+    id: string;
+    provider: string;
+}
+
+type TabId = 'conn' | 'perm' | 'ui' | 'quality' | 'nodes';
 
 const TABS: { id: TabId; label_en: string; label_zh: string }[] = [
     { id: 'conn', label_en: 'Connection', label_zh: '连接' },
     { id: 'perm', label_en: 'Permissions', label_zh: '权限' },
     { id: 'quality', label_en: 'Quality', label_zh: '验收策略' },
+    { id: 'nodes', label_en: 'Node Models', label_zh: '节点模型' },
     { id: 'ui', label_en: 'Interface', label_zh: '界面' },
 ];
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+const NODE_MODEL_PRIORITY_SLOTS = [0, 1, 2] as const;
+const NODE_MODEL_CONFIG_ROLES = [
+    'router',
+    'planner',
+    'analyst',
+    'uidesign',
+    'scribe',
+    'builder',
+    'polisher',
+    'reviewer',
+    'tester',
+    'debugger',
+    'deployer',
+    'imagegen',
+    'spritesheet',
+    'assetimport',
+] as const;
+const FALLBACK_MODEL_CATALOG: ModelCatalogItem[] = [
+    { id: 'gpt-5.4', provider: 'openai' },
+    { id: 'gpt-4.1', provider: 'openai' },
+    { id: 'gpt-4o', provider: 'openai' },
+    { id: 'o3', provider: 'openai' },
+    { id: 'claude-4-sonnet', provider: 'anthropic' },
+    { id: 'claude-4-opus', provider: 'anthropic' },
+    { id: 'claude-3.5-sonnet', provider: 'anthropic' },
+    { id: 'gemini-2.5-pro', provider: 'google' },
+    { id: 'gemini-2.0-flash', provider: 'google' },
+    { id: 'deepseek-v3', provider: 'deepseek' },
+    { id: 'deepseek-r1', provider: 'deepseek' },
+    { id: 'kimi', provider: 'kimi' },
+    { id: 'kimi-k2.5', provider: 'kimi' },
+    { id: 'kimi-coding', provider: 'kimi' },
+    { id: 'qwen-max', provider: 'qwen' },
+];
+const PROVIDER_LABELS: Record<string, string> = {
+    openai: 'OpenAI',
+    anthropic: 'Claude',
+    google: 'Gemini',
+    deepseek: 'DeepSeek',
+    kimi: 'Kimi',
+    qwen: 'Qwen',
+    ollama: 'Ollama',
+    relay: 'Relay',
+};
 
 // ── Security: mask API key for display ──
 function maskKey(key: string): string {
@@ -46,6 +97,27 @@ function maskKey(key: string): string {
 function sanitizeInput(value: string): string {
     // Strip any HTML tags, script injections, and trim whitespace
     return value.replace(/<[^>]*>/g, '').replace(/[<>"'&]/g, '').trim();
+}
+
+function normalizeNodeModelPreferences(value: unknown): Record<string, string[]> {
+    if (!value || typeof value !== 'object') return {};
+    const normalized: Record<string, string[]> = {};
+    for (const [rawRole, rawChain] of Object.entries(value as Record<string, unknown>)) {
+        const role = String(rawRole || '').trim();
+        if (!role) continue;
+        const source = Array.isArray(rawChain)
+            ? rawChain
+            : typeof rawChain === 'string'
+                ? rawChain.split(',')
+                : [];
+        const chain = source
+            .map(item => String(item || '').trim())
+            .filter(Boolean)
+            .filter((item, index, arr) => arr.indexOf(item) === index)
+            .slice(0, 6);
+        if (chain.length > 0) normalized[role] = chain;
+    }
+    return normalized;
 }
 
 export default function SettingsModal({
@@ -64,12 +136,14 @@ export default function SettingsModal({
     // Quality settings
     const [smokeEnabled, setSmokeEnabled] = useState(true);
     const [browserHeadful, setBrowserHeadful] = useState(false);
-    const [forceVisibleReview, setForceVisibleReview] = useState(true);
+    const [forceVisibleReview, setForceVisibleReview] = useState(false);
     const [maxRetries, setMaxRetries] = useState(3);
     const [browserResearch, setBrowserResearch] = useState(false);
     const [comfyUiUrl, setComfyUiUrl] = useState('');
     const [comfyWorkflowTemplate, setComfyWorkflowTemplate] = useState('');
     const [imageBackendAvailable, setImageBackendAvailable] = useState(false);
+    const [nodeModelPreferences, setNodeModelPreferences] = useState<Record<string, string[]>>({});
+    const [modelCatalog, setModelCatalog] = useState<ModelCatalogItem[]>([]);
     // Track which keys the user is actively editing (show real value)
     const [editingKey, setEditingKey] = useState<string | null>(null);
     // Track which keys have been loaded from backend (display as masked)
@@ -112,6 +186,18 @@ export default function SettingsModal({
                     if (typeof imageCfg.workflow_template === 'string') setComfyWorkflowTemplate(imageCfg.workflow_template);
                 }
                 if (typeof data.image_generation_available === 'boolean') setImageBackendAvailable(data.image_generation_available);
+                if (data.node_model_preferences && typeof data.node_model_preferences === 'object') {
+                    setNodeModelPreferences(normalizeNodeModelPreferences(data.node_model_preferences));
+                }
+                if (Array.isArray(data.model_catalog)) {
+                    const catalog: ModelCatalogItem[] = data.model_catalog
+                        .map((item: unknown) => ({
+                            id: String((item as Record<string, unknown>).id || '').trim(),
+                            provider: String((item as Record<string, unknown>).provider || '').trim(),
+                        }))
+                        .filter((item: ModelCatalogItem) => item.id.length > 0);
+                    if (catalog.length > 0) setModelCatalog(catalog);
+                }
                 // Load relay base URLs
                 if (data.api_bases && typeof data.api_bases === 'object') {
                     const bases: Record<string, string> = { openai: '', claude: '', gemini: '', kimi: '', deepseek: '', qwen: '' };
@@ -185,6 +271,7 @@ export default function SettingsModal({
                         comfyui_url: comfyUiUrl,
                         workflow_template: comfyWorkflowTemplate,
                     },
+                    node_model_preferences: nodeModelPreferences,
                 }),
             });
 
@@ -206,6 +293,7 @@ export default function SettingsModal({
                                 comfyui_url: comfyUiUrl,
                                 workflow_template: comfyWorkflowTemplate,
                             },
+                            node_model_preferences: nodeModelPreferences,
                         },
                     }));
                 }
@@ -216,6 +304,9 @@ export default function SettingsModal({
                 }
                 if (typeof result.image_generation_available === 'boolean') {
                     setImageBackendAvailable(result.image_generation_available);
+                }
+                if (result.node_model_preferences && typeof result.node_model_preferences === 'object') {
+                    setNodeModelPreferences(normalizeNodeModelPreferences(result.node_model_preferences));
                 }
 
                 setSaveStatus('success');
@@ -233,7 +324,7 @@ export default function SettingsModal({
         }
         setSaving(false);
         setTimeout(() => setSaveStatus('idle'), 5000);
-    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate]);
+    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate, nodeModelPreferences]);
 
     // Handle key input change with sanitization
     const handleKeyChange = useCallback((key: keyof ApiKeys, value: string) => {
@@ -248,6 +339,32 @@ export default function SettingsModal({
         'data-1p-ignore': 'true', // 1Password ignore
         spellCheck: false as const,
     };
+
+    const modelOptions = (modelCatalog.length > 0 ? modelCatalog : FALLBACK_MODEL_CATALOG)
+        .slice()
+        .sort((a, b) => {
+            const providerCompare = a.provider.localeCompare(b.provider);
+            return providerCompare !== 0 ? providerCompare : a.id.localeCompare(b.id);
+        });
+
+    const updateNodeModelPreference = useCallback((role: string, slotIndex: number, nextModel: string) => {
+        setNodeModelPreferences((prev) => {
+            const next = { ...prev };
+            const current = [...(next[role] || [])];
+            current[slotIndex] = nextModel;
+            const normalized = current
+                .map((item) => String(item || '').trim())
+                .filter(Boolean)
+                .filter((item, index, arr) => arr.indexOf(item) === index)
+                .slice(0, 6);
+            if (normalized.length > 0) {
+                next[role] = normalized;
+            } else {
+                delete next[role];
+            }
+            return next;
+        });
+    }, []);
 
     if (!open) return null;
 
@@ -458,8 +575,8 @@ export default function SettingsModal({
                                     </select>
                                 </div>
                                 <div className="s-hint">
-                                    {t('Failures auto-downgrade model: gpt-5.4 → claude-4 → kimi → deepseek → gemini-flash → qwen',
-                                       '失败自动降级模型：gpt-5.4 → claude-4 → kimi → deepseek → gemini-flash → qwen')}
+                                    {t('Failures auto-downgrade model. If a node has its own chain in "Node Models", that chain takes priority.',
+                                       '失败时会自动降级模型；如果你在“节点模型”里给某个节点单独配置了链路，则优先按那个链路执行。')}
                                 </div>
                             </div>
                             <div className="s-section">
@@ -540,6 +657,78 @@ export default function SettingsModal({
                             <div className="flex items-center gap-2 mt-2">
                                 <button className="btn btn-primary text-[10px]" onClick={saveToBackend} disabled={saving}>
                                     {saving ? t('Saving...', '保存中...') : t('Save Quality Settings', '保存质量设置')}
+                                </button>
+                                {saveStatus === 'success' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Saved!', '已保存!')}</span>}
+                                {saveStatus === 'error' && <span className="text-[9px]" style={{ color: 'var(--red)' }}>✗ {t('Failed', '保存失败')}</span>}
+                            </div>
+                        </>
+                    )}
+
+                    {tab === 'nodes' && (
+                        <>
+                            <div className="s-section">
+                                <div className="s-section-title">{t('Per-Node Model Fallback', '节点专属模型回退链')}</div>
+                                <div className="s-hint" style={{ lineHeight: 1.7 }}>
+                                    {t(
+                                        'Each node can define its own model priority chain. The runtime will try Priority 1 first, then automatically fall back to the next model on missing key, auth/provider failure, timeout, or network error.',
+                                        '每个节点都可以单独定义模型优先级链。运行时会先尝试优先级 1，如果缺少 Key、鉴权失败、提供商异常、超时或网络错误，会自动回退到下一个模型。'
+                                    )}
+                                </div>
+                                <div className="s-hint" style={{ lineHeight: 1.7, marginTop: 6 }}>
+                                    {t(
+                                        'If Priority 1 is empty, that node keeps using the current global/default model strategy.',
+                                        '如果优先级 1 留空，该节点会继续使用当前全局/默认模型策略。'
+                                    )}
+                                </div>
+                            </div>
+                            {NODE_MODEL_CONFIG_ROLES.map((role) => {
+                                const info = NODE_TYPES[role];
+                                const chain = nodeModelPreferences[role] || [];
+                                const nodeLabel = lang === 'zh'
+                                    ? info?.label_zh || role
+                                    : info?.label_en || role;
+                                return (
+                                    <div key={role} className="s-section">
+                                        <div className="s-section-title">{nodeLabel}</div>
+                                        {NODE_MODEL_PRIORITY_SLOTS.map((slotIndex) => (
+                                            <div className="s-row" key={`${role}-${slotIndex}`}>
+                                                <label>{t(`Priority ${slotIndex + 1}`, `优先级 ${slotIndex + 1}`)}</label>
+                                                <select
+                                                    className="s-input"
+                                                    value={chain[slotIndex] || ''}
+                                                    onChange={(e) => updateNodeModelPreference(role, slotIndex, e.target.value)}
+                                                >
+                                                    <option value="">
+                                                        {slotIndex === 0
+                                                            ? t('Use global/default', '使用全局/默认')
+                                                            : t('No fallback', '不设置回退')}
+                                                    </option>
+                                                    {modelOptions.map((item) => (
+                                                        <option key={`${role}-${item.id}`} value={item.id}>
+                                                            {item.id} ({PROVIDER_LABELS[item.provider] || item.provider || 'Model'})
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                            </div>
+                                        ))}
+                                        <div className="s-hint" style={{ lineHeight: 1.6 }}>
+                                            {chain.length > 0
+                                                ? (
+                                                    lang === 'zh'
+                                                        ? `执行顺序：${chain.join(' → ')}`
+                                                        : `Execution order: ${chain.join(' → ')}`
+                                                )
+                                                : t(
+                                                    'No dedicated chain configured for this node.',
+                                                    '这个节点当前还没有单独配置模型链。'
+                                                )}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                            <div className="flex items-center gap-2 mt-2">
+                                <button className="btn btn-primary text-[10px]" onClick={saveToBackend} disabled={saving}>
+                                    {saving ? t('Saving...', '保存中...') : t('Save Node Model Rules', '保存节点模型规则')}
                                 </button>
                                 {saveStatus === 'success' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Saved!', '已保存!')}</span>}
                                 {saveStatus === 'error' && <span className="text-[9px]" style={{ color: 'var(--red)' }}>✗ {t('Failed', '保存失败')}</span>}

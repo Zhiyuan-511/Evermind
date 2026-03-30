@@ -60,6 +60,13 @@ def _coerce_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _coerce_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _clamp_progress(value: Any, default: int = 0) -> int:
     return max(0, min(100, _coerce_int(value, default)))
 
@@ -233,10 +240,10 @@ VALID_NODE_STATUSES = {
 }
 
 VALID_NODE_TRANSITIONS: Dict[str, List[str]] = {
-    "queued":            ["running", "skipped", "cancelled"],
+    "queued":            ["running", "blocked", "skipped", "cancelled"],
     "running":           ["passed", "failed", "blocked", "waiting_approval", "cancelled"],
-    "passed":            [],
-    "failed":            [],   # immutable; rerun creates new NodeExecution
+    "passed":            ["running", "queued"],  # allow reopening for orchestrator-driven rework/requeue
+    "failed":            ["running", "skipped", "queued"],  # soft-skip or requeue
     "blocked":           ["running", "skipped", "cancelled"],
     "waiting_approval":  ["running", "passed", "failed", "cancelled"],
     "skipped":           [],
@@ -254,6 +261,8 @@ VALID_ARTIFACT_TYPES = {
     "changed_files", "diff_summary", "report", "review_result",
     "test_output", "build_output", "run_summary", "risk_report",
     "deployment_notes", "raw_log", "preview_ref",
+    "browser_trace", "browser_capture", "state_snapshot",
+    "qa_session_capture", "qa_session_video", "qa_session_log",
 }
 
 
@@ -415,22 +424,28 @@ def _read_json_file(path: Path) -> Any:
 
 
 def _write_json_file(path: Path, data: Any) -> bool:
-    """Write data to JSON file with file locking."""
+    """Write data to JSON file atomically (write to temp, then rename)."""
     try:
         STORE_DIR.mkdir(parents=True, exist_ok=True)
-        open_mode = "a+" if fcntl else "w"
-        with open(path, open_mode, encoding="utf-8") as f:
-            if fcntl:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            try:
-                if fcntl:
-                    f.seek(0)
-                    f.truncate()
+        # Atomic write: serialize to a temp file in the same directory,
+        # then os.replace() which is atomic on POSIX.
+        import tempfile as _tempfile
+        fd, tmp_path = _tempfile.mkstemp(
+            dir=str(path.parent), suffix=".tmp", prefix=f".{path.stem}_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
                 f.flush()
-            finally:
-                if fcntl:
-                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                os.fsync(f.fileno())
+            os.replace(tmp_path, str(path))
+        except BaseException:
+            # Clean up temp file on any error
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
         try:
             os.chmod(path, 0o600)
         except PermissionError:
@@ -703,13 +718,13 @@ class TaskStore:
             # waiting_review → review
             # waiting_selfcheck → selfcheck
             # done (success) → done
-            # failed → executing (back to rework)
+            # failed → planned (run stopped; task is ready for another attempt)
             # cancelled → backlog (manual/system stop)
             task_status_map = {
                 "waiting_review": "review",
                 "waiting_selfcheck": "selfcheck",
                 "done": "done",
-                "failed": "executing",
+                "failed": "planned",
                 "cancelled": "backlog",
             }
             target_task_status = task_status_map.get(run_status, "")
@@ -717,6 +732,10 @@ class TaskStore:
                 allowed = VALID_TRANSITIONS.get(task.status, [])
                 if target_task_status == task.status:
                     pass
+                elif run_status == "failed":
+                    task.status = target_task_status
+                    task.progress = 10
+                    changed = True
                 elif run_status == "cancelled" and task.status == "executing" and target_task_status == "backlog":
                     task.status = "backlog"
                     task.progress = 0
@@ -979,6 +998,12 @@ class RunStore:
             run.risks = _normalize_string_list(data["risks"], limit=50, item_limit=500)
         if "timeout_seconds" in data:
             run.timeout_seconds = max(0, _coerce_int(data["timeout_seconds"]))
+        if "started_at" in data:
+            run.started_at = max(0.0, _coerce_float(data["started_at"], run.started_at))
+        if "ended_at" in data:
+            run.ended_at = max(0.0, _coerce_float(data["ended_at"], run.ended_at))
+        if "created_at" in data:
+            run.created_at = max(0.0, _coerce_float(data["created_at"], run.created_at))
         # Append node_execution_ids
         if "node_execution_ids" in data:
             existing = set(run.node_execution_ids)
@@ -986,7 +1011,7 @@ class RunStore:
                 if nid not in existing:
                     run.node_execution_ids.append(nid)
                     existing.add(nid)
-        run.updated_at = time.time()
+        run.updated_at = max(0.0, _coerce_float(data.get("updated_at"), time.time()))
         run.version += 1
         self.save()
         return run.to_dict()
@@ -1096,14 +1121,32 @@ class NodeExecutionStore:
                 "error": f"Cannot transition node from '{node.status}' to '{new_status}'. Allowed: {allowed}",
             }
         now = time.time()
+        previous_status = node.status
         node.status = new_status
-        if new_status == "running" and node.started_at == 0.0:
-            node.started_at = now
-            node.ended_at = 0.0
-            node.progress = max(node.progress, 5)
+        if new_status == "running":
+            if previous_status in ("passed", "failed"):
+                node.retry_count = min(MAX_NODE_RETRY_COUNT, max(0, node.retry_count) + 1)
+            if previous_status in ("passed", "failed", "blocked", "skipped", "cancelled"):
+                node.started_at = now
+                node.ended_at = 0.0
+                node.progress = 5
+                node.error_message = ""
+            elif node.started_at == 0.0:
+                node.started_at = now
+                node.ended_at = 0.0
+                node.progress = max(node.progress, 5)
         if new_status in ("passed", "failed", "skipped", "cancelled"):
             node.ended_at = now
             node.progress = 100
+        elif new_status == "blocked":
+            node.ended_at = now
+            node.progress = 0  # blocked = never executed, progress should be 0
+        elif new_status == "queued":
+            node.started_at = 0.0
+            node.ended_at = 0.0
+            node.progress = 0
+            node.error_message = ""
+            node.output_summary = ""
         node.updated_at = now
         node.version += 1
         self.save()
@@ -1154,6 +1197,12 @@ class NodeExecutionStore:
             node.retried_from_id = _truncate_text(data["retried_from_id"], 120)
         if "timeout_seconds" in data:
             node.timeout_seconds = max(0, _coerce_int(data["timeout_seconds"]))
+        if "started_at" in data:
+            node.started_at = max(0.0, _coerce_float(data["started_at"], node.started_at))
+        if "ended_at" in data:
+            node.ended_at = max(0.0, _coerce_float(data["ended_at"], node.ended_at))
+        if "created_at" in data:
+            node.created_at = max(0.0, _coerce_float(data["created_at"], node.created_at))
         if "artifact_ids" in data:
             existing = set(node.artifact_ids)
             for aid in _normalize_string_list(data["artifact_ids"], limit=100, item_limit=120):
@@ -1162,7 +1211,7 @@ class NodeExecutionStore:
                     existing.add(aid)
         if "depends_on_keys" in data:
             node.depends_on_keys = _normalize_string_list(data["depends_on_keys"], limit=20, item_limit=100)
-        node.updated_at = time.time()
+        node.updated_at = max(0.0, _coerce_float(data.get("updated_at"), time.time()))
         node.version += 1
         self.save()
         return node.to_dict()

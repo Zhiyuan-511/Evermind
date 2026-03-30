@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { NODE_TYPES, type ChatMessage, type RunReportRecord, type TaskCard, type RunRecord, type NodeExecutionRecord } from '@/lib/types';
 import { buildReadableCurrentWork, describeNodeActivity } from '@/lib/nodeOutputHumanizer';
+import { saveArtifact } from '@/lib/api';
 import type { Node, Edge as RFEdge } from '@xyflow/react';
 
 // ── Helpers ──
@@ -133,6 +134,66 @@ interface ClientPreviewValidation {
     ok: boolean; status: number; bytes: number; errors: string[]; warnings: string[];
 }
 
+interface WorkspaceUpdatedDetail {
+    eventType: string;
+    stage?: string;
+    outputDir?: string;
+    targetDir?: string;
+    files?: string[];
+    copiedFiles?: number;
+    live?: boolean;
+    final?: boolean;
+    previewUrl?: string;
+}
+
+interface DesktopQaFrame {
+    index?: number;
+    label?: string;
+    path?: string;
+    stateHash?: string;
+    state_hash?: string;
+}
+
+interface DesktopQaSessionResult {
+    ok?: boolean;
+    status?: string;
+    sessionId?: string;
+    session_id?: string;
+    previewUrl?: string;
+    preview_url?: string;
+    scenario?: string;
+    agent?: string;
+    runId?: string;
+    run_id?: string;
+    nodeExecutionId?: string;
+    node_execution_id?: string;
+    startedAt?: string;
+    endedAt?: string;
+    ended_at?: string;
+    frames?: DesktopQaFrame[];
+    videoPath?: string;
+    video_path?: string;
+    timelapsePath?: string;
+    timelapse_path?: string;
+    rrwebRecordingPath?: string;
+    rrweb_recording_path?: string;
+    rrwebEventCount?: number;
+    rrweb_event_count?: number;
+    timelapseFrameCount?: number;
+    timelapse_frame_count?: number;
+    logPath?: string;
+    log_path?: string;
+    actions?: Array<Record<string, unknown>>;
+    consoleErrors?: Array<Record<string, unknown>>;
+    console_errors?: Array<Record<string, unknown>>;
+    failedRequests?: Array<Record<string, unknown>>;
+    failed_requests?: Array<Record<string, unknown>>;
+    pageErrors?: Array<Record<string, unknown>>;
+    page_errors?: Array<Record<string, unknown>>;
+    summary?: string;
+    error?: string;
+}
+
 async function runClientPreviewValidation(previewUrl: string): Promise<ClientPreviewValidation> {
     const result: ClientPreviewValidation = { ok: false, status: 0, bytes: 0, errors: [], warnings: [] };
     try {
@@ -154,6 +215,15 @@ async function runClientPreviewValidation(previewUrl: string): Promise<ClientPre
         result.errors.push(`Preview fetch failed: ${e}`);
     }
     return result;
+}
+
+function emitWorkspaceUpdated(detail: WorkspaceUpdatedDetail): void {
+    if (typeof window === 'undefined') return;
+    try {
+        window.dispatchEvent(new CustomEvent<WorkspaceUpdatedDetail>('evermind:workspace-updated', { detail }));
+    } catch {
+        /* noop */
+    }
 }
 
 // ── Hook Options ──
@@ -254,6 +324,7 @@ export function useRuntimeConnection({
     const browserModeNotifiedRef = useRef<Record<string, boolean>>({});
     const waitingAiLastNotifyRef = useRef<Record<string, number>>({});
     const previousConnectedRef = useRef(false);
+    const desktopQaSessionRef = useRef<Record<string, boolean>>({});
 
     const emitConnectorEvent = useCallback((type: string, label: string, detail?: string, timestamp = Date.now()) => {
         setConnectorLastEventAt(timestamp);
@@ -407,6 +478,7 @@ export function useRuntimeConnection({
         runSubtasksRef.current = {};
         browserModeNotifiedRef.current = {};
         waitingAiLastNotifyRef.current = {};
+        desktopQaSessionRef.current = {};
         clearPreviewFallbackTimer();
     }, [clearPreviewFallbackTimer]);
 
@@ -628,18 +700,21 @@ export function useRuntimeConnection({
             const agentName = (msg.agent as string) || 'Agent';
             const fullOutput = ((msg.full_output || msg.output_preview || '') as string);
             const err = String(msg.error || '');
+            const blocked = !success && /Blocked by failed dependencies/i.test(err);
             const prevState = runSubtasksRef.current[subtaskId] || {};
             const endedAt = Date.now();
             const startedAt = prevState.startedAt || endedAt;
             const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
             runSubtasksRef.current[subtaskId] = {
                 ...prevState, agent: agentName,
-                status: success ? 'completed' : 'failed',
+                status: success ? 'completed' : (blocked ? 'blocked' : 'failed'),
                 output: fullOutput, error: err, endedAt, durationSeconds,
             };
             appendSubtaskTimeline(subtaskId, success
                 ? `执行完成：${agentName} 已完成，耗时约 ${durationSeconds} 秒。`
-                : `执行失败：${agentName} 结束于失败，耗时约 ${durationSeconds} 秒。`);
+                : (blocked
+                    ? `执行阻断：${agentName} 未执行，因上游依赖失败而被阻断，耗时约 ${durationSeconds} 秒。`
+                    : `执行失败：${agentName} 结束于失败，耗时约 ${durationSeconds} 秒。`));
             if (err) appendSubtaskTimeline(subtaskId, `失败原因：${err.slice(0, 160)}`);
             // P1-3: Humanized completion messages
             const completeLabel = {
@@ -653,11 +728,28 @@ export function useRuntimeConnection({
             addMessage('system',
                 success
                     ? tr(`${completeLabel}完成（${durationSeconds}s）`, `${completeLabel} completed (${durationSeconds}s)`)
-                    : tr(`${completeLabel}遇到问题`, `${completeLabel} encountered an issue`),
-                `${agentName} #${subtaskId}`, success ? '✅' : '❌', success ? 'var(--green)' : 'var(--red)');
+                    : (blocked
+                        ? tr(`${completeLabel}被上游失败阻断`, `${completeLabel} was blocked by an upstream failure`)
+                        : tr(`${completeLabel}遇到问题`, `${completeLabel} encountered an issue`)),
+                `${agentName} #${subtaskId}`,
+                success ? '✅' : (blocked ? '⛔' : '❌'),
+                success ? 'var(--green)' : (blocked ? 'var(--orange)' : 'var(--red)'));
             try { console.info(`[Evermind][Subtask ${subtaskId}]`, { agent: agentName, success, output_len: fullOutput.length, output_preview: fullOutput.slice(0, 1200) }); } catch { /* noop */ }
             addConsoleLog(`[subtask_complete] #${subtaskId} agent=${agentName} success=${String(success)} output_len=${fullOutput.length}${err ? ` error=${err.slice(0, 160)}` : ''}`);
-            const canvasNodeId = subtaskNodeMap.current[subtaskId];
+            let canvasNodeId = subtaskNodeMap.current[subtaskId];
+            // Fallback: if the map lookup fails (e.g. plan_created was missed or IDs drifted),
+            // try to find the canvas node by matching subtaskId stored in node data.
+            if (!canvasNodeId) {
+                const fallbackNode = nodes.find((n) => {
+                    const d = n.data as Record<string, unknown>;
+                    return String(d.subtaskId || '').trim() === subtaskId
+                        || String(d.nodeExecutionId || '').trim() === subtaskId;
+                });
+                if (fallbackNode) {
+                    canvasNodeId = fallbackNode.id;
+                    subtaskNodeMap.current[subtaskId] = canvasNodeId;
+                }
+            }
             if (canvasNodeId) {
                 // Build human-readable completion summary
                 const completeSummary = success
@@ -665,17 +757,23 @@ export function useRuntimeConnection({
                         `${completeLabel}已完成，耗时 ${durationSeconds} 秒。${fullOutput.length > 0 ? '已产出工作成果。' : ''}`,
                         `${completeLabel} completed in ${durationSeconds}s.${fullOutput.length > 0 ? ' Output generated.' : ''}`
                     )
-                    : tr(
-                        `${completeLabel}执行失败。${err ? `原因：${err.slice(0, 100)}` : ''}`,
-                        `${completeLabel} failed.${err ? ` Reason: ${err.slice(0, 100)}` : ''}`
-                    );
+                    : (blocked
+                        ? tr(
+                            `${completeLabel}未实际执行，因为上游节点已失败。${err ? `原因：${err.slice(0, 100)}` : ''}`,
+                            `${completeLabel} did not execute because an upstream node failed.${err ? ` Reason: ${err.slice(0, 100)}` : ''}`
+                        )
+                        : tr(
+                            `${completeLabel}执行失败。${err ? `原因：${err.slice(0, 100)}` : ''}`,
+                            `${completeLabel} failed.${err ? ` Reason: ${err.slice(0, 100)}` : ''}`
+                        ));
                 // Collect timeline log
                 const timelineEvents = (runSubtasksRef.current[subtaskId]?.timelineEvents || [])
-                    .map((msg: string) => ({ ts: Date.now(), msg, type: success ? 'ok' : 'error' }));
+                    .map((msg: string) => ({ ts: Date.now(), msg, type: success ? 'ok' : (blocked ? 'warn' : 'error') }));
                 mergeCanvasNodeLogs(canvasNodeId, timelineEvents);
                 updateNodeData(canvasNodeId, {
-                    status: success ? 'passed' : 'failed',
+                    status: success ? 'passed' : (blocked ? 'blocked' : 'failed'),
                     progress: 100,
+                    _terminalStatus: true,
                     lastOutput: fullOutput.substring(0, 4000),
                     outputSummary: completeSummary,
                     endedAt,
@@ -692,6 +790,7 @@ export function useRuntimeConnection({
             const files = (msg.files as string[]) || [];
             const outputDir = (msg.output_dir as string) || '/tmp/evermind_output';
             const sid = String(msg.subtask_id || '');
+            const artifactSync = (msg.artifact_sync as Record<string, unknown> | undefined) || undefined;
             if (files.length > 0) {
                 if (sid) {
                     const compactFiles = files.slice(0, 6).map((file) => file.split('/').pop()).join(', ');
@@ -710,48 +809,79 @@ export function useRuntimeConnection({
                     'File Output', '📁', 'var(--green)');
                 addConsoleLog(`[files_created] count=${files.length} dir=${outputDir}`);
             }
+            emitWorkspaceUpdated({
+                eventType: 'files_created',
+                outputDir,
+                files,
+                targetDir: String(artifactSync?.target_dir || ''),
+                copiedFiles: Number(artifactSync?.copied_files || 0),
+                live: Boolean(artifactSync?.live),
+            });
 
         } else if (t === 'preview_ready') {
             const rawPreviewUrl = msg.preview_url as string;
             const files = (msg.files as string[]) || [];
             const sid = String(msg.subtask_id || '');
+            const artifactSync = (msg.artifact_sync as Record<string, unknown> | undefined) || undefined;
             if (rawPreviewUrl) {
-                previewReadyForRunRef.current = true;
                 clearPreviewFallbackTimer();
                 let resolvedUrl = rawPreviewUrl.trim();
                 try { resolvedUrl = new URL(resolvedUrl, 'http://127.0.0.1:8765').toString(); } catch { /* Keep original */ }
+                const isFinalPreview = Boolean(msg.final);
+                const hadPreviewAlready = previewReadyForRunRef.current;
+                const shouldActivatePreview = isFinalPreview || !hadPreviewAlready;
                 runPreviewUrlRef.current = resolvedUrl;
                 if (sid) {
-                    appendSubtaskTimeline(sid, tr(`预览已就绪：${resolvedUrl}`, `Preview ready: ${resolvedUrl}`));
+                    appendSubtaskTimeline(
+                        sid,
+                        shouldActivatePreview
+                            ? tr(`预览已就绪：${resolvedUrl}`, `Preview ready: ${resolvedUrl}`)
+                            : tr(`新的预览版本已写出，但为避免运行中反复刷新，当前预览视图保持不自动切换。`, `A newer preview artifact was generated, but the current preview was kept stable to avoid repeated refresh during the run.`),
+                    );
                     const canvasNodeId = subtaskNodeMap.current[sid];
                     if (canvasNodeId) {
                         appendCanvasNodeLog(canvasNodeId, {
                             ts: Date.now(),
-                            msg: tr(`预览地址已生成：${resolvedUrl}`, `Preview URL ready: ${resolvedUrl}`),
+                            msg: shouldActivatePreview
+                                ? tr(`预览地址已生成：${resolvedUrl}`, `Preview URL ready: ${resolvedUrl}`)
+                                : tr(`新的预览版本已生成，已延后自动刷新。`, `A newer preview artifact was generated; auto-refresh was deferred.`),
                             type: 'ok',
                         });
                     }
                 }
-                const safePreviewUrl = escapeHtml(resolvedUrl);
-                const previewWithBust = withCacheBust(resolvedUrl);
-                setPreviewUrl(previewWithBust);
-                setCanvasView('preview');
-                const shortFiles = files.slice(0, 3).map((f: string) => f.split('/').pop()).join(', ');
-                addMessage('system',
-                    tr(
-                        `<b>预览已就绪</b>，已自动切换到预览视图。<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">新窗口打开</a>${shortFiles ? `<br/>文件: ${shortFiles}` : ''}`,
-                        `<b>Preview ready</b>, switched to preview view.<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">Open in new window</a>${shortFiles ? `<br/>Files: ${shortFiles}` : ''}`),
-                    'Preview', '🔗', 'var(--green)');
-                try { console.info('[Evermind][PreviewReady]', { preview_url: resolvedUrl, files, final: Boolean(msg.final) }); } catch { /* noop */ }
-                addConsoleLog(`[preview_ready] url=${resolvedUrl} files=${files.length} final=${String(Boolean(msg.final))}`);
-                void (async () => {
-                    const check = await runClientPreviewValidation(resolvedUrl);
-                    if (check.ok) {
-                        addMessage('system', tr(`预览验收通过（HTTP ${check.status}，${check.bytes} bytes）`, `Preview validation passed (HTTP ${check.status}, ${check.bytes} bytes)`), 'Validator', '✅', 'var(--green)');
-                    } else {
-                        addMessage('system', tr(`预览验收失败：${check.errors.slice(0, 3).join('；')}`, `Preview validation failed: ${check.errors.slice(0, 3).join('; ')}`), 'Validator', '❌', 'var(--red)');
-                    }
-                })();
+                if (shouldActivatePreview) {
+                    previewReadyForRunRef.current = true;
+                    const safePreviewUrl = escapeHtml(resolvedUrl);
+                    const previewWithBust = withCacheBust(resolvedUrl);
+                    setPreviewUrl(previewWithBust);
+                    setCanvasView('preview');
+                    const shortFiles = files.slice(0, 3).map((f: string) => f.split('/').pop()).join(', ');
+                    addMessage('system',
+                        tr(
+                            `<b>预览已就绪</b>，已自动切换到预览视图。<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">新窗口打开</a>${shortFiles ? `<br/>文件: ${shortFiles}` : ''}`,
+                            `<b>Preview ready</b>, switched to preview view.<br/><a href="${safePreviewUrl}" target="_blank" rel="noopener noreferrer">Open in new window</a>${shortFiles ? `<br/>Files: ${shortFiles}` : ''}`),
+                        'Preview', '🔗', 'var(--green)');
+                    void (async () => {
+                        const check = await runClientPreviewValidation(resolvedUrl);
+                        if (check.ok) {
+                            addMessage('system', tr(`预览验收通过（HTTP ${check.status}，${check.bytes} bytes）`, `Preview validation passed (HTTP ${check.status}, ${check.bytes} bytes)`), 'Validator', '✅', 'var(--green)');
+                        } else {
+                            addMessage('system', tr(`预览验收失败：${check.errors.slice(0, 3).join('；')}`, `Preview validation failed: ${check.errors.slice(0, 3).join('; ')}`), 'Validator', '❌', 'var(--red)');
+                        }
+                    })();
+                }
+                try { console.info('[Evermind][PreviewReady]', { preview_url: resolvedUrl, files, final: isFinalPreview, activated: shouldActivatePreview }); } catch { /* noop */ }
+                addConsoleLog(`[preview_ready] url=${resolvedUrl} files=${files.length} final=${String(isFinalPreview)} activated=${String(shouldActivatePreview)}`);
+                emitWorkspaceUpdated({
+                    eventType: 'preview_ready',
+                    outputDir: String(msg.output_dir || ''),
+                    files,
+                    targetDir: String(artifactSync?.target_dir || ''),
+                    copiedFiles: Number(artifactSync?.copied_files || 0),
+                    live: Boolean(artifactSync?.live),
+                    final: isFinalPreview,
+                    previewUrl: resolvedUrl,
+                });
             }
 
         } else if (t === 'subtask_retry') {
@@ -767,7 +897,25 @@ export function useRuntimeConnection({
             addMessage('system', tr(`触发重试（第 ${msg.retry}/${msg.max_retries} 次）`, `Retry triggered (attempt ${msg.retry}/${msg.max_retries})`), `Retry #${msg.subtask_id}`, '🔄', 'var(--yellow)');
             addConsoleLog(`[subtask_retry] #${String(msg.subtask_id)} retry=${String(msg.retry)}/${String(msg.max_retries)} error=${String(msg.error || '').slice(0, 180)}`);
             const canvasNodeId = subtaskNodeMap.current[msg.subtask_id as string];
-            if (canvasNodeId) updateNodeData(canvasNodeId, { status: 'running', progress: 10 });
+            if (canvasNodeId) {
+                const retryStartedAt = Date.now();
+                // Reset startedAt and timer on retry so the clock restarts
+                if (sid) {
+                    runSubtasksRef.current[sid] = {
+                        ...(runSubtasksRef.current[sid] || {}),
+                        startedAt: retryStartedAt,
+                        endedAt: undefined,
+                        durationSeconds: undefined,
+                    };
+                }
+                updateNodeData(canvasNodeId, {
+                    status: 'running',
+                    progress: 5,
+                    startedAt: retryStartedAt,
+                    durationSeconds: 0,
+                    _terminalStatus: false,
+                });
+            }
 
         } else if (t === 'test_failed_retrying') {
             addMessage('system', tr('测试未通过，正在回滚并重试修复', 'Tests failed, rerunning with repair instructions'), 'Tester', '🧪', 'var(--red)');
@@ -802,7 +950,7 @@ export function useRuntimeConnection({
                     const runtime = runSubtasksRef.current[String(st.id)] || {};
                     return {
                         id: String(st.id), agent: String(st.agent || runtime.agent || 'agent'),
-                        status: String(st.status || runtime.status || 'unknown'),
+                        status: String(runtime.status || st.status || 'unknown'),
                         retries: Number(st.retries || runtime.retries || 0),
                         task: String(st.task || runtime.task || ''),
                         outputPreview: String(runtime.output || st.output_preview || '').slice(0, 2200),
@@ -821,7 +969,7 @@ export function useRuntimeConnection({
             // Persist report + auto-create task
             void (async () => {
                 try {
-                    const { saveReportApi, createTask, transitionTask: transApi, updateTaskApi } = await import('@/lib/api');
+                    const { saveReportApi } = await import('@/lib/api');
                     const reportPayload: Record<string, unknown> = {
                         ...reportRecord,
                         task_id: canonicalTaskIdRef.current || reportRecord.taskId || '',
@@ -829,37 +977,10 @@ export function useRuntimeConnection({
                         subtasks: reportRecord.subtasks.map((st) => ({ ...st, files_created: st.filesCreated || [] })),
                     };
                     await saveReportApi(reportPayload).catch(() => {});
-                    if (!canonicalTaskIdRef.current) {
-                        const taskTitle = reportRecord.goal?.slice(0, 120) || 'Untitled Run';
-                        const { task: newTask } = await createTask({
-                            title: taskTitle,
-                            description: `Auto-created from run at ${new Date().toLocaleString()}`,
-                            mode: runDifficulty === 'pro' ? 'pro' : 'standard', priority: 'medium',
-                        });
-                        if (newTask?.id) {
-                            reportPayload.task_id = newTask.id;
-                            await saveReportApi({ ...reportPayload, id: reportRecord.id, task_id: newTask.id }).catch(() => {});
-                            await transApi(newTask.id, 'planned').catch(() => {});
-                            await transApi(newTask.id, 'executing').catch(() => {});
-                            if (success) {
-                                await transApi(newTask.id, 'review').catch(() => {});
-                                const reviewerSt = subtasks.find(s => s.agent === 'reviewer');
-                                if (reviewerSt) {
-                                    try {
-                                        const verdict = JSON.parse(reviewerSt.output_preview || '{}');
-                                        await updateTaskApi(newTask.id, {
-                                            reviewVerdict: verdict.verdict === 'REJECTED' ? 'rejected' : 'approved',
-                                            reviewIssues: verdict.improvements || [],
-                                            latestSummary: taskTitle,
-                                        } as Partial<RunReportRecord & { reviewVerdict: string; reviewIssues: string[]; latestSummary: string }>).catch(() => {});
-                                    } catch { /* non-JSON reviewer output */ }
-                                }
-                            }
-                        }
-                    }
                 } catch { /* backend persistence failed */ }
             })();
 
+            const completionSummary = String(msg.summary || '').trim();
             const completionData: import('@/lib/types').ChatMessage['completionData'] = {
                 success,
                 completed: Number(msg.completed || 0),
@@ -880,10 +1001,10 @@ export function useRuntimeConnection({
 
             addMessage('system',
                 tr(
-                    `<b>执行完成</b>：${msg.completed}/${msg.total_subtasks} 节点，耗时 ${msg.duration_seconds}s`,
-                    `<b>Run completed</b>: ${msg.completed}/${msg.total_subtasks} nodes, ${msg.duration_seconds}s`),
+                    `<b>执行完成</b>：${msg.completed}/${msg.total_subtasks} 节点，耗时 ${msg.duration_seconds}s${completionSummary ? `<br/>${escapeHtml(completionSummary)}` : ''}`,
+                    `<b>Run completed</b>: ${msg.completed}/${msg.total_subtasks} nodes, ${msg.duration_seconds}s${completionSummary ? `<br/>${escapeHtml(completionSummary)}` : ''}`),
                 'Report', '🏁', success ? 'var(--green)' : 'var(--orange)', completionData);
-            addConsoleLog(`[orchestrator_complete] success=${String(success)} completed=${String(msg.completed)}/${String(msg.total_subtasks)} retries=${String(msg.total_retries)} duration=${String(msg.duration_seconds)}s`);
+            addConsoleLog(`[orchestrator_complete] success=${String(success)} completed=${String(msg.completed)}/${String(msg.total_subtasks)} retries=${String(msg.total_retries)} duration=${String(msg.duration_seconds)}s${completionSummary ? ` summary=${completionSummary.slice(0, 180)}` : ''}`);
 
             if (success) {
                 // P3-2: If preview URL is already known, switch immediately
@@ -946,10 +1067,199 @@ export function useRuntimeConnection({
         } else if (t === 'subtask_progress') {
             const stage = String(msg.stage || '');
             const sid = String(msg.subtask_id || '');
-            if (stage === 'error' && msg.message) {
+            if (stage === 'builder_write' || stage === 'artifact_write') {
+                const writtenPath = String(msg.path || '').trim();
+                const artifactSync = (msg.artifact_sync as Record<string, unknown> | undefined) || undefined;
+                const writer = String(msg.writer || msg.agent || (stage === 'builder_write' ? 'builder' : '')).trim();
+                const writerLabel = writer
+                    ? writer.charAt(0).toUpperCase() + writer.slice(1)
+                    : 'Writer';
+                if (sid) {
+                    appendSubtaskTimeline(
+                        sid,
+                        writtenPath
+                            ? tr(`${writerLabel} 已写入文件：${writtenPath.split('/').pop()}`, `${writerLabel} wrote file: ${writtenPath.split('/').pop()}`)
+                            : tr(`${writerLabel} 已写入真实文件。`, `${writerLabel} wrote a real file.`),
+                    );
+                }
+                addConsoleLog(`[progress] #${sid} stage=${stage} writer=${writer || 'builder'} path=${writtenPath}`);
+                emitWorkspaceUpdated({
+                    eventType: 'subtask_progress',
+                    stage,
+                    outputDir: String(msg.output_dir || ''),
+                    files: writtenPath ? [writtenPath] : [],
+                    targetDir: String(artifactSync?.target_dir || ''),
+                    copiedFiles: Number(artifactSync?.copied_files || 0),
+                    live: Boolean(artifactSync?.live),
+                });
+            } else if (stage === 'error' && msg.message) {
                 if (sid) appendSubtaskTimeline(sid, `执行异常：${String(msg.message).slice(0, 180)}`);
                 addMessage('system', `${msg.message}`, 'Error', '⚠️', 'var(--orange)');
                 addConsoleLog(`[progress] #${sid} stage=error msg=${String(msg.message).slice(0, 220)}`);
+            } else if (stage === 'qa_session_requested') {
+                const previewUrlForQa = String(msg.preview_url || msg.previewUrl || '').trim();
+                const runId = String(msg.run_id || msg.runId || canonicalRunIdRef.current || '').trim();
+                const nodeExecutionId = String(msg.node_execution_id || msg.nodeExecutionId || '').trim();
+                const sessionId = String(msg.session_id || msg.sessionId || `${nodeExecutionId}:${sid}` || '').trim();
+                const desktopApi = (typeof window !== 'undefined'
+                    ? (window as Window & {
+                        evermind?: {
+                            qa?: {
+                                runSession?: (config: Record<string, unknown>) => Promise<DesktopQaSessionResult>;
+                            };
+                        };
+                    }).evermind
+                    : undefined);
+                const runDesktopQaSession = desktopApi?.qa?.runSession;
+
+                if (previewUrlForQa) {
+                    setPreviewUrl(withCacheBust(previewUrlForQa));
+                    setCanvasView('preview');
+                }
+
+                if (!runDesktopQaSession || !runId || !nodeExecutionId || !sessionId) {
+                    if (sid) {
+                        appendSubtaskTimeline(
+                            sid,
+                            tr('桌面 QA 会话不可用，后端将回退到浏览器链路。', 'Desktop QA session unavailable; backend will fall back to the browser path.'),
+                        );
+                    }
+                    addConsoleLog(`[qa_session_requested] skipped session=${sessionId || 'n/a'} run=${runId || 'n/a'} node=${nodeExecutionId || 'n/a'}`);
+                } else if (!desktopQaSessionRef.current[sessionId]) {
+                    desktopQaSessionRef.current[sessionId] = true;
+                    if (sid) {
+                        appendSubtaskTimeline(
+                            sid,
+                            tr('已切到桌面内部 QA 预览会话，正在录屏并采集交互证据。', 'Switched to the internal desktop QA session; recording gameplay evidence now.'),
+                        );
+                    }
+                    addConsoleLog(`[qa_session_requested] session=${sessionId} run=${runId} node=${nodeExecutionId} preview=${previewUrlForQa}`);
+                    void (async () => {
+                        try {
+                            const result = await runDesktopQaSession({
+                                ...msg,
+                                previewUrl: previewUrlForQa,
+                                runId,
+                                nodeExecutionId,
+                                sessionId,
+                                keepOpenMs: 8000,
+                                alwaysOnTop: true,
+                            });
+                            const resultSessionId = String(result.sessionId || result.session_id || sessionId).trim();
+                            const artifactMetaBase = {
+                                source: 'desktop_qa_session',
+                                session_id: resultSessionId,
+                                scenario: String(msg.scenario || ''),
+                                agent: String(msg.agent || ''),
+                                preview_url: previewUrlForQa,
+                                ok: Boolean(result.ok),
+                                status: String(result.status || ''),
+                            };
+                            const frames = Array.isArray(result.frames) ? result.frames : [];
+                            for (const frame of frames) {
+                                const framePath = String(frame.path || '').trim();
+                                if (!framePath) continue;
+                                await saveArtifact({
+                                    run_id: runId,
+                                    node_execution_id: nodeExecutionId,
+                                    artifact_type: 'qa_session_capture',
+                                    title: `QA frame ${Number(frame.index ?? 0) + 1}`,
+                                    path: framePath,
+                                    metadata: {
+                                        ...artifactMetaBase,
+                                        frame_index: Number(frame.index ?? 0),
+                                        frame_label: String(frame.label || ''),
+                                        state_hash: String(frame.stateHash || frame.state_hash || ''),
+                                    },
+                                });
+                            }
+                            const videoPath = String(result.videoPath || result.video_path || '').trim();
+                            if (videoPath) {
+                                await saveArtifact({
+                                    run_id: runId,
+                                    node_execution_id: nodeExecutionId,
+                                    artifact_type: 'qa_session_video',
+                                    title: 'QA gameplay recording',
+                                    path: videoPath,
+                                    metadata: {
+                                        ...artifactMetaBase,
+                                        frame_count: frames.length,
+                                    },
+                                });
+                            }
+                            const timelapsePath = String(result.timelapsePath || result.timelapse_path || '').trim();
+                            if (timelapsePath) {
+                                await saveArtifact({
+                                    run_id: runId,
+                                    node_execution_id: nodeExecutionId,
+                                    artifact_type: 'qa_session_video',
+                                    title: 'QA timelapse recording (500ms/frame)',
+                                    path: timelapsePath,
+                                    metadata: {
+                                        ...artifactMetaBase,
+                                        frame_count: Number(result.timelapseFrameCount || result.timelapse_frame_count || 0),
+                                        recording_type: 'timelapse',
+                                    },
+                                });
+                            }
+                            const rrwebPath = String(result.rrwebRecordingPath || result.rrweb_recording_path || '').trim();
+                            const rrwebEventCount = Number(result.rrwebEventCount || result.rrweb_event_count || 0);
+                            if (rrwebPath && rrwebEventCount > 0) {
+                                await saveArtifact({
+                                    run_id: runId,
+                                    node_execution_id: nodeExecutionId,
+                                    artifact_type: 'qa_session_log',
+                                    title: `QA rrweb DOM recording (${rrwebEventCount} events)`,
+                                    path: rrwebPath,
+                                    metadata: {
+                                        ...artifactMetaBase,
+                                        recording_type: 'rrweb',
+                                        rrweb_event_count: rrwebEventCount,
+                                    },
+                                });
+                            }
+                            await saveArtifact({
+                                run_id: runId,
+                                node_execution_id: nodeExecutionId,
+                                artifact_type: 'qa_session_log',
+                                title: 'QA session log',
+                                content: JSON.stringify(result),
+                                metadata: {
+                                    ...artifactMetaBase,
+                                    frame_count: frames.length,
+                                    video_path: videoPath,
+                                    timelapse_path: timelapsePath,
+                                    rrweb_path: rrwebPath,
+                                    rrweb_event_count: rrwebEventCount,
+                                    timelapse_frame_count: Number(result.timelapseFrameCount || result.timelapse_frame_count || 0),
+                                    log_path: String(result.logPath || result.log_path || '').trim(),
+                                },
+                            });
+                            if (sid) {
+                                appendSubtaskTimeline(
+                                    sid,
+                                    Boolean(result.ok)
+                                        ? tr(
+                                            `桌面 QA 会话已完成，证据已回传。${rrwebEventCount > 0 ? `（含 rrweb DOM 录屏 ${rrwebEventCount} 事件）` : ''}`,
+                                            `Desktop QA session finished and evidence was uploaded.${rrwebEventCount > 0 ? ` (includes rrweb DOM recording with ${rrwebEventCount} events)` : ''}`,
+                                        )
+                                        : tr('桌面 QA 会话已结束，但证据显示存在异常，后端会按规则决定是否回退。', 'Desktop QA session ended with issues; backend will decide whether to fall back.'),
+                                );
+                            }
+                            addConsoleLog(`[qa_session_complete] session=${resultSessionId} ok=${String(Boolean(result.ok))} frames=${String(frames.length)} video=${videoPath ? '1' : '0'} timelapse=${timelapsePath ? '1' : '0'} rrweb=${String(rrwebEventCount)}`);
+                        } catch (error) {
+                            if (sid) {
+                                appendSubtaskTimeline(
+                                    sid,
+                                    tr('桌面 QA 会话执行失败，后端将回退到浏览器链路。', 'Desktop QA session failed; backend will fall back to the browser path.'),
+                                );
+                            }
+                            addConsoleLog(`[qa_session_failed] session=${sessionId} error=${String(error).slice(0, 220)}`);
+                        } finally {
+                            delete desktopQaSessionRef.current[sessionId];
+                        }
+                    })();
+                }
             } else if (stage === 'preview_validation') {
                 const ok = Boolean(msg.ok);
                 const score = msg.score as number | undefined;
@@ -996,6 +1306,50 @@ export function useRuntimeConnection({
             } else if (stage === 'quality_gate_failed') {
                 if (sid) appendSubtaskTimeline(sid, `质量门失败：${String(msg.message || '').slice(0, 220)}`);
                 addConsoleLog(`[progress] #${sid} stage=quality_gate_failed msg=${String(msg.message || '').slice(0, 220)}`);
+            } else if (stage === 'reviewer_visual_gate') {
+                const ok = Boolean(msg.ok);
+                const smokeStatus = String(msg.smoke_status || '');
+                const previewUrl = String(msg.preview_url || '');
+                const errors = (msg.errors as string[]) || [];
+                const warnings = (msg.warnings as string[]) || [];
+                const visualStatus = String(msg.visual_status || '');
+                const visualSummary = String(msg.visual_summary || '').trim();
+                const gateSummary = ok
+                    ? tr(
+                        `审查员确定性验收通过。${smokeStatus ? ` smoke=${smokeStatus}。` : ''}${visualStatus && visualStatus !== 'skipped' ? ` 视觉回归=${visualStatus}。` : ''}${visualSummary ? ` ${visualSummary}` : ''}${previewUrl ? ` 预览：${previewUrl}` : ''}`,
+                        `Reviewer deterministic gate passed.${smokeStatus ? ` smoke=${smokeStatus}.` : ''}${visualStatus && visualStatus !== 'skipped' ? ` visual=${visualStatus}.` : ''}${visualSummary ? ` ${visualSummary}` : ''}${previewUrl ? ` Preview: ${previewUrl}` : ''}`,
+                    )
+                    : tr(
+                        `审查员确定性验收失败：${errors.slice(0, 2).join('；') || '规则校验未通过'}${visualSummary ? `。${visualSummary}` : ''}${warnings.length ? `。警告：${warnings.slice(0, 2).join('；')}` : ''}`,
+                        `Reviewer deterministic gate failed: ${errors.slice(0, 2).join('; ') || 'rule check failed'}${visualSummary ? `. ${visualSummary}` : ''}${warnings.length ? `. Warnings: ${warnings.slice(0, 2).join('; ')}` : ''}`,
+                    );
+                if (sid) appendSubtaskTimeline(sid, gateSummary);
+                const canvasNodeId = subtaskNodeMap.current[sid];
+                if (canvasNodeId) {
+                    appendCanvasNodeLog(canvasNodeId, {
+                        ts: Date.now(),
+                        msg: gateSummary,
+                        type: ok ? (visualStatus === 'warn' ? 'warn' : 'ok') : 'error',
+                    });
+                }
+                addConsoleLog(`[progress] #${sid} stage=reviewer_visual_gate ok=${String(ok)} smoke=${smokeStatus} visual=${visualStatus}`);
+            } else if (stage === 'reviewer_forced_rejection') {
+                const errors = (msg.errors as string[]) || [];
+                const interactionError = String(msg.interaction_error || '').trim();
+                const forcedSummary = tr(
+                    `审查门已自动转为结构化驳回，Builder 将按整改清单返工。${errors.length ? ` 关键问题：${errors.slice(0, 2).join('；')}。` : ''}${interactionError ? ` 交互门失败：${interactionError}` : ''}`,
+                    `Reviewer gate converted the result into a structured rejection so builders can rework against a concrete brief.${errors.length ? ` Key issues: ${errors.slice(0, 2).join('; ')}.` : ''}${interactionError ? ` Interaction gate failed: ${interactionError}` : ''}`,
+                );
+                if (sid) appendSubtaskTimeline(sid, forcedSummary);
+                const canvasNodeId = subtaskNodeMap.current[sid];
+                if (canvasNodeId) {
+                    appendCanvasNodeLog(canvasNodeId, {
+                        ts: Date.now(),
+                        msg: forcedSummary,
+                        type: 'warn',
+                    });
+                }
+                addConsoleLog(`[progress] #${sid} stage=reviewer_forced_rejection errors=${errors.length}`);
             } else if (stage === 'reviewer_visual_gate_failed' || stage === 'reviewer_interaction_gate_failed' || stage === 'tester_visual_gate_failed' || stage === 'tester_interaction_gate_failed') {
                 if (sid) appendSubtaskTimeline(sid, String(msg.message || '').slice(0, 220));
                 addConsoleLog(`[progress] #${sid} stage=${stage} msg=${String(msg.message || '').slice(0, 220)}`);
@@ -1019,14 +1373,77 @@ export function useRuntimeConnection({
                 const smokeStatus = String(msg.smoke_status || '');
                 const previewUrl = String(msg.preview_url || '');
                 const errors = (msg.errors as string[]) || [];
+                const warnings = (msg.warnings as string[]) || [];
+                const visualStatus = String(msg.visual_status || '');
+                const visualSummary = String(msg.visual_summary || '').trim();
                 if (sid) appendSubtaskTimeline(sid, ok
-                    ? tr(`测试员确定性验收通过。${smokeStatus ? ` smoke=${smokeStatus}。` : ''}${previewUrl ? ` 预览：${previewUrl}` : ''}`,
-                        `Tester deterministic gate passed.${smokeStatus ? ` smoke=${smokeStatus}.` : ''}${previewUrl ? ` Preview: ${previewUrl}` : ''}`)
-                    : tr(`测试员确定性验收失败：${errors.slice(0, 2).join('；') || '规则校验未通过'}`,
-                        `Tester deterministic gate failed: ${errors.slice(0, 2).join('; ') || 'rule check failed'}`));
-                addConsoleLog(`[progress] #${sid} stage=tester_visual_gate ok=${String(ok)} smoke=${smokeStatus}`);
+                    ? tr(
+                        `测试员确定性验收通过。${smokeStatus ? ` smoke=${smokeStatus}。` : ''}${visualStatus && visualStatus !== 'skipped' ? ` 视觉回归=${visualStatus}。` : ''}${visualSummary ? ` ${visualSummary}` : ''}${previewUrl ? ` 预览：${previewUrl}` : ''}`,
+                        `Tester deterministic gate passed.${smokeStatus ? ` smoke=${smokeStatus}.` : ''}${visualStatus && visualStatus !== 'skipped' ? ` visual=${visualStatus}.` : ''}${visualSummary ? ` ${visualSummary}` : ''}${previewUrl ? ` Preview: ${previewUrl}` : ''}`,
+                    )
+                    : tr(
+                        `测试员确定性验收失败：${errors.slice(0, 2).join('；') || '规则校验未通过'}${visualSummary ? `。${visualSummary}` : ''}${warnings.length ? `。警告：${warnings.slice(0, 2).join('；')}` : ''}`,
+                        `Tester deterministic gate failed: ${errors.slice(0, 2).join('; ') || 'rule check failed'}${visualSummary ? `. ${visualSummary}` : ''}${warnings.length ? `. Warnings: ${warnings.slice(0, 2).join('; ')}` : ''}`,
+                    ));
+                const canvasNodeId = subtaskNodeMap.current[sid];
+                if (canvasNodeId) {
+                    appendCanvasNodeLog(canvasNodeId, {
+                        ts: Date.now(),
+                        msg: ok
+                            ? tr(
+                                `测试员确定性验收通过。${visualSummary || '视觉基线稳定。'}`,
+                                `Tester deterministic gate passed. ${visualSummary || 'Visual baseline stayed stable.'}`,
+                            )
+                            : tr(
+                                `测试员确定性验收失败：${errors.slice(0, 2).join('；') || '规则校验未通过'}${visualSummary ? `。${visualSummary}` : ''}`,
+                                `Tester deterministic gate failed: ${errors.slice(0, 2).join('; ') || 'rule check failed'}${visualSummary ? `. ${visualSummary}` : ''}`,
+                            ),
+                        type: ok ? (visualStatus === 'warn' ? 'warn' : 'ok') : 'error',
+                    });
+                }
+                addConsoleLog(`[progress] #${sid} stage=tester_visual_gate ok=${String(ok)} smoke=${smokeStatus} visual=${visualStatus}`);
             } else if (stage === 'requeue_downstream') {
                 if (sid) appendSubtaskTimeline(sid, String(msg.message || '').slice(0, 220));
+                const requeueSubtasks = Array.isArray(msg.requeue_subtasks)
+                    ? msg.requeue_subtasks.map(String)
+                    : Array.isArray(msg.requeueSubtasks)
+                        ? msg.requeueSubtasks.map(String)
+                        : [];
+                for (const resetId of requeueSubtasks) {
+                    if (!resetId) continue;
+                    const canvasNodeId = subtaskNodeMap.current[resetId]
+                        || nodes.find((node) => {
+                            const data = (node.data || {}) as Record<string, unknown>;
+                            return String(data.subtaskId || '').trim() === resetId
+                                || String(data.nodeExecutionId || '').trim() === resetId;
+                        })?.id
+                        || '';
+                    const prevRuntime = runSubtasksRef.current[resetId] || {};
+                    runSubtasksRef.current[resetId] = {
+                        ...prevRuntime,
+                        status: 'queued',
+                        error: '',
+                        output: '',
+                        startedAt: 0,
+                        endedAt: 0,
+                        durationSeconds: 0,
+                    };
+                    appendSubtaskTimeline(resetId, tr('审查退回，节点已重置并等待重新执行。', 'Reviewer requested rework; node reset and queued again.'));
+                    if (canvasNodeId) {
+                        updateNodeData(canvasNodeId, {
+                            status: 'queued',
+                            progress: 0,
+                            phase: 'requeued',
+                            startedAt: 0,
+                            endedAt: 0,
+                            durationSeconds: 0,
+                            outputSummary: '',
+                            lastOutput: '',
+                            error: '',
+                            _terminalStatus: false,
+                        });
+                    }
+                }
                 addConsoleLog(`[progress] #${sid} stage=requeue_downstream msg=${String(msg.message || '').slice(0, 220)}`);
             } else if (stage === 'model_downgrade') {
                 const fromModel = String(msg.from_model || '');
@@ -1058,34 +1475,44 @@ export function useRuntimeConnection({
                 // §PROGRESS-FIX: Update canvas node with live progress during execution
                 const canvasNodeId = subtaskNodeMap.current[sid];
                 if (canvasNodeId) {
-                    // Smooth progress: 5 → 90 over agent-specific timeout period
-                    const agentTimeouts: Record<string, number> = { builder: 900, analyst: 480, reviewer: 420, planner: 120, tester: 360, deployer: 360 };
-                    const agentTimeout = agentTimeouts[agent.toLowerCase()] || 360;
-                    const progressPct = Math.min(90, Math.round(5 + (elapsed / agentTimeout) * 85));
-                    const rawMsg = String(msg.partial_output || msg.message || '');
+                    // §F2-2: Skip heartbeat progress updates for nodes that already reached terminal status
                     const existingNode = nodes.find((node) => node.id === canvasNodeId);
                     const existingData = (existingNode?.data || {}) as Record<string, unknown>;
-                    const incomingSkills = Array.isArray(msg.loaded_skills) ? (msg.loaded_skills as string[]) : [];
-                    const existingSkills = Array.isArray(existingData.loadedSkills) ? (existingData.loadedSkills as string[]) : [];
-                    const mergedSkills = existingSkills.length > 0 ? existingSkills : incomingSkills;
-                    const humanActivity = buildReadableCurrentWork({
-                        lang,
-                        nodeType: String(existingData.nodeType || agent || 'builder'),
-                        status: 'running',
-                        phase: String(existingData.phase || ''),
-                        taskDescription: String(existingData.taskDescription || ''),
-                        loadedSkills: mergedSkills,
-                        outputSummary: rawMsg,
-                        lastOutput: rawMsg,
-                        logs: Array.isArray(existingData.log) ? (existingData.log as Array<{ ts?: number; msg?: string; type?: string }>) : [],
-                        durationText: `${elapsed}s`,
-                    });
-                    updateNodeData(canvasNodeId, {
-                        progress: progressPct,
-                        status: 'running',
-                        outputSummary: humanActivity,
-                        ...(mergedSkills.length > 0 && existingSkills.length === 0 ? { loadedSkills: mergedSkills } : {}),
-                    });
+                    const terminalStatuses = ['passed', 'failed', 'blocked', 'completed', 'done', 'error'];
+                    if (existingData._terminalStatus || terminalStatuses.includes(String(existingData.status || ''))) {
+                        // Node already completed — do NOT overwrite progress or status from heartbeat
+                    } else {
+                        // Smooth progress: 5 → 90 over agent-specific timeout period
+                        const agentTimeouts: Record<string, number> = { builder: 960, analyst: 540, reviewer: 480, planner: 120, tester: 480, deployer: 300, debugger: 600 };
+                        const agentTimeout = agentTimeouts[agent.toLowerCase()] || 360;
+                        const progressPct = Math.min(90, Math.round(5 + (elapsed / agentTimeout) * 85));
+                        const rawMsg = String(msg.partial_output || msg.message || '');
+                        const incomingSkills = Array.isArray(msg.loaded_skills) ? (msg.loaded_skills as string[]) : [];
+                        const existingSkills = Array.isArray(existingData.loadedSkills) ? (existingData.loadedSkills as string[]) : [];
+                        const mergedSkills = existingSkills.length > 0 ? existingSkills : incomingSkills;
+                        const humanActivity = buildReadableCurrentWork({
+                            lang,
+                            nodeType: String(existingData.nodeType || agent || 'builder'),
+                            status: 'running',
+                            phase: String(existingData.phase || ''),
+                            taskDescription: String(existingData.taskDescription || ''),
+                            loadedSkills: mergedSkills,
+                            outputSummary: rawMsg,
+                            lastOutput: rawMsg,
+                            logs: Array.isArray(existingData.log) ? (existingData.log as Array<{ ts?: number; msg?: string; type?: string }>) : [],
+                            durationText: `${elapsed}s`,
+                        });
+                        // Live duration update: calculate from startedAt so the timer never freezes
+                        const nodeStartedAt = Number(existingData.startedAt) || runStartedAtRef.current;
+                        const liveDuration = Math.max(0, Math.round((Date.now() - nodeStartedAt) / 1000));
+                        updateNodeData(canvasNodeId, {
+                            progress: progressPct,
+                            status: 'running',
+                            outputSummary: humanActivity,
+                            durationSeconds: liveDuration,
+                            ...(mergedSkills.length > 0 && existingSkills.length === 0 ? { loadedSkills: mergedSkills } : {}),
+                        });
+                    }
                 }
                 const nowMs = Date.now();
                 const last = waitingAiLastNotifyRef.current[sid] || 0;
@@ -1370,11 +1797,17 @@ export function useRuntimeConnection({
                     : status === 'running'
                         ? 5
                         : 0;
+                const hasPartialOutputSummary = payload.partialOutputSummary !== undefined;
+                const hasFinalOutputSummary = payload.outputSummary !== undefined;
+                const hasOutputSummaryField = hasPartialOutputSummary || hasFinalOutputSummary;
+                const hasStartedAtField = payload.startedAt !== undefined;
+                const hasEndedAtField = payload.endedAt !== undefined;
+                const hasTimingFields = hasStartedAtField || hasEndedAtField;
                 const startedAtMs = normalizeEpochMs(payload.startedAt, 0);
                 const endedAtMs = normalizeEpochMs(payload.endedAt, 0);
                 const durationSeconds = deriveDurationSeconds(startedAtMs, endedAtMs);
-                const partialOutputSummary = String(payload.partialOutputSummary || '').trim();
-                const finalOutputSummary = String(payload.outputSummary || '').trim();
+                const partialOutputSummary = hasPartialOutputSummary ? String(payload.partialOutputSummary || '').trim() : '';
+                const finalOutputSummary = hasFinalOutputSummary ? String(payload.outputSummary || '').trim() : '';
                 const outputSummary = partialOutputSummary || finalOutputSummary;
                 const nodeLabel = String(payload.nodeLabel || payload.nodeKey || neId).slice(0, 80);
                 const existingNode = nodes.find((node) => node.id === canvasNodeId);
@@ -1406,7 +1839,7 @@ export function useRuntimeConnection({
                 if (payload.costDelta !== undefined && !payload.cost) updatePayload.cost = Number(payload.costDelta);
                 if (payload.assignedModel) updatePayload.assignedModel = String(payload.assignedModel);
                 if (payload.inputSummary !== undefined) updatePayload.taskDescription = String(payload.inputSummary || '');
-                if (outputSummary) {
+                if (hasOutputSummaryField) {
                     updatePayload.outputSummary = humanOutputSummary || outputSummary;
                     updatePayload.lastOutput = outputSummary;
                 }
@@ -1414,9 +1847,12 @@ export function useRuntimeConnection({
                     updatePayload.loadedSkills = mergedSkills;
                 }
                 if (phaseValue) updatePayload.phase = phaseValue;
-                if (startedAtMs > 0) updatePayload.startedAt = startedAtMs;
-                if (endedAtMs > 0) updatePayload.endedAt = endedAtMs;
-                if (durationSeconds !== undefined) updatePayload.durationSeconds = durationSeconds;
+                if (payload.errorMessage !== undefined) updatePayload.error = String(payload.errorMessage || '').trim();
+                if (hasStartedAtField) updatePayload.startedAt = startedAtMs;
+                if (hasEndedAtField) updatePayload.endedAt = endedAtMs;
+                if (hasTimingFields) updatePayload.durationSeconds = durationSeconds ?? 0;
+                if (status === 'queued' || status === 'running') updatePayload._terminalStatus = false;
+                if (['passed', 'failed', 'cancelled', 'skipped'].includes(status)) updatePayload._terminalStatus = true;
                 updateNodeData(canvasNodeId, updatePayload);
                 if (Array.isArray(payload.activityLog) && payload.activityLog.length > 0) {
                     const normalizedActivityLog = (payload.activityLog as Array<{ ts?: number; msg?: string; type?: string }>)

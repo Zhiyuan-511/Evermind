@@ -2,6 +2,7 @@
 
 import { NODE_TYPES } from '@/lib/types';
 import { useState } from 'react';
+import FileExplorerPanel from './FileExplorerPanel';
 
 interface SidebarProps {
     onDragStart: (type: string) => void;
@@ -10,19 +11,21 @@ interface SidebarProps {
     onOpenArtifacts?: () => void;
     onOpenReports?: () => void;
     onOpenSkillsLibrary?: () => void;
-
+    onOpenFile?: (filePath: string, root: string, content: string, ext: string) => void;
 }
 
 const CATEGORIES = [
-    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['router', 'planner', 'builder', 'tester', 'reviewer', 'deployer', 'debugger', 'analyst', 'scribe'] },
+    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['router', 'planner', 'analyst', 'builder', 'polisher', 'reviewer', 'tester', 'deployer', 'debugger', 'scribe'] },
     { key: 'tools', label_en: 'Local Execution', label_zh: '本地执行', types: ['localshell', 'fileread', 'filewrite', 'screenshot', 'browser', 'gitops', 'uicontrol'] },
     { key: 'media', label_en: 'Art & Media', label_zh: '美术 & 媒体', types: ['imagegen', 'bgremove', 'spritesheet', 'assetimport', 'merger'] },
 ];
 
-export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts, onOpenReports, onOpenSkillsLibrary }: SidebarProps) {
+export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts, onOpenReports, onOpenSkillsLibrary, onOpenFile }: SidebarProps) {
+
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
     const [search, setSearch] = useState('');
     const [sidebarOpen, setSidebarOpen] = useState(true);
+    const [sidebarMode, setSidebarMode] = useState<'nodes' | 'files'>('nodes');
 
     const matchesSearch = (type: string) => {
         if (!search) return true;
@@ -79,46 +82,82 @@ export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts,
                         <span className="text-[var(--text3)]">{connected ? (lang === 'zh' ? '后端已连接' : 'Backend connected') : (lang === 'zh' ? '离线模式' : 'Offline mode')}</span>
                     </div>
 
-                    {/* Quick Actions: Files / Reports / Skills */}
-                    <div className="px-3 py-2.5 border-b border-white/5 grid" style={{ gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 8 }}>
+                    {/* Mode tabs: Nodes / Files */}
+                    <div className="px-3 py-2 border-b border-white/5 flex gap-1">
                         <button
-                            className="btn text-[10px] flex-1"
-                            onClick={onOpenArtifacts}
-                            title={lang === 'zh' ? '查看生成文件' : 'Open artifacts'}
+                            className="text-[10px] flex-1"
+                            onClick={() => setSidebarMode('nodes')}
                             style={{
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                                padding: '7px 10px', borderRadius: 8,
-                                background: 'rgba(108,92,231,0.08)', border: '1px solid rgba(108,92,231,0.2)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                                padding: '6px 0', borderRadius: 6,
+                                fontWeight: sidebarMode === 'nodes' ? 700 : 500,
+                                color: sidebarMode === 'nodes' ? 'var(--blue)' : 'var(--text3)',
+                                background: sidebarMode === 'nodes' ? 'rgba(79,143,255,0.12)' : 'transparent',
+                                border: sidebarMode === 'nodes' ? '1px solid rgba(79,143,255,0.25)' : '1px solid transparent',
+                                cursor: 'pointer',
+                                transition: 'all 0.15s',
                             }}
                         >
-                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#6c5ce7', flexShrink: 0 }} /> {lang === 'zh' ? '文件' : 'Files'}
+                            📦 {lang === 'zh' ? '节点' : 'Nodes'}
                         </button>
                         <button
-                            className="btn text-[10px] flex-1"
-                            onClick={onOpenReports}
-                            title={lang === 'zh' ? '查看执行报告' : 'Open reports'}
+                            className="text-[10px] flex-1"
+                            onClick={() => setSidebarMode('files')}
                             style={{
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                                padding: '7px 10px', borderRadius: 8,
-                                background: 'rgba(0,206,201,0.08)', border: '1px solid rgba(0,206,201,0.2)',
+                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                                padding: '6px 0', borderRadius: 6,
+                                fontWeight: sidebarMode === 'files' ? 700 : 500,
+                                color: sidebarMode === 'files' ? '#6c5ce7' : 'var(--text3)',
+                                background: sidebarMode === 'files' ? 'rgba(108,92,231,0.12)' : 'transparent',
+                                border: sidebarMode === 'files' ? '1px solid rgba(108,92,231,0.25)' : '1px solid transparent',
+                                cursor: 'pointer',
+                                transition: 'all 0.15s',
                             }}
                         >
-                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#00cec9', flexShrink: 0 }} /> {lang === 'zh' ? '报告' : 'Reports'}
-                        </button>
-                        <button
-                            className="btn text-[10px] flex-1"
-                            onClick={onOpenSkillsLibrary}
-                            title={lang === 'zh' ? '打开技能库 / 资源库' : 'Open skills library'}
-                            style={{
-                                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-                                padding: '7px 10px', borderRadius: 8,
-                                background: 'rgba(79,143,255,0.08)', border: '1px solid rgba(79,143,255,0.2)',
-                            }}
-                        >
-                            <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#4f8fff', flexShrink: 0 }} /> {lang === 'zh' ? '技能库' : 'Skills'}
+                            📁 {lang === 'zh' ? '文件' : 'Files'}
                         </button>
                     </div>
 
+                    {/* Quick Actions: Reports / Skills (shown only in nodes mode) */}
+                    {sidebarMode === 'nodes' && (
+                        <div className="px-3 py-2.5 border-b border-white/5 grid" style={{ gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 8 }}>
+                            <button
+                                className="btn text-[10px] flex-1"
+                                onClick={onOpenReports}
+                                title={lang === 'zh' ? '查看执行报告' : 'Open reports'}
+                                style={{
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                                    padding: '7px 10px', borderRadius: 8,
+                                    background: 'rgba(0,206,201,0.08)', border: '1px solid rgba(0,206,201,0.2)',
+                                }}
+                            >
+                                <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#00cec9', flexShrink: 0 }} /> {lang === 'zh' ? '报告' : 'Reports'}
+                            </button>
+                            <button
+                                className="btn text-[10px] flex-1"
+                                onClick={onOpenSkillsLibrary}
+                                title={lang === 'zh' ? '打开技能库 / 资源库' : 'Open skills library'}
+                                style={{
+                                    display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
+                                    padding: '7px 10px', borderRadius: 8,
+                                    background: 'rgba(79,143,255,0.08)', border: '1px solid rgba(79,143,255,0.2)',
+                                }}
+                            >
+                                <span style={{ width: 8, height: 8, borderRadius: '50%', background: '#4f8fff', flexShrink: 0 }} /> {lang === 'zh' ? '技能库' : 'Skills'}
+                            </button>
+                        </div>
+                    )}
+
+                    {/* FILE EXPLORER MODE */}
+                    {sidebarMode === 'files' && (
+                        <div className="flex-1 overflow-hidden">
+                            <FileExplorerPanel lang={lang} onOpenFile={onOpenFile} />
+                        </div>
+                    )}
+
+                    {/* NODE PALETTE MODE */}
+                    {sidebarMode === 'nodes' && (
+                    <>
                     {/* Search */}
                     <div className="px-3 py-2 border-b border-white/5">
                         <input
@@ -186,6 +225,8 @@ export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts,
                             {lang === 'zh' ? '拖拽节点到画布' : 'Drag nodes to canvas'}
                         </div>
                     </div>
+                    </>
+                    )}
                 </aside>
             )}
         </>
