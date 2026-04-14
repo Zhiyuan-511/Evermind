@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from plugins.implementations import BrowserPlugin
+from plugins.implementations import BrowserPlugin, SourceFetchPlugin
 from plugins.base import PluginResult
 
 
@@ -113,6 +113,15 @@ class _FakeEventPage(_FakePage):
 
 
 class TestBrowserPluginRefResolution(unittest.IsolatedAsyncioTestCase):
+    async def test_resolve_headless_sticks_after_visible_browser_failure(self):
+        plugin = BrowserPlugin()
+
+        self.assertFalse(plugin._resolve_headless({"browser_headful": True}))
+
+        plugin._force_headless_session = True
+
+        self.assertTrue(plugin._resolve_headless({"browser_headful": True}))
+
     async def test_ignored_failed_request_hosts_skip_font_noise(self):
         plugin = BrowserPlugin()
         page = _FakeEventPage()
@@ -222,6 +231,45 @@ class TestBrowserPluginRefResolution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["base_data"]["scroll_y"], 1200)
         self.assertTrue(kwargs["base_data"]["at_bottom"])
         self.assertFalse(kwargs["base_data"]["can_scroll_more"])
+
+
+class TestSourceFetchPlugin(unittest.IsolatedAsyncioTestCase):
+    async def test_github_blob_urls_are_rewritten_to_raw_when_prefer_code(self):
+        plugin = SourceFetchPlugin()
+        raw_url = plugin._normalize_source_url(
+            "https://github.com/example/repo/blob/main/src/game.js",
+            prefer_code=True,
+        )
+        self.assertEqual(raw_url, "https://raw.githubusercontent.com/example/repo/main/src/game.js")
+
+    async def test_execute_reports_requested_and_resolved_url_for_github_blob(self):
+        plugin = SourceFetchPlugin()
+        plugin._fetch_with_crawl4ai = AsyncMock(return_value=None)
+        plugin._fetch_with_urllib = AsyncMock(return_value={
+            "url": "https://raw.githubusercontent.com/example/repo/main/src/game.js",
+            "engine": "urllib",
+            "source_kind": "raw_text",
+            "title": "game.js",
+            "content": "export const ready = true;",
+            "code_blocks": ["export const ready = true;"],
+        })
+
+        result = await plugin.execute({
+            "url": "https://github.com/example/repo/blob/main/src/game.js",
+            "prefer_code": True,
+        })
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.data["requested_url"],
+            "https://github.com/example/repo/blob/main/src/game.js",
+        )
+        self.assertEqual(
+            result.data["resolved_url"],
+            "https://raw.githubusercontent.com/example/repo/main/src/game.js",
+        )
+        self.assertEqual(result.data["engine"], "urllib")
+        self.assertEqual(result.data["source_kind"], "raw_text")
 
     async def test_execute_record_scroll_returns_artifact_metadata(self):
         plugin = BrowserPlugin()

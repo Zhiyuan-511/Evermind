@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { type TaskCard, type TaskStatus, type TaskPriority, type TaskMode, BOARD_COLUMNS, type RunReportRecord, type RunRecord, type RunStatus, type NodeExecutionRecord } from '@/lib/types';
+import { BOARD_COLUMNS, type RunReportRecord, type RunRecord, type RunStatus, type NodeExecutionRecord } from '@/lib/types';
 import { getBoardSummary } from '@/lib/api';
 import { useTaskContext, useRunContext } from '@/contexts/TaskRunProvider';
 import TaskDetailPanel from './TaskDetailPanel';
@@ -13,13 +13,6 @@ interface TaskBoardModalProps {
     sessionId?: string;
     runReports?: RunReportRecord[];
 }
-
-const PRIORITY_COLORS: Record<TaskPriority, string> = {
-    urgent: '#ef4444',
-    high: '#f59e0b',
-    medium: '#3b82f6',
-    low: '#64748b',
-};
 
 const SUB_STATUS_LABELS: Record<string, Record<string, string>> = {
     en: { review: '🔍 Under Review', selfcheck: '🧪 Self-Checking', executing: '⚡ Executing' },
@@ -62,12 +55,9 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
         tasks,
         selectedTask,
         selectTask,
-        loading,
         fetchTasks,
-        createTask,
         updateTask,
         transitionTask,
-        tasksByStatus,
         refreshTask,
     } = useTaskContext();
     const { runs, nodeExecutions } = useRunContext();
@@ -130,19 +120,15 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
     }, [activeNodeLabelsByTask, nodeExecutions, runs]);
 
     useEffect(() => {
-        if (open) {
-            void fetchTasks();
+        if (!open) return;
+        void fetchTasks();
+        const timer = window.setTimeout(() => {
             void refreshBoardSummary();
-        }
+        }, 0);
+        return () => {
+            window.clearTimeout(timer);
+        };
     }, [open, fetchTasks, refreshBoardSummary]);
-
-    useEffect(() => {
-        if (!open) {
-            selectTask(null);
-            setLatestRuns({});
-            setActiveNodeLabelsByTask({});
-        }
-    }, [open, selectTask]);
 
     // B-4: Auto-select the latest executing task when board opens
     useEffect(() => {
@@ -158,13 +144,13 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
     }, [open, selectedTask, tasks, selectTask]);
 
     useEffect(() => {
-        if (!open) return;
-        if (tasks.length === 0) {
-            setLatestRuns({});
-            setActiveNodeLabelsByTask({});
-            return;
-        }
-        void refreshBoardSummary();
+        if (!open || tasks.length === 0) return;
+        const timer = window.setTimeout(() => {
+            void refreshBoardSummary();
+        }, 0);
+        return () => {
+            window.clearTimeout(timer);
+        };
     }, [open, refreshBoardSummary, tasks.length]);
 
     useEffect(() => {
@@ -177,21 +163,27 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
             return;
         }
 
-        void refreshBoardSummary();
+        // V4.3 PERF: Relaxed from 3s to 8s
         const timer = window.setInterval(() => {
             void refreshBoardSummary();
-        }, 3000);
+        }, 8000);
         return () => {
             window.clearInterval(timer);
         };
     }, [latestRuns, open, refreshBoardSummary, tasks]);
 
     const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
+    const handleClose = useCallback(() => {
+        selectTask(null);
+        setLatestRuns({});
+        setActiveNodeLabelsByTask({});
+        onClose();
+    }, [onClose, selectTask]);
 
     if (!open) return null;
 
     return (
-        <div className="modal-overlay" onClick={onClose}>
+        <div className="modal-overlay" onClick={handleClose}>
             <div
                 className="modal-container"
                 style={{ width: '95vw', maxWidth: 1400, maxHeight: '90vh' }}
@@ -217,7 +209,7 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
                         >
                             🔄 {tr('刷新', 'Refresh')}
                         </button>
-                        <button className="modal-close" onClick={onClose}>✕</button>
+                        <button className="modal-close" onClick={handleClose}>✕</button>
                     </div>
                 </div>
 
@@ -452,7 +444,7 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
                         task={selectedTask}
                         lang={lang}
                         onClose={() => selectTask(null)}
-                        onBoardClose={onClose}
+                        onBoardClose={handleClose}
                         onTransition={(newStatus) => { void transitionTask(selectedTask.id, newStatus); }}
                         onUpdate={(data) => { void updateTask(selectedTask.id, data); }}
                         onRunActivity={async () => {

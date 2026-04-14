@@ -98,10 +98,26 @@ class NodeExecutor:
                             "completed": len(done),
                             "total": len(nodes)
                         })
+                    else:
+                        # v3.1: Nodes are stuck — not done, not errored, but no ready nodes.
+                        # Likely a dependency that failed without being marked as error.
+                        stuck = [n["id"] for n in nodes if n["id"] not in done and self._node_status(n) != "error"]
+                        logger.warning("Workflow stalled: %d stuck nodes: %s", len(stuck), stuck[:5])
+                        await self.emit("workflow_error", {
+                            "error": f"Workflow stalled: {len(stuck)} nodes stuck with unresolved dependencies",
+                            "stuck_nodes": stuck[:10],
+                        })
                     break
 
                 tasks = [self._execute_node(node, nodes, edges, done, normalized_map, normalized_list) for node in ready]
-                await asyncio.gather(*tasks)
+                # v3.1: Use return_exceptions=True so one failing node doesn't cancel siblings
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for i, r in enumerate(results):
+                    if isinstance(r, Exception):
+                        node_id = ready[i]["id"]
+                        logger.error("Node %s raised exception: %s", node_id, str(r)[:300])
+                        self._set_node_state(ready[i], "error")
+                        done.add(node_id)
 
         except Exception as e:
             logger.error(f"Workflow execution error: {e}")

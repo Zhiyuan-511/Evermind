@@ -114,20 +114,27 @@ class TestDAGChaining:
         return run_id, nes
 
     def test_root_nodes_dispatched_first(self, ws_env):
-        """Pro template: only analyst (root) should be ready initially."""
+        """Pro template: only planner (root) should be ready initially."""
         run_id, nes = self._create_run_with_nodes(ws_env, "pro")
         result = server._auto_chain_next_node(run_id)
         assert isinstance(result, list)
         assert len(result) == 1
-        # Should be the analyst (only root node)
-        analyst_ne = [ne for ne in nes if ne["node_key"] == "analyst"][0]
-        assert result[0] == analyst_ne["id"]
+        planner_ne = [ne for ne in nes if ne["node_key"] == "planner"][0]
+        assert result[0] == planner_ne["id"]
 
     def test_parallel_dispatch_after_root(self, ws_env):
-        """Pro: analyst passed → builder1 AND builder2 should be ready (parallel)."""
+        """Pro: planner passed → analyst ready, then analyst passed → builders ready."""
         run_id, nes = self._create_run_with_nodes(ws_env, "pro")
         nes_store = task_store.get_node_execution_store()
+        planner_ne = [ne for ne in nes if ne["node_key"] == "planner"][0]
+        nes_store.transition_node(planner_ne["id"], "running")
+        nes_store.transition_node(planner_ne["id"], "passed")
+
+        result = server._auto_chain_next_node(run_id)
+        assert isinstance(result, list)
+        assert len(result) == 1
         analyst_ne = [ne for ne in nes if ne["node_key"] == "analyst"][0]
+        assert result[0] == analyst_ne["id"]
         nes_store.transition_node(analyst_ne["id"], "running")
         nes_store.transition_node(analyst_ne["id"], "passed")
 
@@ -141,11 +148,14 @@ class TestDAGChaining:
         assert ready_keys == {"builder1", "builder2"}
 
     def test_join_node_waits_for_all_deps(self, ws_env):
-        """Pro: reviewer depends on builder1+builder2. Only ready when both passed."""
+        """Pro: merger depends on builder1+builder2. Only ready when both passed."""
         run_id, nes = self._create_run_with_nodes(ws_env, "pro")
         nes_store = task_store.get_node_execution_store()
 
-        # Pass analyst
+        # Pass planner then analyst
+        planner_ne = [ne for ne in nes if ne["node_key"] == "planner"][0]
+        nes_store.transition_node(planner_ne["id"], "running")
+        nes_store.transition_node(planner_ne["id"], "passed")
         analyst_ne = [ne for ne in nes if ne["node_key"] == "analyst"][0]
         nes_store.transition_node(analyst_ne["id"], "running")
         nes_store.transition_node(analyst_ne["id"], "passed")
@@ -155,21 +165,22 @@ class TestDAGChaining:
         nes_store.transition_node(b1["id"], "running")
         nes_store.transition_node(b1["id"], "passed")
 
-        # builder2 still queued → reviewer/deployer should NOT be ready
+        # builder2 still queued → merger/reviewer/deployer should NOT be ready
         result = server._auto_chain_next_node(run_id)
         assert isinstance(result, list)
         ready_keys = {nes_store.get_node_execution(ne_id)["node_key"] for ne_id in result}
+        assert "merger" not in ready_keys
         assert "reviewer" not in ready_keys
         assert "deployer" not in ready_keys
         # builder2 should now be dispatched (its dep analyst is passed)
         assert "builder2" in ready_keys
 
     def test_join_node_ready_when_all_deps_passed(self, ws_env):
-        """Pro: both builders passed → reviewer + deployer ready."""
+        """Pro: both builders passed → merger ready, then reviewer + deployer."""
         run_id, nes = self._create_run_with_nodes(ws_env, "pro")
         nes_store = task_store.get_node_execution_store()
 
-        for key in ["analyst", "builder1", "builder2"]:
+        for key in ["planner", "analyst", "builder1", "builder2"]:
             ne = [n for n in nes if n["node_key"] == key][0]
             nes_store.transition_node(ne["id"], "running")
             nes_store.transition_node(ne["id"], "passed")
@@ -177,8 +188,15 @@ class TestDAGChaining:
         result = server._auto_chain_next_node(run_id)
         assert isinstance(result, list)
         ready_keys = {nes_store.get_node_execution(ne_id)["node_key"] for ne_id in result}
-        assert "reviewer" in ready_keys
-        assert "deployer" in ready_keys
+        assert ready_keys == {"merger"}
+
+        merger = [n for n in nes if n["node_key"] == "merger"][0]
+        nes_store.transition_node(merger["id"], "running")
+        nes_store.transition_node(merger["id"], "passed")
+
+        result = server._auto_chain_next_node(run_id)
+        ready_keys = {nes_store.get_node_execution(ne_id)["node_key"] for ne_id in result}
+        assert ready_keys == {"reviewer", "deployer"}
 
     def test_all_done_returns_sentinel(self, ws_env):
         """All nodes passed → __ALL_DONE__."""
@@ -224,7 +242,7 @@ class TestDAGChaining:
         original_output = server.OUTPUT_DIR
         try:
             server.OUTPUT_DIR = Path(out_dir)
-            for key in ["analyst", "builder1"]:
+            for key in ["planner", "analyst", "builder1"]:
                 ne = [n for n in nes if n["node_key"] == key][0]
                 nes_store.transition_node(ne["id"], "running")
                 nes_store.transition_node(ne["id"], "passed")
@@ -267,8 +285,8 @@ class TestDAGChaining:
 class TestLaunchWithDAG:
     """P3-B: launch endpoint with DAG-aware dispatch."""
 
-    def test_launch_pro_dispatches_analyst_only(self, ws_env):
-        """Pro template has analyst as only root → only analyst dispatched."""
+    def test_launch_pro_dispatches_planner_only(self, ws_env):
+        """Pro template has planner as only root → only planner dispatched."""
         created = asyncio.run(server.create_task({"title": "DAG Pro"}))
         task_id = created["task"]["id"]
 
@@ -282,16 +300,16 @@ class TestLaunchWithDAG:
             data = resp.json()
             assert data["success"]
 
-            # Only analyst should be dispatched
+            # Only planner should be dispatched
             dispatched = data.get("dispatchedNodeIds", [])
             assert len(dispatched) == 1
-            analyst_ne = [ne for ne in data["nodeExecutions"] if ne["node_key"] == "analyst"][0]
-            assert dispatched[0] == analyst_ne["id"]
-            assert analyst_ne["status"] == "running"
+            planner_ne = [ne for ne in data["nodeExecutions"] if ne["node_key"] == "planner"][0]
+            assert dispatched[0] == planner_ne["id"]
+            assert planner_ne["status"] == "running"
 
             # All others should still be queued
             for ne in data["nodeExecutions"]:
-                if ne["node_key"] != "analyst":
+                if ne["node_key"] != "planner":
                     assert ne["status"] == "queued", f"{ne['node_key']} should be queued"
 
     def test_launch_stores_depends_on_keys(self, ws_env):
@@ -308,12 +326,14 @@ class TestLaunchWithDAG:
             data = resp.json()
             nes = data["nodeExecutions"]
             # Verify deps match template
+            planner = [ne for ne in nes if ne["node_key"] == "planner"][0]
+            assert planner["depends_on_keys"] == []
             analyst = [ne for ne in nes if ne["node_key"] == "analyst"][0]
-            assert analyst["depends_on_keys"] == []
+            assert analyst["depends_on_keys"] == ["planner"]
             b1 = [ne for ne in nes if ne["node_key"] == "builder1"][0]
             assert b1["depends_on_keys"] == ["analyst"]
             reviewer = [ne for ne in nes if ne["node_key"] == "reviewer"][0]
-            assert set(reviewer["depends_on_keys"]) == {"builder1", "builder2"}
+            assert reviewer["depends_on_keys"] == ["merger"]
 
 
 class TestProgressBroadcast:

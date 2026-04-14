@@ -95,16 +95,16 @@ class PluginRegistry:
 
 # Default plugin assignments per node type
 NODE_DEFAULT_PLUGINS = {
-    # Keep autonomous web pipeline stable: prioritize deterministic local file ops.
-    "builder":   ["file_ops"],
-    "polisher":  ["file_ops"],
-    "tester":    ["file_ops", "browser"],
-    "reviewer":  ["file_ops", "browser"],
-    "deployer":  ["file_ops"],
+    # V4.3.1: All pipeline nodes get file_ops + shell (Claude Code-style agentic tools).
+    "builder":   ["file_ops", "shell"],
+    "polisher":  ["file_ops", "shell"],
+    "tester":    ["file_ops", "shell", "browser"],
+    "reviewer":  ["file_ops", "shell", "browser"],
+    "deployer":  ["file_ops", "shell"],
     "debugger":  ["file_ops", "shell"],
-    "analyst":   ["file_ops", "browser"],
-    "scribe":    [],
-    "planner":   [],
+    "analyst":   ["file_ops", "shell", "source_fetch", "browser"],
+    "scribe":    ["file_ops", "shell"],
+    "planner":   ["file_ops", "shell"],
     "router":    [],
     # Local execution nodes — these have their own built-in capabilities
     "localshell":  ["shell"],
@@ -228,6 +228,50 @@ def is_polisher_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool
     return _is_truthy(os.getenv("EVERMIND_POLISHER_ENABLE_BROWSER", "0"))
 
 
+def is_imagegen_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    When no real image backend is configured, imagegen should pivot to sourcing /
+    design-research mode instead of exposing a dead comfyui tool.
+    """
+    if is_image_generation_available(config=config):
+        return False
+    if isinstance(config, dict):
+        for key in ("imagegen_enable_browser", "imagegen_browser_enabled", "enable_imagegen_browser"):
+            if key in config:
+                return _is_truthy(config.get(key))
+        nested_imagegen = config.get("imagegen")
+        if isinstance(nested_imagegen, dict) and "enable_browser_search" in nested_imagegen:
+            return _is_truthy(nested_imagegen.get("enable_browser_search"))
+    return _is_truthy(os.getenv("EVERMIND_IMAGEGEN_ENABLE_BROWSER", "1"))
+
+
+def is_browser_runtime_available(config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Runtime availability signal for Playwright-backed browser flows.
+    Defaults to True unless an explicit runtime probe marks it unavailable.
+    """
+    explicit = _get_config_value(
+        config,
+        "playwright_available",
+        "browser_runtime_available",
+        "runtime.playwright_available",
+    )
+    if explicit is None:
+        return True
+    return _is_truthy(explicit)
+
+
+def is_browser_use_runtime_available(config: Optional[Dict[str, Any]] = None) -> bool:
+    explicit = _get_config_value(
+        config,
+        "browser_use_runtime_available",
+        "runtime.browser_use_available",
+    )
+    if explicit is not None:
+        return _is_truthy(explicit)
+    return is_browser_runtime_available(config)
+
+
 def is_qa_computer_use_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
     """
     Optional escalation path for reviewer/tester when browser-only validation is insufficient.
@@ -283,7 +327,15 @@ def is_qa_browser_use_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
 
 def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]] = None) -> List[str]:
     normalized_node_type = normalize_node_role(node_type)
-    defaults = list(NODE_DEFAULT_PLUGINS.get(normalized_node_type, []))
+    if normalized_node_type == "imagegen":
+        defaults = ["file_ops"]
+        if is_image_generation_available(config=config):
+            defaults.append("comfyui")
+        elif is_imagegen_browser_enabled(config=config):
+            defaults.append("source_fetch")
+            defaults.append("browser")
+    else:
+        defaults = list(NODE_DEFAULT_PLUGINS.get(normalized_node_type, []))
     if normalized_node_type == "builder" and is_builder_browser_enabled(config=config):
         if "browser" not in defaults:
             defaults.append("browser")
@@ -297,6 +349,10 @@ def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]
     if normalized_node_type in ("reviewer", "tester") and is_qa_computer_use_enabled(config=config):
         if "computer_use" not in defaults:
             defaults.append("computer_use")
+    if "browser" in defaults and not is_browser_runtime_available(config=config):
+        defaults = [name for name in defaults if name != "browser"]
+    if "browser_use" in defaults and not is_browser_use_runtime_available(config=config):
+        defaults = [name for name in defaults if name != "browser_use"]
     return defaults
 
 
@@ -317,7 +373,20 @@ def sanitize_plugin_names_for_node(
             continue
         if normalized_node_type == "polisher" and name == "browser" and not is_polisher_browser_enabled(config=config):
             continue
-        if normalized_node_type in ("reviewer", "tester") and name == "browser_use" and not is_qa_browser_use_enabled(config=config):
+        if name == "browser" and not is_browser_runtime_available(config=config):
+            continue
+        if (
+            normalized_node_type == "imagegen"
+            and name in {"browser", "source_fetch"}
+            and not is_imagegen_browser_enabled(config=config)
+        ):
+            continue
+        if normalized_node_type == "imagegen" and name == "comfyui" and not is_image_generation_available(config=config):
+            continue
+        if normalized_node_type in ("reviewer", "tester") and name == "browser_use" and (
+            not is_qa_browser_use_enabled(config=config)
+            or not is_browser_use_runtime_available(config=config)
+        ):
             continue
         if normalized_node_type in ("reviewer", "tester") and name == "computer_use" and not is_qa_computer_use_enabled(config=config):
             continue
@@ -331,6 +400,7 @@ def resolve_enabled_plugins_for_node(
     explicit_plugins: Optional[List[str]] = None,
     config: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
+    normalized_node_type = normalize_node_role(node_type)
     defaults = get_default_plugins_for_node(node_type, config=config)
     has_explicit_plugins = any(str(item or "").strip() for item in (explicit_plugins or []))
     if not has_explicit_plugins:
@@ -339,6 +409,10 @@ def resolve_enabled_plugins_for_node(
     resolved = sanitize_plugin_names_for_node(node_type, explicit_plugins, config=config)
     if "file_ops" in defaults and "file_ops" not in resolved:
         resolved.insert(0, "file_ops")
+    if normalized_node_type == "imagegen":
+        for required in defaults:
+            if required != "file_ops" and required not in resolved:
+                resolved.append(required)
     return resolved
 
 

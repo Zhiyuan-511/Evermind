@@ -1,5 +1,4 @@
 'use client';
-
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
     ReactFlow, MiniMap, Controls, Background, BackgroundVariant,
@@ -24,6 +23,7 @@ import PreviewCenter from '@/components/PreviewCenter';
 import OpenClawPanel from '@/components/OpenClawPanel';
 import type { ConnectorEvent } from '@/components/OpenClawPanel';
 import { NODE_TYPES } from '@/lib/types';
+import { OPENCLAW_UI_ENABLED, normalizeRuntimeModeForDisplay } from '@/lib/runtimeDisplay';
 
 import { useChatHistory } from '@/hooks/useChatHistory';
 import { useRunReports } from '@/hooks/useRunReports';
@@ -33,10 +33,11 @@ import { TaskRunProvider, useTaskContext, useRunContext } from '@/contexts/TaskR
 
 const THEME_STORAGE_KEY = 'evermind-theme';
 const RUNTIME_STORAGE_KEY = 'evermind-runtime';
-
 const nodeTypes = { agent: AgentNode };
-const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'waiting_review', 'waiting_selfcheck', 'done', 'completed', 'failed']);
+const ACTIVE_RUN_STATUSES = new Set(['queued', 'running', 'waiting_review', 'waiting_selfcheck']);
 const HYDRATABLE_TASK_STATUSES = new Set(['executing', 'review', 'selfcheck', 'done', 'completed']);
+const HYDRATION_ACTIVE_STATUSES = new Set(['running', 'queued', 'waiting_review', 'waiting_selfcheck', 'executing']);
+const TERMINAL_NE_STATUSES = new Set(['passed', 'failed', 'skipped', 'cancelled', 'done', 'completed']);
 
 function isActiveRunStatus(status?: string | null): boolean {
     return ACTIVE_RUN_STATUSES.has(String(status || '').trim().toLowerCase());
@@ -101,6 +102,55 @@ function normalizeNodeLog(log: unknown): Array<{ ts: number; msg: string; type: 
     }, []);
 }
 
+function findWorkflowNodeByRuntimeIdentity(
+    nodes: Node[],
+    options: {
+        nodeExecutionId?: string;
+        rawNodeKey?: string;
+        normalizedType?: string;
+        label?: string;
+    },
+): Node | undefined {
+    const nodeExecutionId = String(options.nodeExecutionId || '').trim();
+    const rawNodeKey = String(options.rawNodeKey || '').trim().toLowerCase();
+    const normalizedType = String(options.normalizedType || '').trim().toLowerCase();
+    const label = String(options.label || '').trim();
+
+    if (nodeExecutionId) {
+        const exactExecutionMatch = nodes.find((node) =>
+            String(node.data?.nodeExecutionId || '').trim() === nodeExecutionId,
+        );
+        if (exactExecutionMatch) return exactExecutionMatch;
+    }
+
+    if (rawNodeKey) {
+        const exactKeyMatches = nodes.filter((node) => {
+            const nodeType = String(node.data?.nodeType || '').trim().toLowerCase();
+            const storedRawNodeKey = String(node.data?.rawNodeKey || '').trim().toLowerCase();
+            return storedRawNodeKey === rawNodeKey || nodeType === rawNodeKey;
+        });
+        if (exactKeyMatches.length === 1) return exactKeyMatches[0];
+    }
+
+    if (rawNodeKey && normalizedType && rawNodeKey === normalizedType) {
+        const normalizedMatches = nodes.filter((node) => {
+            const nodeType = String(node.data?.nodeType || '').trim().toLowerCase();
+            const storedRawNodeKey = String(node.data?.rawNodeKey || '').trim().toLowerCase();
+            return nodeType === normalizedType || storedRawNodeKey === normalizedType;
+        });
+        if (normalizedMatches.length === 1) return normalizedMatches[0];
+    }
+
+    if (label) {
+        const labelMatches = nodes.filter((node) =>
+            String(node.data?.label || '').trim() === label,
+        );
+        if (labelMatches.length === 1) return labelMatches[0];
+    }
+
+    return undefined;
+}
+
 export default function EditorPage() {
     return (
         <TaskRunProvider>
@@ -122,6 +172,7 @@ function EditorPageInner() {
     const [wsUrl, setWsUrl] = useState(process.env.NEXT_PUBLIC_WS_URL || 'ws://127.0.0.1:8765/ws');
     const [difficulty, setDifficulty] = useState<'simple' | 'standard' | 'pro'>('standard');
     const [selectedRuntime, setSelectedRuntime] = useState<'local' | 'openclaw'>(() => {
+        if (!OPENCLAW_UI_ENABLED) return 'local';
         if (typeof window === 'undefined') return 'local';
         try {
             const saved = window.localStorage.getItem(RUNTIME_STORAGE_KEY);
@@ -130,6 +181,7 @@ function EditorPageInner() {
             return 'local';
         }
     });
+    const effectiveSelectedRuntime: 'local' | 'openclaw' = OPENCLAW_UI_ENABLED ? selectedRuntime : 'local';
 
     // §2.1: Read env query param for DEV/PACKAGED badge
     const envTag = useMemo(() => {
@@ -145,75 +197,115 @@ function EditorPageInner() {
     }, [theme]);
 
     useEffect(() => {
-        try { window.localStorage.setItem(RUNTIME_STORAGE_KEY, selectedRuntime); } catch { /* ignore */ }
-    }, [selectedRuntime]);
+        try { window.localStorage.setItem(RUNTIME_STORAGE_KEY, effectiveSelectedRuntime); } catch { /* ignore */ }
+    }, [effectiveSelectedRuntime]);
 
     // ── P0-1: Canonical state from context ──
     const taskCtx = useTaskContext();
     const runCtx = useRunContext();
+    const {
+        tasks,
+        selectedTask,
+        fetchTasks,
+        selectTask,
+        mergeTask,
+    } = taskCtx;
+    const {
+        runs,
+        selectedRun,
+        latestRun,
+        nodeExecutions,
+        fetchRuns,
+        fetchNodeExecutions,
+        selectRun,
+        mergeRun,
+        mergeNodeExecution,
+    } = runCtx;
     const reconnectRunIds = useMemo(
-        () => runCtx.runs
-            .filter((run) => run.runtime === 'openclaw' && run.status === 'running')
+        () => runs
+            .filter((run) => OPENCLAW_UI_ENABLED && run.runtime === 'openclaw' && run.status === 'running')
             .map((run) => run.id),
-        [runCtx.runs],
+        [runs],
     );
     const preferredTaskForHydration = useMemo(() => (
-        [...taskCtx.tasks]
+        [...tasks]
             .filter((task) => isHydratableTaskStatus(task.status))
             .sort((a, b) => b.updatedAt - a.updatedAt)[0] || null
-    ), [taskCtx.tasks]);
+    ), [tasks]);
     const preferredRunForHydration = useMemo(() => {
-        const activeOpenClawRuns = runCtx.runs
-            .filter((run) => run.runtime === 'openclaw' && isActiveRunStatus(run.status))
+        const activeOpenClawRuns = runs
+            .filter((run) => OPENCLAW_UI_ENABLED && run.runtime === 'openclaw' && isActiveRunStatus(run.status))
             .sort((a, b) => b.updated_at - a.updated_at);
         if (activeOpenClawRuns.length > 0) return activeOpenClawRuns[0];
 
-        const activeRuns = runCtx.runs
+        const activeRuns = runs
             .filter((run) => isActiveRunStatus(run.status))
             .sort((a, b) => b.updated_at - a.updated_at);
         return activeRuns[0] || null;
-    }, [runCtx.runs]);
+    }, [runs]);
     const activeRun = useMemo(() => {
-        const activeOpenClawRuns = runCtx.runs
-            .filter((run) => run.runtime === 'openclaw' && isActiveRunStatus(run.status))
+        const activeOpenClawRuns = runs
+            .filter((run) => OPENCLAW_UI_ENABLED && run.runtime === 'openclaw' && isActiveRunStatus(run.status))
             .sort((a, b) => b.updated_at - a.updated_at);
         if (activeOpenClawRuns.length > 0) return activeOpenClawRuns[0];
 
-        const activeRuns = runCtx.runs
+        const activeRuns = runs
             .filter((run) => isActiveRunStatus(run.status))
             .sort((a, b) => b.updated_at - a.updated_at);
         if (activeRuns.length > 0) return activeRuns[0];
 
-        if (runCtx.selectedRun) return runCtx.selectedRun;
-        return runCtx.latestRun;
-    }, [runCtx.latestRun, runCtx.runs, runCtx.selectedRun]);
+        if (selectedRun) return selectedRun;
+        return latestRun;
+    }, [latestRun, runs, selectedRun]);
     const summaryTask = useMemo(() => {
         if (activeRun?.task_id) {
-            const linked = taskCtx.tasks.find((task) => task.id === activeRun.task_id);
+            const linked = tasks.find((task) => task.id === activeRun.task_id);
             if (linked) return linked;
         }
         return preferredTaskForHydration;
-    }, [activeRun, preferredTaskForHydration, taskCtx.tasks]);
+    }, [activeRun, preferredTaskForHydration, tasks]);
+    const activeRunNodeExecutions = useMemo(() => {
+        if (!activeRun) return [];
+        return nodeExecutions.filter((node) => node.run_id === activeRun.id);
+    }, [activeRun, nodeExecutions]);
+    const isRouterWarmup = useMemo(() => {
+        if (!activeRun) return false;
+        if (String(activeRun.status || '').trim().toLowerCase() !== 'running') return false;
+        if (String(activeRun.current_node_execution_id || '').trim()) return false;
+        if ((activeRun.active_node_execution_ids || []).length > 0) return false;
+        if (activeRunNodeExecutions.length === 0) return false;
+        return activeRunNodeExecutions.every((node) => String(node.status || '').trim().toLowerCase() === 'queued');
+    }, [activeRun, activeRunNodeExecutions]);
     const summaryActiveNodeLabels = useMemo(() => {
-        if (!activeRun || runCtx.selectedRun?.id !== activeRun.id) return [];
+        if (!activeRun || selectedRun?.id !== activeRun.id) {
+            return isRouterWarmup ? [lang === 'zh' ? '路由 / 规划准备中' : 'Router / planning'] : [];
+        }
         const activeIds = activeRun.active_node_execution_ids || [];
         const labels = activeIds
-            .map((id) => runCtx.nodeExecutions.find((node) => node.id === id))
+            .map((id) => nodeExecutions.find((node) => node.id === id))
             .filter(Boolean)
             .map((node) => node!.node_label || node!.node_key)
             .filter(Boolean);
+        if (labels.length === 0 && isRouterWarmup) {
+            return [lang === 'zh' ? '路由 / 规划准备中' : 'Router / planning'];
+        }
         return [...new Set(labels)];
-    }, [activeRun, runCtx.nodeExecutions, runCtx.selectedRun]);
-    const TERMINAL_NE_STATUSES = new Set(['passed', 'failed', 'skipped', 'cancelled', 'done', 'completed']);
+    }, [activeRun, isRouterWarmup, lang, nodeExecutions, selectedRun]);
+    const summaryRunningNodes = useMemo(() => {
+        if (!activeRun || selectedRun?.id !== activeRun.id) return isRouterWarmup ? 1 : 0;
+        const count = activeRunNodeExecutions.filter(
+            (node) => String(node.status || '').trim().toLowerCase() === 'running',
+        ).length;
+        return count > 0 ? count : (isRouterWarmup ? 1 : 0);
+    }, [activeRun, activeRunNodeExecutions, isRouterWarmup, selectedRun]);
     const summaryCompletedNodes = useMemo(() => {
-        if (!activeRun || runCtx.selectedRun?.id !== activeRun.id) return 0;
-        return runCtx.nodeExecutions.filter((node) =>
+        if (!activeRun || selectedRun?.id !== activeRun.id) return 0;
+        return nodeExecutions.filter((node) =>
             node.run_id === activeRun.id && TERMINAL_NE_STATUSES.has(String(node.status || '').trim().toLowerCase())
         ).length;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeRun, runCtx.nodeExecutions, runCtx.selectedRun]);
+    }, [activeRun, nodeExecutions, selectedRun]);
     const summaryTotalNodes = activeRun?.node_execution_ids?.length
-        || (activeRun ? runCtx.nodeExecutions.filter(ne => ne.run_id === activeRun.id).length : 0);
+        || (activeRun ? nodeExecutions.filter(ne => ne.run_id === activeRun.id).length : 0);
 
     // ── Hooks ──
     const chat = useChatHistory(lang);
@@ -239,7 +331,7 @@ function EditorPageInner() {
         });
     }, []);
     const runtime = useRuntimeConnection({
-        wsUrl, lang, difficulty, goalRuntime: selectedRuntime, sessionId: chat.activeSessionId,
+        wsUrl, lang, difficulty, goalRuntime: effectiveSelectedRuntime, sessionId: chat.activeSessionId,
         messages: chat.messages,
         addMessage: chat.addMessage,
         addReport: reports.addReport,
@@ -249,75 +341,84 @@ function EditorPageInner() {
         edges: workflow.edges,
         setNodes: workflow.setNodes as (nodes: Node[] | ((prev: Node[]) => Node[])) => void,
         // P0-1: WS events → canonical state merge
-        onMergeTask: taskCtx.mergeTask,
-        onMergeRun: runCtx.mergeRun,
-        onMergeNodeExecution: runCtx.mergeNodeExecution,
+        onMergeTask: mergeTask,
+        onMergeRun: mergeRun,
+        onMergeNodeExecution: mergeNodeExecution,
         reconnectRunIds,
         onConnectorEvent: appendConnectorEvent,
     });
+    const workflowNodes = workflow.nodes;
+    const buildPlanNodes = workflow.buildPlanNodes;
+    const updateNodeData = workflow.updateNodeData;
+    const runtimeConnected = runtime.connected;
+    const runtimePreviewUrl = runtime.previewUrl;
+    const setCanvasView = runtime.setCanvasView;
 
     // §2.4: Auto-fetch tasks when WS connects (hydrate state even if events were missed)
     useEffect(() => {
-        if (runtime.connected) {
-            void taskCtx.fetchTasks();
+        if (runtimeConnected) {
+            void fetchTasks();
         }
-    }, [runtime.connected, taskCtx.fetchTasks]);
+    }, [fetchTasks, runtimeConnected]);
 
     // Refresh runs for the selected task when the WS reconnects so missed transitions hydrate immediately.
     useEffect(() => {
-        if (!runtime.connected) return;
-        if (!taskCtx.selectedTask?.id) return;
-        void runCtx.fetchRuns();
-    }, [runtime.connected, taskCtx.selectedTask?.id, runCtx.fetchRuns]);
+        if (!runtimeConnected) return;
+        if (!selectedTask?.id) return;
+        void fetchRuns();
+    }, [fetchRuns, runtimeConnected, selectedTask?.id]);
 
     // If the current selection is stale or inactive after reconnect, refocus the most active task.
     useEffect(() => {
-        if (!runtime.connected) return;
+        if (!runtimeConnected) return;
         if (!preferredTaskForHydration?.id) return;
-        if (taskCtx.selectedTask?.id === preferredTaskForHydration.id) return;
-        if (!taskCtx.selectedTask || !isHydratableTaskStatus(taskCtx.selectedTask.status)) {
-            taskCtx.selectTask(preferredTaskForHydration.id);
+        if (selectedTask?.id === preferredTaskForHydration.id) return;
+        if (!selectedTask || !isHydratableTaskStatus(selectedTask.status)) {
+            selectTask(preferredTaskForHydration.id);
         }
-    }, [runtime.connected, preferredTaskForHydration?.id, taskCtx.selectedTask?.id, taskCtx.selectedTask?.status, taskCtx.selectTask]);
+    }, [preferredTaskForHydration?.id, runtimeConnected, selectTask, selectedTask, selectedTask?.id, selectedTask?.status]);
 
     // Once runs are available, auto-select the active run when the current selection is stale.
     useEffect(() => {
-        if (!runtime.connected) return;
+        if (!runtimeConnected) return;
         if (!preferredRunForHydration?.id) return;
-        if (runCtx.selectedRun?.id === preferredRunForHydration.id) return;
-        const selectedRunMatchesTask = runCtx.selectedRun?.task_id === taskCtx.selectedTask?.id;
-        if (!runCtx.selectedRun || !isActiveRunStatus(runCtx.selectedRun.status) || !selectedRunMatchesTask) {
-            runCtx.selectRun(preferredRunForHydration.id);
+        if (selectedRun?.id === preferredRunForHydration.id) return;
+        const selectedRunMatchesTask = selectedRun?.task_id === selectedTask?.id;
+        if (!selectedRun || !isActiveRunStatus(selectedRun.status) || !selectedRunMatchesTask) {
+            selectRun(preferredRunForHydration.id);
         }
-    }, [runtime.connected, preferredRunForHydration?.id, runCtx.selectedRun?.id, runCtx.selectedRun?.status, runCtx.selectedRun?.task_id, taskCtx.selectedTask?.id, runCtx.selectRun]);
+    }, [preferredRunForHydration?.id, runtimeConnected, selectRun, selectedRun, selectedRun?.id, selectedRun?.status, selectedRun?.task_id, selectedTask?.id]);
 
     // Re-pull node executions for the selected run after reconnect so the timeline/canvas catch up immediately.
     useEffect(() => {
-        if (!runtime.connected) return;
-        if (!runCtx.selectedRun?.id) return;
-        void runCtx.fetchNodeExecutions(runCtx.selectedRun.id);
-    }, [runtime.connected, runCtx.selectedRun?.id, runCtx.fetchNodeExecutions]);
+        if (!runtimeConnected) return;
+        if (!selectedRun?.id) return;
+        void fetchNodeExecutions(selectedRun.id);
+    }, [fetchNodeExecutions, runtimeConnected, selectedRun?.id]);
 
     // §3.1: Rebuild canvas from existing NEs ONLY when reconnecting or restoring state.
     // Skip when canvas already has agent nodes (plan_created already built them).
     // This prevents hydration from overwriting live status updates (e.g., subtask_start → running).
-    const HYDRATION_ACTIVE_STATUSES = new Set(['running', 'queued', 'waiting_review', 'waiting_selfcheck', 'executing']);
     const hydrationDoneRef = useRef<string>(''); // Track which run we already hydrated
     useEffect(() => {
-        if (!runCtx.selectedRun?.id) return;
-        const runId = runCtx.selectedRun.id;
-        const runStatus = String(runCtx.selectedRun.status || '').trim().toLowerCase();
+        if (!selectedRun?.id) return;
+        const runId = selectedRun.id;
+        const runStatus = String(selectedRun.status || '').trim().toLowerCase();
         if (!HYDRATION_ACTIVE_STATUSES.has(runStatus)) return; // Skip terminal runs
 
         // If we already hydrated this run, don't rebuild — live events handle updates
         if (hydrationDoneRef.current === runId) return;
 
-        const runNEs = runCtx.nodeExecutions.filter(ne => ne.run_id === runCtx.selectedRun?.id);
+        const runNEs = nodeExecutions.filter(ne => ne.run_id === selectedRun?.id);
         if (runNEs.length === 0) return;
+        const synthesizeWarmupRunning = runStatus === 'running'
+            && !String(selectedRun.current_node_execution_id || '').trim()
+            && (selectedRun.active_node_execution_ids || []).length === 0
+            && runNEs.every((ne) => String(ne.status || '').trim().toLowerCase() === 'queued');
 
         // Debounce slightly to let React state settle after NE fetch
         const timer = setTimeout(() => {
-            const existingAgentNodes = workflow.nodes.filter((n) => n.type === 'agent');
+            const existingAgentNodes = workflowNodes.filter((n) => n.type === 'agent');
             const hasLinkedCurrentRunNodes = existingAgentNodes.some((node) => {
                 const nodeExecutionId = String(node.data?.nodeExecutionId || '').trim();
                 return runNEs.some((ne) => String(ne.id || '').trim() === nodeExecutionId);
@@ -339,32 +440,33 @@ function EditorPageInner() {
                     ...st,
                     depends_on: st.depends_on.map(key => keyToId[key] || key),
                 }));
-                nodeMap = workflow.buildPlanNodes(subtasksWithIdDeps, lang);
+                nodeMap = buildPlanNodes(subtasksWithIdDeps, lang);
             }
 
             for (const ne of runNEs) {
                 const neId = String(ne.id || '').trim();
                 const nodeKey = String(ne.node_key || '').trim().toLowerCase();
                 const normalizedType = normalizeHydrationNodeType(ne.node_key || 'builder');
+                const isWarmupLeadNode = synthesizeWarmupRunning && neId === String(runNEs[0]?.id || '').trim();
                 const canvasNodeId = nodeMap[neId]
-                    || workflow.nodes.find((node) =>
-                        String(node.data?.nodeExecutionId || '').trim() === neId
-                        || String(node.data?.rawNodeKey || '').trim().toLowerCase() === nodeKey
-                        || String(node.data?.nodeType || '').trim().toLowerCase() === normalizedType
-                        || String(node.data?.label || '').trim() === String(ne.node_label || '').trim(),
-                    )?.id;
+                    || findWorkflowNodeByRuntimeIdentity(workflowNodes, {
+                        nodeExecutionId: neId,
+                        rawNodeKey: nodeKey,
+                        normalizedType,
+                        label: String(ne.node_label || '').trim(),
+                    })?.id;
                 if (!canvasNodeId) continue;
                 const startedAt = normalizeEpochMs(ne.started_at, 0);
                 const endedAt = normalizeEpochMs(ne.ended_at, 0);
                 const durationSeconds = deriveDurationSeconds(startedAt, endedAt);
-                workflow.updateNodeData(canvasNodeId, {
+                updateNodeData(canvasNodeId, {
                     nodeExecutionId: String(ne.id || ''),
                     rawNodeKey: String(ne.node_key || ''),
                     nodeType: normalizeHydrationNodeType(ne.node_key || 'builder'),
                     label: String(ne.node_label || ne.node_key || ''),
-                    status: String(ne.status || 'queued'),
-                    runtime: runCtx.selectedRun?.runtime === 'openclaw' ? 'openclaw' : 'local',
-                    ...(Number.isFinite(Number(ne.progress)) ? { progress: Number(ne.progress) } : {}),
+                    status: isWarmupLeadNode ? 'running' : String(ne.status || 'queued'),
+                    runtime: selectedRun?.runtime === 'openclaw' ? 'openclaw' : 'local',
+                    ...(Number.isFinite(Number(ne.progress)) ? { progress: Number(ne.progress) } : (isWarmupLeadNode ? { progress: 5 } : {})),
                     ...(String(ne.assigned_model || '').trim() ? { assignedModel: String(ne.assigned_model || '').trim() } : {}),
                     ...(String(ne.input_summary || '').trim() ? { taskDescription: String(ne.input_summary || '').trim() } : {}),
                     ...(String(ne.output_summary || '').trim()
@@ -380,13 +482,15 @@ function EditorPageInner() {
                     ...(startedAt > 0 ? { startedAt } : {}),
                     ...(endedAt > 0 ? { endedAt } : {}),
                     ...(durationSeconds !== undefined ? { durationSeconds } : {}),
-                    ...(String(ne.phase || '').trim() ? { phase: String(ne.phase || '').trim() } : {}),
+                    ...(String(ne.phase || '').trim()
+                        ? { phase: String(ne.phase || '').trim() }
+                        : (isWarmupLeadNode ? { phase: 'routing' } : {})),
                 });
             }
             hydrationDoneRef.current = runId;
         }, 150);
         return () => clearTimeout(timer);
-    }, [lang, runCtx.nodeExecutions, runCtx.selectedRun?.id, runCtx.selectedRun?.runtime, runCtx.selectedRun?.status, workflow.buildPlanNodes, workflow.nodes, workflow.updateNodeData]);
+    }, [buildPlanNodes, lang, nodeExecutions, selectedRun, selectedRun?.id, selectedRun?.runtime, selectedRun?.status, updateNodeData, workflowNodes]);
 
     // §3.5b: Auto-switch to preview once a completed run also has a ready preview.
     const previewAutoSwitchStateRef = useRef<{ runId: string; status: string; hadPreview: boolean }>({
@@ -395,9 +499,9 @@ function EditorPageInner() {
         hadPreview: false,
     });
     useEffect(() => {
-        const runId = String(runCtx.selectedRun?.id || '');
-        const runStatus = String(runCtx.selectedRun?.status || '');
-        const hasPreview = Boolean(runtime.previewUrl);
+        const runId = String(selectedRun?.id || '');
+        const runStatus = String(selectedRun?.status || '');
+        const hasPreview = Boolean(runtimePreviewUrl);
         const prev = previewAutoSwitchStateRef.current;
 
         const sameRun = prev.runId === runId;
@@ -412,7 +516,7 @@ function EditorPageInner() {
             && hasPreview;
 
         if (justCompletedWithPreview || previewBecameReadyAfterDone) {
-            runtime.setCanvasView('preview');
+            setCanvasView('preview');
         }
 
         previewAutoSwitchStateRef.current = {
@@ -420,7 +524,7 @@ function EditorPageInner() {
             status: runStatus,
             hadPreview: hasPreview,
         };
-    }, [runCtx.selectedRun?.id, runCtx.selectedRun?.status, runtime.previewUrl, runtime.setCanvasView]);
+    }, [runtimePreviewUrl, selectedRun?.id, selectedRun?.status, setCanvasView]);
 
     // ── Modal states ──
     const [settingsOpen, setSettingsOpen] = useState(false);
@@ -432,7 +536,7 @@ function EditorPageInner() {
     const [artifactsOpen, setArtifactsOpen] = useState(false);
     const [reportsOpen, setReportsOpen] = useState(false);
     const [nodeDetailOpen, setNodeDetailOpen] = useState(false);
-    const [selectedNodeData, setSelectedNodeData] = useState<Record<string, unknown> | null>(null);
+    const [selectedNodeSnapshot, setSelectedNodeSnapshot] = useState<Record<string, unknown> | null>(null);
     const [openedFile, setOpenedFile] = useState<{ path: string; root: string; content: string; ext: string } | null>(null);
 
     const handleOpenFile = useCallback((filePath: string, root: string, content: string, ext: string) => {
@@ -471,6 +575,35 @@ function EditorPageInner() {
             ...(endedAt > 0 ? { endedAt } : {}),
             ...(durationSeconds !== undefined ? { durationSeconds } : {}),
             ...(String(canonicalNode?.phase || '').trim() ? { phase: String(canonicalNode?.phase || '').trim() } : {}),
+            ...(Array.isArray(canonicalNode?.reference_urls) && canonicalNode.reference_urls.length > 0
+                ? { referenceUrls: canonicalNode.reference_urls }
+                : {}),
+            ...(String(canonicalNode?.current_action || '').trim() ? { currentAction: String(canonicalNode?.current_action || '').trim() } : {}),
+            ...(Array.isArray(canonicalNode?.work_summary) && canonicalNode.work_summary.length > 0
+                ? { workSummary: canonicalNode.work_summary }
+                : {}),
+            ...(canonicalNode?.tool_call_stats && Object.keys(canonicalNode.tool_call_stats).length > 0
+                ? { toolCallStats: canonicalNode.tool_call_stats }
+                : {}),
+            ...(String(canonicalNode?.blocking_reason || '').trim() ? { blockingReason: String(canonicalNode?.blocking_reason || '').trim() } : {}),
+            ...(String(canonicalNode?.latest_review_decision || '').trim() ? { latestReviewDecision: String(canonicalNode?.latest_review_decision || '').trim() } : {}),
+            ...(Array.isArray(canonicalNode?.artifact_ids) && canonicalNode.artifact_ids.length > 0
+                ? { artifactIds: canonicalNode.artifact_ids }
+                : {}),
+            ...(Array.isArray(canonicalNode?.report_artifact_ids) && canonicalNode.report_artifact_ids.length > 0
+                ? { reportArtifactIds: canonicalNode.report_artifact_ids }
+                : {}),
+            ...(Array.isArray(canonicalNode?.handoff_artifact_ids) && canonicalNode.handoff_artifact_ids.length > 0
+                ? { handoffArtifactIds: canonicalNode.handoff_artifact_ids }
+                : {}),
+            ...(String(canonicalNode?.dossier_artifact_id || '').trim() ? { dossierArtifactId: String(canonicalNode?.dossier_artifact_id || '').trim() } : {}),
+            ...(String(canonicalNode?.summary_artifact_id || '').trim() ? { summaryArtifactId: String(canonicalNode?.summary_artifact_id || '').trim() } : {}),
+            ...(Number(canonicalNode?.code_lines || 0) > 0 ? { codeLines: Number(canonicalNode?.code_lines) } : {}),
+            ...(Number(canonicalNode?.code_kb || 0) > 0 ? { codeKb: Number(canonicalNode?.code_kb) } : {}),
+            ...(Array.isArray(canonicalNode?.code_languages) && canonicalNode?.code_languages.length > 0
+                ? { codeLanguages: canonicalNode?.code_languages }
+                : {}),
+            ...(Number(canonicalNode?.model_latency_ms || 0) > 0 ? { modelLatencyMs: Number(canonicalNode?.model_latency_ms) } : {}),
             log: normalizeNodeLog(
                 Array.isArray(rawData.log) && rawData.log.length > 0
                     ? rawData.log
@@ -479,28 +612,24 @@ function EditorPageInner() {
         };
     }, [runCtx.nodeExecutions]);
 
-    useEffect(() => {
-        if (!nodeDetailOpen || !selectedNodeData) return;
-        const currentNodeExecutionId = String(selectedNodeData.nodeExecutionId || '').trim();
-        const currentRawNodeKey = String(selectedNodeData.rawNodeKey || selectedNodeData.nodeType || '').trim().toLowerCase();
-        const liveNode = workflow.nodes.find((node) => {
+    const selectedNodeData = useMemo(() => {
+        if (!nodeDetailOpen || !selectedNodeSnapshot) return null;
+        const currentNodeExecutionId = String(selectedNodeSnapshot.nodeExecutionId || '').trim();
+        const currentRawNodeKey = String(selectedNodeSnapshot.rawNodeKey || selectedNodeSnapshot.nodeType || '').trim().toLowerCase();
+        const liveNode = workflowNodes.find((node) => {
             const nodeData = node.data as Record<string, unknown>;
             const liveNodeExecutionId = String(nodeData.nodeExecutionId || '').trim();
             const liveRawNodeKey = String(nodeData.rawNodeKey || nodeData.nodeType || '').trim().toLowerCase();
             if (currentNodeExecutionId && liveNodeExecutionId === currentNodeExecutionId) return true;
             return currentRawNodeKey && liveRawNodeKey === currentRawNodeKey;
         });
-        if (!liveNode) return;
-        const nextSnapshot = buildNodeDetailSnapshot(liveNode.data as Record<string, unknown>);
-        const prevSerialized = JSON.stringify(selectedNodeData);
-        const nextSerialized = JSON.stringify(nextSnapshot);
-        if (prevSerialized !== nextSerialized) {
-            setSelectedNodeData(nextSnapshot);
-        }
-    }, [buildNodeDetailSnapshot, nodeDetailOpen, selectedNodeData, workflow.nodes]);
+        return liveNode
+            ? buildNodeDetailSnapshot(liveNode.data as Record<string, unknown>)
+            : selectedNodeSnapshot;
+    }, [buildNodeDetailSnapshot, nodeDetailOpen, selectedNodeSnapshot, workflowNodes]);
 
     const handleThemeToggle = () => setTheme(current => current === 'dark' ? 'light' : 'dark');
-    const connectorRuntimeMode = activeRun?.runtime || 'local';
+    const connectorRuntimeMode = normalizeRuntimeModeForDisplay(activeRun?.runtime || 'local');
     const connectorRunStatus = activeRun?.status || (runtime.running ? 'running' : 'idle');
     const handleRevealInFinder = useCallback(async (previewUrl: string) => {
         if (!previewUrl || typeof window === 'undefined') return;
@@ -578,7 +707,8 @@ function EditorPageInner() {
                     lastEventAt={runtime.connectorLastEventAt}
                     wsUrl={wsUrl}
                     envTag={envTag}
-                    onOpenConnectorPanel={() => setConnectorPanelOpen(true)}
+                    onOpenConnectorPanel={OPENCLAW_UI_ENABLED ? () => setConnectorPanelOpen(true) : undefined}
+                    showOpenClaw={OPENCLAW_UI_ENABLED}
                 />
 
                 <div className="flex flex-1 overflow-hidden min-w-0">
@@ -656,7 +786,7 @@ function EditorPageInner() {
                                 proOptions={{ hideAttribution: true }}
                                 onNodeClick={(_event, node) => {
                                     const rawData = node.data as Record<string, unknown>;
-                                    setSelectedNodeData(buildNodeDetailSnapshot(rawData));
+                                    setSelectedNodeSnapshot(buildNodeDetailSnapshot(rawData));
                                     setNodeDetailOpen(true);
                                 }}
                                 style={{ background: 'var(--canvas-bg)' }}
@@ -688,6 +818,7 @@ function EditorPageInner() {
                     <ChatPanel
                         messages={chat.messages}
                         onSendGoal={runtime.handleSendGoal}
+                        sessionId={chat.activeSessionId}
                         connected={runtime.connected}
                         running={runtime.running}
                         onStop={runtime.handleStop}
@@ -695,16 +826,18 @@ function EditorPageInner() {
                         difficulty={difficulty}
                         onDifficultyChange={setDifficulty}
                         runtimeMode={connectorRuntimeMode}
+                        showOpenClawRuntime={OPENCLAW_UI_ENABLED}
                         taskTitle={summaryTaskTitle}
                         taskStatus={connectorRunStatus}
                         activeNodeLabels={summaryActiveNodeLabels}
                         completedNodes={summaryCompletedNodes}
+                        runningNodes={summaryRunningNodes}
                         totalNodes={summaryTotalNodes}
                         startedAt={activeRun?.started_at || activeRun?.created_at || null}
                         onOpenReports={() => setReportsOpen(true)}
                         onRevealInFinder={handleRevealInFinder}
-                        selectedRuntime={selectedRuntime}
-                        onRuntimeChange={setSelectedRuntime}
+                        selectedRuntime={effectiveSelectedRuntime}
+                        onRuntimeChange={OPENCLAW_UI_ENABLED ? setSelectedRuntime : undefined}
                     />
                 </div>
             </div>
@@ -717,9 +850,9 @@ function EditorPageInner() {
             <HistoryModal
                 open={historyOpen} onClose={() => setHistoryOpen(false)} lang={lang}
                 sessions={chat.historySessions} activeSessionId={chat.activeSessionId}
-                onSelectSession={(id) => { chat.handleSelectSession(id); runtime.setPreviewUrl(null); runtime.setCanvasView('editor'); setHistoryOpen(false); }}
-                onCreateSession={() => { chat.handleCreateSession(); runtime.setPreviewUrl(null); runtime.setCanvasView('editor'); setHistoryOpen(false); }}
-                onDeleteSession={(id) => { chat.handleDeleteSession(id); runtime.setPreviewUrl(null); runtime.setCanvasView('editor'); }}
+                onSelectSession={(id) => { runtime.handleStop(); chat.handleSelectSession(id); workflow.handleClear(); runtime.setPreviewUrl(null); runtime.setCanvasView('editor'); setHistoryOpen(false); }}
+                onCreateSession={() => { runtime.handleStop(); chat.handleCreateSession(); workflow.handleClear(); runtime.setPreviewUrl(null); runtime.setCanvasView('editor'); setHistoryOpen(false); }}
+                onDeleteSession={(id) => { chat.handleDeleteSession(id); workflow.handleClear(); runtime.setPreviewUrl(null); runtime.setCanvasView('editor'); }}
                 onRenameSession={chat.handleRenameSession}
             />
             <DiagnosticsModal open={diagnosticsOpen} onClose={() => setDiagnosticsOpen(false)} lang={lang} />
@@ -727,27 +860,29 @@ function EditorPageInner() {
             <ReportsModal open={reportsOpen} onClose={() => setReportsOpen(false)} lang={lang} reports={reports.runReports} onDeleteReport={reports.deleteReport} onClearReports={reports.clearReports} />
             <NodeDetailPopup
                 open={nodeDetailOpen}
-                onClose={() => { setNodeDetailOpen(false); setSelectedNodeData(null); }}
+                onClose={() => { setNodeDetailOpen(false); setSelectedNodeSnapshot(null); }}
                 lang={lang}
                 nodeData={selectedNodeData as Parameters<typeof NodeDetailPopup>[0]['nodeData']}
             />
-            <OpenClawPanel
-                open={connectorPanelOpen}
-                onClose={() => setConnectorPanelOpen(false)}
-                connected={runtime.connected}
-                running={runtime.running}
-                lang={lang}
-                wsUrl={wsUrl}
-                events={connectorEvents}
-                runtimeMode={connectorRuntimeMode}
-                activeRunStatus={connectorRunStatus}
-                activeRunId={activeRun?.id}
-                runtimeId={runtime.connectorRuntimeId}
-                processId={runtime.connectorPid}
-                connectedAt={runtime.connectorConnectedAt}
-                lastEventAt={runtime.connectorLastEventAt}
-                onReconnect={runtime.reconnect}
-            />
+            {OPENCLAW_UI_ENABLED && (
+                <OpenClawPanel
+                    open={connectorPanelOpen}
+                    onClose={() => setConnectorPanelOpen(false)}
+                    connected={runtime.connected}
+                    running={runtime.running}
+                    lang={lang}
+                    wsUrl={wsUrl}
+                    events={connectorEvents}
+                    runtimeMode={connectorRuntimeMode}
+                    activeRunStatus={connectorRunStatus}
+                    activeRunId={activeRun?.id}
+                    runtimeId={runtime.connectorRuntimeId}
+                    processId={runtime.connectorPid}
+                    connectedAt={runtime.connectorConnectedAt}
+                    lastEventAt={runtime.connectorLastEventAt}
+                    onReconnect={runtime.reconnect}
+                />
+            )}
 
             {/* ── File Viewer Overlay ── */}
             {openedFile && (
@@ -787,7 +922,7 @@ function EditorPageInner() {
                             <iframe
                                 srcDoc={openedFile.content}
                                 style={{ width: '100%', height: '100%', border: 'none', background: '#fff' }}
-                                sandbox="allow-scripts allow-same-origin"
+                                sandbox="allow-scripts allow-same-origin allow-pointer-lock"
                                 title={openedFile.path}
                             />
                         ) : ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(openedFile.ext) ? (
@@ -797,6 +932,7 @@ function EditorPageInner() {
                                 </div>
                             ) : (
                                 <div style={{ padding: 32, display: 'flex', justifyContent: 'center' }}>
+                                    {/* eslint-disable-next-line @next/next/no-img-element */}
                                     <img
                                         src={`data:image/${openedFile.ext.replace('.', '')};base64,${openedFile.content}`}
                                         alt={openedFile.path}

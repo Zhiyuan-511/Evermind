@@ -15,12 +15,12 @@ interface SidebarProps {
 }
 
 const CATEGORIES = [
-    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['router', 'planner', 'analyst', 'builder', 'polisher', 'reviewer', 'tester', 'deployer', 'debugger', 'scribe'] },
+    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['router', 'planner', 'analyst', 'uidesign', 'builder', 'polisher', 'reviewer', 'tester', 'deployer', 'debugger', 'scribe'] },
     { key: 'tools', label_en: 'Local Execution', label_zh: '本地执行', types: ['localshell', 'fileread', 'filewrite', 'screenshot', 'browser', 'gitops', 'uicontrol'] },
     { key: 'media', label_en: 'Art & Media', label_zh: '美术 & 媒体', types: ['imagegen', 'bgremove', 'spritesheet', 'assetimport', 'merger'] },
 ];
 
-export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts, onOpenReports, onOpenSkillsLibrary, onOpenFile }: SidebarProps) {
+export default function Sidebar({ onDragStart, connected, lang, onOpenReports, onOpenSkillsLibrary, onOpenFile }: SidebarProps) {
 
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
     const [search, setSearch] = useState('');
@@ -73,7 +73,7 @@ export default function Sidebar({ onDragStart, connected, lang, onOpenArtifacts,
                             fontSize: 11, fontWeight: 800, color: '#fff',
                         }}>E</span>
                         <span className="font-bold text-sm">Evermind</span>
-                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 ml-auto">v2.0</span>
+                        <span className="text-[9px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 ml-auto">v3.0</span>
                     </div>
 
                     {/* Connection status */}

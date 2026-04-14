@@ -486,7 +486,10 @@ export default function ReportsModal({
                                     <div style={{ marginBottom: 14 }}>
                                         <button
                                             className="btn btn-primary text-[11px]"
-                                            onClick={() => window.open(active.previewUrl, '_blank', 'noopener,noreferrer')}
+                                            onClick={() => {
+                                                const url = active.previewUrl;
+                                                if (url && /^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener,noreferrer');
+                                            }}
                                             style={{ padding: '8px 16px' }}
                                         >
                                             {t('Open Preview', '打开预览')}

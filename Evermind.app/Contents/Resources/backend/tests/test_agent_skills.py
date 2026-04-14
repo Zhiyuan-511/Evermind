@@ -25,8 +25,15 @@ class TestAgentSkills(unittest.TestCase):
         self.assertIn("remotion-scene-composer", names)
         self.assertIn("ltx-cinematic-video-blueprint", names)
         self.assertIn("godogen-playable-loop", names)
+        self.assertIn("godogen-tps-control-sanity-lock", names)
+        self.assertIn("godogen-visual-target-lock", names)
+        self.assertIn("godogen-3d-asset-replacement", names)
         self.assertIn("source-first-research-loop", names)
         self.assertIn("scroll-evidence-capture", names)
+        self.assertIn("evermind-atlas-surface-system", names)
+        self.assertIn("evermind-editorial-layout-composer", names)
+        self.assertIn("evermind-resilient-media-delivery", names)
+        self.assertIn("evermind-review-remediation-gate", names)
 
     def test_builder_presentation_goal_loads_slide_skills(self):
         names = resolve_skill_names_for_goal("builder", "做一个融资路演PPT和产品发布 slides")
@@ -44,6 +51,46 @@ class TestAgentSkills(unittest.TestCase):
         self.assertIn("image-prompt-director", names)
         self.assertIn("visual-storyboard-shotlist", names)
         self.assertIn("comfyui-pipeline-brief", names)
+
+    def test_imagegen_3d_game_goal_prefers_asset_packaging_over_pixel_pipeline(self):
+        names = resolve_skill_names_for_goal(
+            "imagegen",
+            "做一个第三人称 3D 射击游戏，要有人物怪物武器建模和大地图",
+        )
+        self.assertIn("asset-pipeline-packaging", names)
+        self.assertNotIn("pixel-asset-pipeline", names)
+        self.assertNotIn("comfyui-pipeline-brief", names)
+
+    def test_premium_3d_game_goal_keeps_godogen_loop_but_excludes_low_fidelity_asset_skills(self):
+        builder_names = resolve_skill_names_for_goal(
+            "builder",
+            "做一个第三人称 3D 射击游戏，要有怪物、枪械、大地图和精美人物怪物建模",
+        )
+        analyst_names = resolve_skill_names_for_goal(
+            "analyst",
+            "做一个第三人称 3D 射击游戏，要有怪物、枪械、大地图和精美人物怪物建模",
+        )
+        self.assertIn("godogen-playable-loop", builder_names)
+        self.assertIn("godogen-playable-loop", analyst_names)
+        self.assertIn("godogen-tps-control-sanity-lock", builder_names)
+        self.assertIn("godogen-tps-control-sanity-lock", analyst_names)
+        self.assertIn("godogen-visual-target-lock", builder_names)
+        self.assertIn("godogen-3d-asset-replacement", builder_names)
+        self.assertIn("godogen-visual-target-lock", analyst_names)
+        self.assertNotIn("pixel-asset-pipeline", analyst_names)
+        self.assertIn("gameplay-foundation", builder_names)
+
+    def test_imagegen_premium_3d_game_goal_stays_in_modeling_design_mode(self):
+        names = resolve_skill_names_for_goal(
+            "imagegen",
+            "创建一个第三人称 3D 射击游戏，带怪物、不同枪械、大地图和精美建模，要达到商业级水准。",
+        )
+        self.assertIn("image-prompt-director", names)
+        self.assertIn("visual-storyboard-shotlist", names)
+        self.assertIn("asset-pipeline-packaging", names)
+        self.assertIn("godogen-visual-target-lock", names)
+        self.assertIn("godogen-3d-asset-replacement", names)
+        self.assertNotIn("comfyui-pipeline-brief", names)
 
     def test_motion_goal_loads_animation_skills(self):
         names = resolve_skill_names_for_goal("builder", "做一个带 loading animation 和 Lottie 风格动效的官网")
@@ -78,13 +125,27 @@ class TestAgentSkills(unittest.TestCase):
         self.assertIn("motion-choreography-system", names)
         self.assertIn("scroll-evidence-capture", names)
 
+    def test_website_goal_loads_new_surface_layout_and_media_skills(self):
+        names = resolve_skill_names_for_goal("builder", "做一个高级八页中国旅游网站，要有正确景点图片、强设计感和可靠导航")
+        self.assertIn("evermind-atlas-surface-system", names)
+        self.assertIn("evermind-editorial-layout-composer", names)
+        self.assertIn("evermind-resilient-media-delivery", names)
+
+    def test_reviewer_website_goal_loads_remediation_gate(self):
+        names = resolve_skill_names_for_goal("reviewer", "审查一个高端多页面官网，重点看导航、背景和图片质量")
+        self.assertIn("evermind-review-remediation-gate", names)
+        self.assertIn("evermind-resilient-media-delivery", names)
+
     def test_video_goal_loads_video_skills(self):
         names = resolve_skill_names_for_goal("builder", "做一个产品宣传短片 video storyboard 和镜头脚本")
         self.assertIn("remotion-scene-composer", names)
         self.assertIn("ltx-cinematic-video-blueprint", names)
 
     def test_build_skill_context_renders_skill_blocks(self):
-        context = build_skill_context("builder", "做一个带动画的品牌官网，需要插画 hero")
+        # Use a large budget to test skill SELECTION, not budget truncation.
+        # svg-illustration-system is at position ~15 of 18 resolved skills;
+        # the default budget would cut it off before it's reached.
+        context = build_skill_context("builder", "做一个带动画的品牌官网，需要插画 hero", budget_chars=30000)
         self.assertIn("[Skill: motion-choreography-system]", context)
         self.assertIn("[Skill: svg-illustration-system]", context)
         self.assertIn("[Skill: image-prompt-director]", context)
@@ -94,8 +155,16 @@ class TestAgentSkills(unittest.TestCase):
         self.assertEqual(catalog["remotion-scene-composer"]["source_name"], "Remotion")
         self.assertIn("LTX", catalog["ltx-cinematic-video-blueprint"]["source_name"])
         self.assertEqual(catalog["godogen-playable-loop"]["category"], "game")
+        self.assertIn("ecctrl", catalog["godogen-tps-control-sanity-lock"]["source_name"])
+        self.assertEqual(catalog["godogen-visual-target-lock"]["source_name"], "Godogen")
+        self.assertEqual(catalog["godogen-3d-asset-replacement"]["source_name"], "Godogen")
         self.assertIn("AutoRA", catalog["source-first-research-loop"]["source_name"])
         self.assertIn("rrweb", catalog["scroll-evidence-capture"]["source_name"])
+        self.assertIn("Playwright", catalog["gameplay-qa-gate"]["source_name"])
+        self.assertIn("PptxGenJS", catalog["pptx-export-bridge"]["source_name"])
+        self.assertIn("Open Props", catalog["evermind-atlas-surface-system"]["source_name"])
+        self.assertIn("csslayout", catalog["evermind-editorial-layout-composer"]["source_name"])
+        self.assertIn("vanilla-lazyload", catalog["evermind-resilient-media-delivery"]["source_name"])
 
     def test_community_skill_can_be_keyword_triggered(self):
         with TemporaryDirectory() as tmp_dir:

@@ -73,7 +73,10 @@ const EXT_COLORS: Record<string, string> = {
 };
 const DEFAULT_FILE_COLOR = '#6b7280';
 const WORKSPACE_REFRESH_DEBOUNCE_MS = 80;
-const WORKSPACE_POLL_MS = 1500;
+// V4.3 PERF: Relaxed polling intervals — old 5s/15s caused excessive
+// file-tree I/O and HTTP requests, contributing to CPU heat.
+const WORKSPACE_TREE_POLL_MS = 15000;
+const WORKSPACE_ROOTS_POLL_MS = 30000;
 
 function normalizeFolderPath(value: string): string {
     return String(value || '').trim().replace(/\/+$/, '');
@@ -84,6 +87,30 @@ function folderContainsPath(folder: string, candidate: string): boolean {
     const normalizedCandidate = normalizeFolderPath(candidate);
     if (!normalizedFolder || !normalizedCandidate) return false;
     return normalizedCandidate === normalizedFolder || normalizedCandidate.startsWith(`${normalizedFolder}/`);
+}
+
+function isDocumentVisible(): boolean {
+    if (typeof document === 'undefined') return true;
+    return document.visibilityState === 'visible';
+}
+
+function getRootsSignature(value: WorkspaceRootsResponse | null | undefined): string {
+    const folders = Array.isArray(value?.folders)
+        ? value.folders
+            .map((item) => [
+                normalizeFolderPath(item.path),
+                String(item.label || '').trim(),
+                String(item.kind || '').trim(),
+                item.removable ? '1' : '0',
+            ].join(':'))
+            .sort()
+            .join('|')
+        : '';
+    return [
+        normalizeFolderPath(String(value?.output_dir || '')),
+        normalizeFolderPath(String(value?.artifact_sync_dir || '')),
+        folders,
+    ].join('::');
 }
 
 function formatSize(bytes: number): string {
@@ -238,6 +265,11 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
     });
     const [activeFolder, setActiveFolder] = useState('');
     const refreshTimerRef = useRef<number | null>(null);
+    const rootsRequestRef = useRef<Promise<WorkspaceRootsResponse> | null>(null);
+    const rootsSignatureRef = useRef('');
+    const treeRequestRef = useRef<Promise<void> | null>(null);
+    const treeRequestRootRef = useRef('');
+    const latestTreeRequestIdRef = useRef(0);
 
     const t = useCallback((en: string, zh: string) => (lang === 'zh' ? zh : en), [lang]);
 
@@ -255,13 +287,30 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
     }, []);
 
     const fetchRoots = useCallback(async () => {
-        const resp = await fetch(`${API_BASE}/api/workspace/roots`, { cache: 'no-store' });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-            throw new Error(String(data.error || `HTTP ${resp.status}`));
+        if (rootsRequestRef.current) {
+            return rootsRequestRef.current;
         }
-        setRootsInfo(data as WorkspaceRootsResponse);
-        return data as WorkspaceRootsResponse;
+        let request: Promise<WorkspaceRootsResponse> | null = null;
+        request = (async () => {
+            const resp = await fetch(`${API_BASE}/api/workspace/roots`, { cache: 'no-store' });
+            const data = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                throw new Error(String(data.error || `HTTP ${resp.status}`));
+            }
+            const nextData = data as WorkspaceRootsResponse;
+            const nextSignature = getRootsSignature(nextData);
+            if (nextSignature !== rootsSignatureRef.current) {
+                rootsSignatureRef.current = nextSignature;
+                setRootsInfo(nextData);
+            }
+            return nextData;
+        })().finally(() => {
+            if (rootsRequestRef.current === request) {
+                rootsRequestRef.current = null;
+            }
+        });
+        rootsRequestRef.current = request;
+        return request;
     }, []);
 
     const fetchTreeData = useCallback(async (root: string) => {
@@ -310,24 +359,46 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
         }
     }, [activeFolder, folderEntries]);
 
-    const refresh = useCallback(async (folder?: string) => {
+    const refresh = useCallback(async (folder?: string, { silent = false }: { silent?: boolean } = {}) => {
         const root = normalizeFolderPath(folder || activeFolder);
         if (!root) {
             setTree([]);
             setTotalFiles(0);
             return;
         }
-        setLoading(true);
-        setError('');
-        try {
-            const data = await fetchTreeData(root);
-            setTree(data.tree || []);
-            setTotalFiles(data.total_files || 0);
-        } catch (e) {
-            setError(String(e));
-        } finally {
-            setLoading(false);
+        if (treeRequestRef.current && treeRequestRootRef.current === root) {
+            return treeRequestRef.current;
         }
+        const requestId = latestTreeRequestIdRef.current + 1;
+        latestTreeRequestIdRef.current = requestId;
+        const request = (async () => {
+            if (!silent) {
+                setLoading(true);
+                setError('');
+            }
+            try {
+                const data = await fetchTreeData(root);
+                if (latestTreeRequestIdRef.current !== requestId) return;
+                setTree(data.tree || []);
+                setTotalFiles(data.total_files || 0);
+                setError('');
+            } catch (e) {
+                if (latestTreeRequestIdRef.current !== requestId) return;
+                setError(String(e));
+            } finally {
+                if (!silent && latestTreeRequestIdRef.current === requestId) {
+                    setLoading(false);
+                }
+            }
+        })().finally(() => {
+            if (treeRequestRef.current === request) {
+                treeRequestRef.current = null;
+                treeRequestRootRef.current = '';
+            }
+        });
+        treeRequestRef.current = request;
+        treeRequestRootRef.current = root;
+        return request;
     }, [activeFolder, fetchTreeData]);
 
     useEffect(() => {
@@ -335,11 +406,36 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
     }, [activeFolder, refresh]);
 
     useEffect(() => {
-        const interval = setInterval(() => {
-            if (activeFolder) void refresh(activeFolder);
+        if (typeof window === 'undefined') return undefined;
+        const interval = window.setInterval(() => {
+            if (!activeFolder || !isDocumentVisible()) return;
+            void refresh(activeFolder, { silent: true });
+        }, WORKSPACE_TREE_POLL_MS);
+        return () => window.clearInterval(interval);
+    }, [activeFolder, refresh]);
+
+    useEffect(() => {
+        if (typeof window === 'undefined') return undefined;
+        const interval = window.setInterval(() => {
+            if (!isDocumentVisible()) return;
             void fetchRoots().catch(() => { /* ignore */ });
-        }, WORKSPACE_POLL_MS);
-        return () => clearInterval(interval);
+        }, WORKSPACE_ROOTS_POLL_MS);
+        return () => window.clearInterval(interval);
+    }, [fetchRoots]);
+
+    useEffect(() => {
+        if (typeof document === 'undefined') return undefined;
+        const handleVisibilityChange = () => {
+            if (!isDocumentVisible()) return;
+            void fetchRoots().catch(() => { /* ignore */ });
+            if (activeFolder) {
+                void refresh(activeFolder, { silent: true });
+            }
+        };
+        document.addEventListener('visibilitychange', handleVisibilityChange);
+        return () => {
+            document.removeEventListener('visibilitychange', handleVisibilityChange);
+        };
     }, [activeFolder, fetchRoots, refresh]);
 
     useEffect(() => {
@@ -350,8 +446,7 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
             }
             refreshTimerRef.current = window.setTimeout(() => {
                 refreshTimerRef.current = null;
-                void refresh(folder);
-                void fetchRoots().catch(() => { /* ignore */ });
+                void refresh(folder, { silent: true });
             }, WORKSPACE_REFRESH_DEBOUNCE_MS);
         };
         const handleWorkspaceUpdated = (event: Event) => {
@@ -360,6 +455,11 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
             if (!currentFolder) return;
             const targetDir = normalizeFolderPath(String(detail.targetDir || ''));
             const outputDirFromEvent = normalizeFolderPath(String(detail.outputDir || ''));
+            const shouldRefreshRoots = Boolean(
+                (!rootsInfo && (targetDir || outputDirFromEvent))
+                || (targetDir && targetDir !== artifactSyncDir)
+                || (outputDirFromEvent && outputDirFromEvent !== outputDir)
+            );
             const files = Array.isArray(detail.files)
                 ? detail.files.map((item) => String(item || '').trim()).filter(Boolean)
                 : [];
@@ -368,6 +468,9 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
                 || (outputDirFromEvent && outputDirFromEvent === currentFolder)
                 || files.some((item) => folderContainsPath(currentFolder, item))
             );
+            if (shouldRefreshRoots) {
+                void fetchRoots().catch(() => { /* ignore */ });
+            }
             if (!shouldRefresh) return;
             if (targetDir && targetDir === currentFolder && Number(detail.copiedFiles || 0) > 0) {
                 setNotice(
@@ -393,7 +496,7 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
                 refreshTimerRef.current = null;
             }
         };
-    }, [activeFolder, fetchRoots, refresh, t]);
+    }, [activeFolder, artifactSyncDir, fetchRoots, outputDir, refresh, rootsInfo, t]);
 
     const handleAddFolder = useCallback(async () => {
         const desktopApi = getDesktopApi();

@@ -3,7 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWebSocket } from '@/hooks/useWebSocket';
 import { NODE_TYPES, type ChatMessage, type RunReportRecord, type TaskCard, type RunRecord, type NodeExecutionRecord } from '@/lib/types';
+import { buildMessageContentForHistory, defaultGoalFromAttachments } from '@/lib/chatAttachments';
+import type { ChatAttachment } from '@/lib/types';
 import { buildReadableCurrentWork, describeNodeActivity } from '@/lib/nodeOutputHumanizer';
+import { buildRunGoalPlan } from '@/lib/workflowPlan';
 import { saveArtifact } from '@/lib/api';
 import type { Node, Edge as RFEdge } from '@xyflow/react';
 
@@ -60,6 +63,12 @@ function normalizeCanvasNodeType(value: unknown): string {
     if (alphaPrefix && NODE_TYPES[alphaPrefix]) return alphaPrefix;
 
     return raw;
+}
+
+function isHistoryConversationMessage(message: ChatMessage): boolean {
+    if (!message) return false;
+    if (message.sender === 'console') return false;
+    return message.role === 'user' || message.role === 'agent';
 }
 
 function clearRunActivity(runPatch: Partial<RunRecord> & Pick<RunRecord, 'id'>): Partial<RunRecord> & Pick<RunRecord, 'id'> {
@@ -234,7 +243,7 @@ export interface UseRuntimeConnectionOptions {
     goalRuntime?: 'local' | 'openclaw';
     sessionId?: string;
     messages: ChatMessage[];
-    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: import('@/lib/types').ChatMessage['completionData']) => void;
+    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: import('@/lib/types').ChatMessage['completionData'], attachments?: ChatAttachment[]) => void;
     addReport: (report: RunReportRecord) => void;
     buildPlanNodes: (
         subtasks: Array<{ id: string; agent: string; task: string; depends_on: string[] }>,
@@ -271,7 +280,7 @@ export interface UseRuntimeConnectionReturn {
     setCanvasView: React.Dispatch<React.SetStateAction<'editor' | 'preview'>>;
     connected: boolean;
     wsRef: React.RefObject<WebSocket | null>;
-    handleSendGoal: (goal: string) => void;
+    handleSendGoal: (goal: string, attachments?: ChatAttachment[]) => void;
     handleRun: () => void;
     handleStop: () => void;
     setPreviewUrl: React.Dispatch<React.SetStateAction<string | null>>;
@@ -317,12 +326,13 @@ export function useRuntimeConnection({
     const canonicalTaskIdRef = useRef<string>('');
     const canonicalRunIdRef = useRef<string>('');
     const runSubtasksRef = useRef<Record<string, {
-        task?: string; agent?: string; output?: string; error?: string;
+        task?: string; agent?: string; agentType?: string; nodeKey?: string; nodeLabel?: string; output?: string; error?: string;
         status?: string; retries?: number; startedAt?: number; endedAt?: number;
         durationSeconds?: number; timelineEvents?: string[];
     }>>({});
     const browserModeNotifiedRef = useRef<Record<string, boolean>>({});
     const waitingAiLastNotifyRef = useRef<Record<string, number>>({});
+    const waitingAiLastConsoleLogRef = useRef<Record<string, number>>({});
     const previousConnectedRef = useRef(false);
     const desktopQaSessionRef = useRef<Record<string, boolean>>({});
 
@@ -425,6 +435,13 @@ export function useRuntimeConnection({
         const normalizedNodeKey = normalizeCanvasNodeType(nodeKey);
         const subtaskId = String(payload.subtaskId || '').trim();
         const nodeLabel = String(payload.nodeLabel || '').trim();
+        const rawNodeKeyLower = nodeKey.toLowerCase();
+        const normalizedNodeKeyLower = normalizedNodeKey.toLowerCase();
+        const hasSpecificNodeKey = Boolean(
+            rawNodeKeyLower
+            && normalizedNodeKeyLower
+            && rawNodeKeyLower !== normalizedNodeKeyLower,
+        );
 
         if (nodeExecutionId && subtaskNodeMap.current[nodeExecutionId]) {
             return subtaskNodeMap.current[nodeExecutionId];
@@ -442,18 +459,22 @@ export function useRuntimeConnection({
         if (exactMatch) return exactMatch.id;
 
         if (nodeKey) {
-            const typeMatches = nodes.filter((node) => {
+            const rawKeyMatches = nodes.filter((node) => {
                 const nodeType = String(node.data?.nodeType || '').trim().toLowerCase();
                 const rawNodeKey = String(node.data?.rawNodeKey || '').trim().toLowerCase();
-                return nodeType === nodeKey.toLowerCase()
-                    || rawNodeKey === nodeKey.toLowerCase()
-                    || (!!normalizedNodeKey && nodeType === normalizedNodeKey);
+                return nodeType === rawNodeKeyLower || rawNodeKey === rawNodeKeyLower;
             });
-            if (typeMatches.length === 1) return typeMatches[0].id;
-            const activeTypeMatch = typeMatches.find((node) => ['running', 'queued', 'blocked', 'waiting_approval'].includes(String(node.data?.status || '').trim()));
-            if (activeTypeMatch) return activeTypeMatch.id;
-            const unboundTypeMatch = typeMatches.find((node) => !String(node.data?.nodeExecutionId || '').trim());
-            if (unboundTypeMatch) return unboundTypeMatch.id;
+            if (rawKeyMatches.length === 1) return rawKeyMatches[0].id;
+
+            // Never collapse builder1/builder2-style keys back onto a generic builder node.
+            if (!hasSpecificNodeKey && normalizedNodeKeyLower) {
+                const normalizedTypeMatches = nodes.filter((node) => {
+                    const nodeType = String(node.data?.nodeType || '').trim().toLowerCase();
+                    const rawNodeKey = String(node.data?.rawNodeKey || '').trim().toLowerCase();
+                    return nodeType === normalizedNodeKeyLower || rawNodeKey === normalizedNodeKeyLower;
+                });
+                if (normalizedTypeMatches.length === 1) return normalizedTypeMatches[0].id;
+            }
         }
 
         if (nodeLabel) {
@@ -478,6 +499,7 @@ export function useRuntimeConnection({
         runSubtasksRef.current = {};
         browserModeNotifiedRef.current = {};
         waitingAiLastNotifyRef.current = {};
+        waitingAiLastConsoleLogRef.current = {};
         desktopQaSessionRef.current = {};
         clearPreviewFallbackTimer();
     }, [clearPreviewFallbackTimer]);
@@ -555,35 +577,68 @@ export function useRuntimeConnection({
             // local custom runs (dispatched by OpenClaw) to show an empty canvas.
             const effectiveRuntime = String(payload.effectiveRuntime || payload.requestedRuntime || '');
             if (nodeExecutions.length > 0) {
-                const subtaskFormat = nodeExecutions.map(ne => ({
-                    id: String(ne.id || ''),
-                    agent: normalizeCanvasNodeType(ne.node_key || 'builder'),
-                    task: String(ne.inputSummary || ne.input_summary || ne.node_label || ne.node_key || ''),
-                    depends_on: Array.isArray(ne.depends_on_keys) ? ne.depends_on_keys.map(String) : [],
-                }));
-                // Map NE depends_on_keys (node_keys) to NE ids for edge building
-                const keyToId: Record<string, string> = {};
-                for (const ne of nodeExecutions) {
-                    if (ne.node_key && ne.id) keyToId[String(ne.node_key)] = String(ne.id);
-                }
-                const subtasksWithIdDeps = subtaskFormat.map(st => ({
-                    ...st,
-                    depends_on: st.depends_on.map(key => keyToId[key] || key),
-                }));
-                subtaskNodeMap.current = buildPlanNodes(subtasksWithIdDeps, lang);
+                // V4.3.1 FIX: Check if plan_created already created canvas nodes.
+                // If so, map NE IDs to existing nodes instead of rebuilding the
+                // entire canvas — rebuilding would reset "running" nodes back to
+                // "queued", causing the 排队中 display bug.
+                const existingSubtaskNodes = Object.keys(subtaskNodeMap.current).length > 0;
+                const hasExistingCanvasNodes = nodes.some((node) =>
+                    String(node.data?.subtaskId || '').trim()
+                    || String(node.data?.nodeExecutionId || '').trim()
+                    || String(node.data?.rawNodeKey || '').trim(),
+                );
 
-                // §P0-3: Also build a subtask-index → NE-id mapping so that local
-                // orchestrator events (using subtask IDs "1","2","3"...) can find
-                // the correct canvas node via NE id.
-                for (let i = 0; i < nodeExecutions.length; i++) {
-                    const neId = String(nodeExecutions[i].id || '').trim();
-                    const subtaskId = String(i + 1);  // orchestrator subtask IDs are 1-indexed
-                    if (neId && subtaskNodeMap.current[neId]) {
-                        // Map subtask ID → same canvas node as the NE ID
-                        subtaskNodeMap.current[subtaskId] = subtaskNodeMap.current[neId];
+                if (existingSubtaskNodes || hasExistingCanvasNodes) {
+                    // Canvas nodes already exist from plan_created — just map NE IDs
+                    // to existing canvas nodes and add NE metadata without rebuilding.
+                    for (let i = 0; i < nodeExecutions.length; i++) {
+                        const neId = String(nodeExecutions[i].id || '').trim();
+                        const subtaskId = String(i + 1);
+                        const canvasNodeId = subtaskNodeMap.current[subtaskId]
+                            || subtaskNodeMap.current[neId];
+                        if (canvasNodeId && neId) {
+                            subtaskNodeMap.current[neId] = canvasNodeId;
+                            subtaskNodeMap.current[subtaskId] = canvasNodeId;
+                        }
+                    }
+                } else {
+                    const subtaskFormat = nodeExecutions.map(ne => ({
+                        id: String(ne.id || ''),
+                        agent: normalizeCanvasNodeType(ne.node_key || 'builder'),
+                        task: String(ne.inputSummary || ne.input_summary || ne.node_label || ne.node_key || ''),
+                        depends_on: Array.isArray(ne.depends_on_keys) ? ne.depends_on_keys.map(String) : [],
+                    }));
+                    // Map NE depends_on_keys (node_keys) to NE ids for edge building
+                    const keyToId: Record<string, string> = {};
+                    for (const ne of nodeExecutions) {
+                        if (ne.node_key && ne.id) keyToId[String(ne.node_key)] = String(ne.id);
+                    }
+                    const subtasksWithIdDeps = subtaskFormat.map(st => ({
+                        ...st,
+                        depends_on: st.depends_on.map(key => keyToId[key] || key),
+                    }));
+                    subtaskNodeMap.current = buildPlanNodes(subtasksWithIdDeps, lang);
+
+                    // §P0-3: Also build a subtask-index → NE-id mapping so that local
+                    // orchestrator events (using subtask IDs "1","2","3"...) can find
+                    // the correct canvas node via NE id.
+                    for (let i = 0; i < nodeExecutions.length; i++) {
+                        const neId = String(nodeExecutions[i].id || '').trim();
+                        const subtaskId = String(i + 1);  // orchestrator subtask IDs are 1-indexed
+                        if (neId && subtaskNodeMap.current[neId]) {
+                            // Map subtask ID → same canvas node as the NE ID
+                            subtaskNodeMap.current[subtaskId] = subtaskNodeMap.current[neId];
+                        }
                     }
                 }
 
+                // Update NE metadata on canvas nodes. Use status from NE only
+                // if it is more advanced than the current canvas status — never
+                // downgrade a "running" node back to "queued".
+                const STATUS_RANK: Record<string, number> = {
+                    idle: 0, queued: 1, running: 2, waiting_approval: 3,
+                    passed: 4, failed: 4, blocked: 4, cancelled: 4, skipped: 4,
+                };
                 for (const ne of nodeExecutions) {
                     const neId = String(ne.id || '').trim();
                     const canvasNodeId = neId ? subtaskNodeMap.current[neId] : '';
@@ -596,12 +651,17 @@ export function useRuntimeConnection({
                     const progress = Number(ne.progress);
                     const tokensUsed = Number(ne.tokensUsed ?? ne.tokens_used);
                     const cost = Number(ne.cost ?? 0);
+                    const neStatus = String(ne.status || 'queued').trim() || 'queued';
+                    const existingNode = nodes.find((node) => node.id === canvasNodeId);
+                    const existingStatus = String(existingNode?.data?.status || 'idle');
+                    // Only update status if NE status is more advanced (never downgrade)
+                    const shouldUpdateStatus = (STATUS_RANK[neStatus] ?? 0) >= (STATUS_RANK[existingStatus] ?? 0);
                     updateNodeData(canvasNodeId, {
                         nodeExecutionId: neId,
                         rawNodeKey: String(ne.node_key || '').trim(),
                         nodeType: normalizeCanvasNodeType(ne.node_key || 'builder'),
                         label: String(ne.node_label || ne.node_key || '').trim(),
-                        status: String(ne.status || 'queued').trim() || 'queued',
+                        ...(shouldUpdateStatus ? { status: neStatus } : {}),
                         runtime: effectiveRuntime === 'openclaw' ? 'openclaw' : 'local',
                         ...(Number.isFinite(progress) ? { progress } : {}),
                         ...(String(ne.assignedModel || ne.assigned_model || '').trim()
@@ -660,82 +720,103 @@ export function useRuntimeConnection({
             subtasks.forEach(st => {
                 addConsoleLog(`[plan] #${st.id} ${st.agent} deps=[${(st.depends_on || []).join(',')}] task=${(st.task || '').slice(0, 120)}`);
             });
-            subtaskNodeMap.current = buildPlanNodes(subtasks, lang);
+            const hasCanonicalCanvasNodes = nodes.some((node) =>
+                String(node.data?.nodeExecutionId || '').trim()
+                || String(node.data?.rawNodeKey || '').trim(),
+            );
+            if (hasCanonicalCanvasNodes) {
+                addConsoleLog('[plan_created] preserving canonical canvas nodes');
+            } else {
+                subtaskNodeMap.current = buildPlanNodes(subtasks, lang);
+            }
 
         } else if (t === 'subtask_start') {
             const subtaskId = msg.subtask_id as string;
             const agentName = String(msg.agent || 'agent');
+            const nodeKey = String(msg.node_key || msg.nodeKey || '').trim();
+            const nodeLabel = String(msg.node_label || msg.nodeLabel || '').trim();
+            const displayName = nodeLabel || nodeKey || agentName;
             const startedAt = Date.now();
             runSubtasksRef.current[subtaskId] = {
                 ...(runSubtasksRef.current[subtaskId] || {}),
-                agent: agentName, task: String(msg.task || ''),
+                agent: displayName, agentType: agentName, nodeKey, nodeLabel, task: String(msg.task || ''),
                 status: 'running', startedAt, endedAt: undefined, durationSeconds: undefined,
             };
-            appendSubtaskTimeline(subtaskId, `开始执行：${agentName} 接收任务并进入处理流程。`);
+            appendSubtaskTimeline(subtaskId, `开始执行：${displayName} 接收任务并进入处理流程。`);
             if (String(msg.task || '').trim()) {
                 appendSubtaskTimeline(subtaskId, `任务说明：${String(msg.task || '').trim().slice(0, 240)}`);
             }
             // P1-3: Humanized agent names for feed
-            const agentLabel = agentName.replace(/([a-z])([A-Z])/g, '$1 $2');
+            const agentLabel = displayName.replace(/([a-z])([A-Z])/g, '$1 $2');
             const humanLabel = {
                 builder: tr('代码生成', 'Code generation'),
+                merger: tr('合并整合', 'Merge integration'),
                 reviewer: tr('代码审核', 'Code review'),
                 tester: tr('自动测试', 'Automated testing'),
                 deployer: tr('自动部署', 'Auto-deployment'),
                 validator: tr('质量验证', 'Quality validation'),
                 planner: tr('任务规划', 'Task planning'),
-            }[agentName.toLowerCase()] || `${agentLabel} step`;
-            addMessage('system', tr(`${humanLabel}开始`, `${humanLabel} started`), `${agentName} #${subtaskId}`, '⚙️', 'var(--blue)');
-            addConsoleLog(`[subtask_start] #${subtaskId} agent=${agentName} task=${String(msg.task || '').slice(0, 180)}`);
+            }[(nodeKey || agentName).toLowerCase()] || `${agentLabel} step`;
+            addMessage('system', tr(`${humanLabel}开始`, `${humanLabel} started`), `${displayName} #${subtaskId}`, '⚙️', 'var(--blue)');
+            addConsoleLog(`[subtask_start] #${subtaskId} agent=${agentName} node=${nodeKey || '-'} task=${String(msg.task || '').slice(0, 180)}`);
             const canvasNodeId = subtaskNodeMap.current[subtaskId];
             if (canvasNodeId) updateNodeData(canvasNodeId, {
                 status: 'running', progress: 5, startedAt,
-                outputSummary: tr(`${agentName} 正在接收任务并开始处理...`, `${agentName} received task, starting work...`),
+                outputSummary: tr(`${displayName} 正在接收任务并开始处理...`, `${displayName} received task, starting work...`),
                 taskDescription: String(msg.task || ''),
             });
 
         } else if (t === 'subtask_complete') {
             const subtaskId = msg.subtask_id as string;
             const success = msg.success as boolean;
+            const retryPending = Boolean(msg.retry_pending || msg.retryPending);
             const agentName = (msg.agent as string) || 'Agent';
+            const nodeKey = String(msg.node_key || msg.nodeKey || '').trim();
+            const nodeLabel = String(msg.node_label || msg.nodeLabel || '').trim();
+            const displayName = nodeLabel || nodeKey || agentName;
             const fullOutput = ((msg.full_output || msg.output_preview || '') as string);
             const err = String(msg.error || '');
-            const blocked = !success && /Blocked by failed dependencies/i.test(err);
+            const blocked = !success && !retryPending && /Blocked by failed dependencies/i.test(err);
             const prevState = runSubtasksRef.current[subtaskId] || {};
             const endedAt = Date.now();
             const startedAt = prevState.startedAt || endedAt;
             const durationSeconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
             runSubtasksRef.current[subtaskId] = {
-                ...prevState, agent: agentName,
-                status: success ? 'completed' : (blocked ? 'blocked' : 'failed'),
+                ...prevState, agent: displayName, agentType: agentName, nodeKey, nodeLabel,
+                status: success ? 'completed' : (retryPending ? 'running' : (blocked ? 'blocked' : 'failed')),
                 output: fullOutput, error: err, endedAt, durationSeconds,
             };
             appendSubtaskTimeline(subtaskId, success
-                ? `执行完成：${agentName} 已完成，耗时约 ${durationSeconds} 秒。`
+                ? `执行完成：${displayName} 已完成，耗时约 ${durationSeconds} 秒。`
+                : (retryPending
+                    ? `本轮失败：${displayName} 在 ${durationSeconds} 秒后失败，系统将自动重试。`
                 : (blocked
-                    ? `执行阻断：${agentName} 未执行，因上游依赖失败而被阻断，耗时约 ${durationSeconds} 秒。`
-                    : `执行失败：${agentName} 结束于失败，耗时约 ${durationSeconds} 秒。`));
+                    ? `执行阻断：${displayName} 未执行，因上游依赖失败而被阻断，耗时约 ${durationSeconds} 秒。`
+                    : `执行失败：${displayName} 结束于失败，耗时约 ${durationSeconds} 秒。`)));
             if (err) appendSubtaskTimeline(subtaskId, `失败原因：${err.slice(0, 160)}`);
             // P1-3: Humanized completion messages
             const completeLabel = {
                 builder: tr('代码生成', 'Code generation'),
+                merger: tr('合并整合', 'Merge integration'),
                 reviewer: tr('代码审核', 'Code review'),
                 tester: tr('自动测试', 'Automated testing'),
                 deployer: tr('自动部署', 'Auto-deployment'),
                 validator: tr('质量验证', 'Quality validation'),
                 planner: tr('任务规划', 'Task planning'),
-            }[agentName.toLowerCase()] || agentName;
+            }[(nodeKey || agentName).toLowerCase()] || displayName;
             addMessage('system',
                 success
                     ? tr(`${completeLabel}完成（${durationSeconds}s）`, `${completeLabel} completed (${durationSeconds}s)`)
+                    : (retryPending
+                        ? tr(`${completeLabel}本轮失败，准备重试`, `${completeLabel} attempt failed, retrying`)
                     : (blocked
                         ? tr(`${completeLabel}被上游失败阻断`, `${completeLabel} was blocked by an upstream failure`)
-                        : tr(`${completeLabel}遇到问题`, `${completeLabel} encountered an issue`)),
-                `${agentName} #${subtaskId}`,
-                success ? '✅' : (blocked ? '⛔' : '❌'),
-                success ? 'var(--green)' : (blocked ? 'var(--orange)' : 'var(--red)'));
-            try { console.info(`[Evermind][Subtask ${subtaskId}]`, { agent: agentName, success, output_len: fullOutput.length, output_preview: fullOutput.slice(0, 1200) }); } catch { /* noop */ }
-            addConsoleLog(`[subtask_complete] #${subtaskId} agent=${agentName} success=${String(success)} output_len=${fullOutput.length}${err ? ` error=${err.slice(0, 160)}` : ''}`);
+                        : tr(`${completeLabel}遇到问题`, `${completeLabel} encountered an issue`))),
+                `${displayName} #${subtaskId}`,
+                success ? '✅' : (retryPending ? '🔁' : (blocked ? '⛔' : '❌')),
+                success ? 'var(--green)' : (retryPending ? 'var(--orange)' : (blocked ? 'var(--orange)' : 'var(--red)')));
+            try { console.info(`[Evermind][Subtask ${subtaskId}]`, { agent: agentName, nodeKey, nodeLabel, success, output_len: fullOutput.length, output_preview: fullOutput.slice(0, 1200) }); } catch { /* noop */ }
+            addConsoleLog(`[subtask_complete] #${subtaskId} agent=${agentName} node=${nodeKey || '-'} success=${String(success)} retry_pending=${String(retryPending)} output_len=${fullOutput.length}${err ? ` error=${err.slice(0, 160)}` : ''}`);
             let canvasNodeId = subtaskNodeMap.current[subtaskId];
             // Fallback: if the map lookup fails (e.g. plan_created was missed or IDs drifted),
             // try to find the canvas node by matching subtaskId stored in node data.
@@ -757,6 +838,11 @@ export function useRuntimeConnection({
                         `${completeLabel}已完成，耗时 ${durationSeconds} 秒。${fullOutput.length > 0 ? '已产出工作成果。' : ''}`,
                         `${completeLabel} completed in ${durationSeconds}s.${fullOutput.length > 0 ? ' Output generated.' : ''}`
                     )
+                    : (retryPending
+                        ? tr(
+                            `${completeLabel}本轮执行失败，系统正在自动重试。${err ? `原因：${err.slice(0, 100)}` : ''}`,
+                            `${completeLabel} attempt failed and is retrying automatically.${err ? ` Reason: ${err.slice(0, 100)}` : ''}`
+                        )
                     : (blocked
                         ? tr(
                             `${completeLabel}未实际执行，因为上游节点已失败。${err ? `原因：${err.slice(0, 100)}` : ''}`,
@@ -765,24 +851,32 @@ export function useRuntimeConnection({
                         : tr(
                             `${completeLabel}执行失败。${err ? `原因：${err.slice(0, 100)}` : ''}`,
                             `${completeLabel} failed.${err ? ` Reason: ${err.slice(0, 100)}` : ''}`
-                        ));
+                        )));
                 // Collect timeline log
                 const timelineEvents = (runSubtasksRef.current[subtaskId]?.timelineEvents || [])
-                    .map((msg: string) => ({ ts: Date.now(), msg, type: success ? 'ok' : (blocked ? 'warn' : 'error') }));
+                    .map((msg: string) => ({ ts: Date.now(), msg, type: success ? 'ok' : ((blocked || retryPending) ? 'warn' : 'error') }));
                 mergeCanvasNodeLogs(canvasNodeId, timelineEvents);
+                // CC-1: Accumulate tokens across retries instead of overwriting
+                const existingNode = nodes.find((node) => node.id === canvasNodeId);
+                const existingData = (existingNode?.data || {}) as Record<string, unknown>;
+                const isRetried = (prevState.retries || 0) > 0;
+                const prevTokens = isRetried ? Number(existingData.tokensUsed || 0) : 0;
+                const prevPrompt = isRetried ? Number(existingData.promptTokens || 0) : 0;
+                const prevCompletion = isRetried ? Number(existingData.completionTokens || 0) : 0;
+                const prevCost = isRetried ? Number(existingData.cost || 0) : 0;
                 updateNodeData(canvasNodeId, {
-                    status: success ? 'passed' : (blocked ? 'blocked' : 'failed'),
-                    progress: 100,
-                    _terminalStatus: true,
+                    status: success ? 'passed' : (retryPending ? 'running' : (blocked ? 'blocked' : 'failed')),
+                    progress: success ? 100 : (retryPending ? 45 : 100),
+                    _terminalStatus: !retryPending,
                     lastOutput: fullOutput.substring(0, 4000),
                     outputSummary: completeSummary,
                     endedAt,
                     startedAt: prevState.startedAt || endedAt,
                     durationSeconds,
-                    tokensUsed: Number(msg.tokens_used || 0),
-                    promptTokens: Number(msg.prompt_tokens || 0),
-                    completionTokens: Number(msg.completion_tokens || 0),
-                    cost: Number(msg.cost || 0),
+                    tokensUsed: prevTokens + Number(msg.tokens_used || 0),
+                    promptTokens: prevPrompt + Number(msg.prompt_tokens || 0),
+                    completionTokens: prevCompletion + Number(msg.completion_tokens || 0),
+                    cost: prevCost + Number(msg.cost || 0),
                 });
             }
 
@@ -791,6 +885,10 @@ export function useRuntimeConnection({
             const outputDir = (msg.output_dir as string) || '/tmp/evermind_output';
             const sid = String(msg.subtask_id || '');
             const artifactSync = (msg.artifact_sync as Record<string, unknown> | undefined) || undefined;
+            const codeLines = Number(msg.code_lines || 0);
+            const totalLines = Number(msg.total_lines || 0);
+            const codeKb = Number(msg.code_kb || 0);
+            const languages = Array.isArray(msg.languages) ? (msg.languages as string[]) : [];
             if (files.length > 0) {
                 if (sid) {
                     const compactFiles = files.slice(0, 6).map((file) => file.split('/').pop()).join(', ');
@@ -802,12 +900,20 @@ export function useRuntimeConnection({
                             msg: tr(`已写出 ${files.length} 个文件到 ${outputDir}`, `Wrote ${files.length} file(s) to ${outputDir}`),
                             type: 'ok',
                         });
+                        if (codeLines > 0) {
+                            updateNodeData(canvasNodeId, {
+                                codeLines,
+                                totalLines,
+                                codeKb,
+                                codeLanguages: languages,
+                            });
+                        }
                     }
                 }
                 addMessage('system',
                     tr(`产物已更新：${files.length} 个文件（目录：<code>${outputDir}</code>）`, `Artifacts updated: ${files.length} files (dir: <code>${outputDir}</code>)`),
                     'File Output', '📁', 'var(--green)');
-                addConsoleLog(`[files_created] count=${files.length} dir=${outputDir}`);
+                addConsoleLog(`[files_created] count=${files.length} dir=${outputDir}${codeLines > 0 ? ` code_lines=${codeLines} code_kb=${codeKb}` : ''}`);
             }
             emitWorkspaceUpdated({
                 eventType: 'files_created',
@@ -995,6 +1101,9 @@ export function useRuntimeConnection({
                     retries: Number(st.retries || 0),
                     filesCreated: Array.isArray(st.files_created) ? st.files_created : undefined,
                     workSummary: Array.isArray(st.work_summary) ? st.work_summary : undefined,
+                    codeLines: Number((st as any).code_lines || 0) || undefined,
+                    codeKb: Number((st as any).code_kb || 0) || undefined,
+                    codeLanguages: Array.isArray((st as any).code_languages) ? (st as any).code_languages : undefined,
                 })),
                 previewUrl: runPreviewUrlRef.current || undefined,
             };
@@ -1074,6 +1183,10 @@ export function useRuntimeConnection({
                 const writerLabel = writer
                     ? writer.charAt(0).toUpperCase() + writer.slice(1)
                     : 'Writer';
+                const codeLines = Number(msg.code_lines || 0);
+                const totalLines = Number(msg.total_lines || 0);
+                const codeKb = Number(msg.code_kb || 0);
+                const languages = Array.isArray(msg.languages) ? (msg.languages as string[]) : [];
                 if (sid) {
                     appendSubtaskTimeline(
                         sid,
@@ -1081,8 +1194,17 @@ export function useRuntimeConnection({
                             ? tr(`${writerLabel} 已写入文件：${writtenPath.split('/').pop()}`, `${writerLabel} wrote file: ${writtenPath.split('/').pop()}`)
                             : tr(`${writerLabel} 已写入真实文件。`, `${writerLabel} wrote a real file.`),
                     );
+                    const canvasNodeId = subtaskNodeMap.current[sid];
+                    if (canvasNodeId && codeLines > 0) {
+                        updateNodeData(canvasNodeId, {
+                            codeLines,
+                            totalLines,
+                            codeKb,
+                            codeLanguages: languages,
+                        });
+                    }
                 }
-                addConsoleLog(`[progress] #${sid} stage=${stage} writer=${writer || 'builder'} path=${writtenPath}`);
+                addConsoleLog(`[progress] #${sid} stage=${stage} writer=${writer || 'builder'} path=${writtenPath}${codeLines > 0 ? ` code_lines=${codeLines} code_kb=${codeKb}` : ''}`);
                 emitWorkspaceUpdated({
                     eventType: 'subtask_progress',
                     stage,
@@ -1092,6 +1214,22 @@ export function useRuntimeConnection({
                     copiedFiles: Number(artifactSync?.copied_files || 0),
                     live: Boolean(artifactSync?.live),
                 });
+            } else if (stage === 'stream_stats') {
+                const totalStreamSec = Number(msg.total_stream_sec || 0);
+                const charsPerSec = Number(msg.chars_per_sec || 0);
+                const firstContentSec = msg.first_content_sec != null ? Number(msg.first_content_sec) : null;
+                const modelLatencyMs = totalStreamSec > 0 ? Math.round(totalStreamSec * 1000) : 0;
+                if (sid) {
+                    const canvasNodeId = subtaskNodeMap.current[sid];
+                    if (canvasNodeId && modelLatencyMs > 0) {
+                        updateNodeData(canvasNodeId, {
+                            modelLatencyMs,
+                            charsPerSec,
+                            ...(firstContentSec != null ? { firstContentSec } : {}),
+                        });
+                    }
+                }
+                addConsoleLog(`[stream_stats] #${sid} model=${msg.model || '?'} total=${totalStreamSec.toFixed(1)}s chars/s=${charsPerSec} chunks=${msg.chunks || 0}`);
             } else if (stage === 'error' && msg.message) {
                 if (sid) appendSubtaskTimeline(sid, `执行异常：${String(msg.message).slice(0, 180)}`);
                 addMessage('system', `${msg.message}`, 'Error', '⚠️', 'var(--orange)');
@@ -1142,7 +1280,7 @@ export function useRuntimeConnection({
                                 runId,
                                 nodeExecutionId,
                                 sessionId,
-                                keepOpenMs: 8000,
+                                keepOpenMs: 12000,
                                 alwaysOnTop: true,
                             });
                             const resultSessionId = String(result.sessionId || result.session_id || sessionId).trim();
@@ -1471,7 +1609,12 @@ export function useRuntimeConnection({
             } else if (stage === 'waiting_ai') {
                 const agent = String(msg.agent || 'agent');
                 const elapsed = Number(msg.elapsed_sec || 0);
-                addConsoleLog(`[progress] #${sid} stage=waiting_ai agent=${agent} elapsed=${elapsed}s`);
+                // §FIX: Throttle waiting_ai console logs to one entry every 30s per node.
+                const lastLoggedElapsed = waitingAiLastConsoleLogRef.current[sid] || 0;
+                if (!lastLoggedElapsed || elapsed - lastLoggedElapsed >= 30) {
+                    waitingAiLastConsoleLogRef.current[sid] = elapsed;
+                    addConsoleLog(`[progress] #${sid} stage=waiting_ai agent=${agent} elapsed=${elapsed}s`);
+                }
                 // §PROGRESS-FIX: Update canvas node with live progress during execution
                 const canvasNodeId = subtaskNodeMap.current[sid];
                 if (canvasNodeId) {
@@ -1530,6 +1673,11 @@ export function useRuntimeConnection({
                         const existingNode = nodes.find((node) => node.id === canvasNodeId);
                         const existingData = (existingNode?.data || {}) as Record<string, unknown>;
                         const phase = String(msg.phase || existingData.phase || 'drafting');
+                        // v3.0: Extract code metrics for enhanced progress display
+                        const codeLines = Number(msg.code_lines || 0);
+                        const totalLines = Number(msg.total_lines || 0);
+                        const codeKb = Number(msg.code_kb || 0);
+                        const languages = Array.isArray(msg.languages) ? (msg.languages as string[]) : [];
                         const humanActivity = buildReadableCurrentWork({
                             lang,
                             nodeType: String(existingData.nodeType || 'builder'),
@@ -1541,14 +1689,27 @@ export function useRuntimeConnection({
                             lastOutput: preview,
                             logs: Array.isArray(existingData.log) ? (existingData.log as Array<{ ts?: number; msg?: string; type?: string }>) : [],
                         });
+                        // v3.0: Build code metrics text for node display
+                        const codeMetricsText = codeLines > 0
+                            ? (lang === 'zh'
+                                ? `已输出 ${codeLines} 行代码 / ${codeKb}KB${languages.length ? ` (${languages.join('+')})` : ''}`
+                                : `${codeLines} lines / ${codeKb}KB${languages.length ? ` (${languages.join('+')})` : ''}`)
+                            : '';
                         updateNodeData(canvasNodeId, {
-                            outputSummary: humanActivity,
+                            outputSummary: codeMetricsText ? `${codeMetricsText}\n${humanActivity}` : humanActivity,
                             lastOutput: preview,
                             hasModelPartialOutput: true,
                             phase,
+                            // v3.0: Store code metrics for NodeDetailPopup
+                            ...(codeLines > 0 ? {
+                                codeLines,
+                                totalLines,
+                                codeKb,
+                                codeLanguages: languages,
+                            } : {}),
                         });
                     }
-                    addConsoleLog(`[progress] #${sid} stage=partial_output source=${source} len=${preview.length}`);
+                    addConsoleLog(`[progress] #${sid} stage=partial_output source=${source} len=${preview.length}${msg.code_lines ? ` code_lines=${msg.code_lines} code_kb=${msg.code_kb}` : ''}`);
                 }
             } else if (stage === 'stream_stalled') {
                 const reason = String(msg.reason || '').slice(0, 180);
@@ -1832,6 +1993,10 @@ export function useRuntimeConnection({
                     })
                     : '';
                 if (neId) updatePayload.nodeExecutionId = neId;
+                if (payload.nodeKey !== undefined) {
+                    updatePayload.rawNodeKey = String(payload.nodeKey || '');
+                    updatePayload.nodeType = normalizeCanvasNodeType(payload.nodeKey || existingData.nodeType || 'builder');
+                }
                 updatePayload.runtime = String(payload.runtime || 'openclaw');
                 updatePayload.progress = payload.progress !== undefined ? Number(payload.progress) : fallbackProgress;
                 if (payload.tokensUsed !== undefined) updatePayload.tokensUsed = Number(payload.tokensUsed);
@@ -1851,6 +2016,22 @@ export function useRuntimeConnection({
                 if (hasStartedAtField) updatePayload.startedAt = startedAtMs;
                 if (hasEndedAtField) updatePayload.endedAt = endedAtMs;
                 if (hasTimingFields) updatePayload.durationSeconds = durationSeconds ?? 0;
+                // v3.0.5: Code output metrics from NE
+                if (payload.codeLines !== undefined && Number(payload.codeLines) > 0) {
+                    updatePayload.codeLines = Number(payload.codeLines);
+                }
+                if (payload.totalLines !== undefined && Number(payload.totalLines) > 0) {
+                    updatePayload.totalLines = Number(payload.totalLines);
+                }
+                if (payload.codeKb !== undefined && Number(payload.codeKb) > 0) {
+                    updatePayload.codeKb = Number(payload.codeKb);
+                }
+                if (Array.isArray(payload.codeLanguages) && payload.codeLanguages.length > 0) {
+                    updatePayload.codeLanguages = payload.codeLanguages.map(String);
+                }
+                if (payload.modelLatencyMs !== undefined && Number(payload.modelLatencyMs) > 0) {
+                    updatePayload.modelLatencyMs = Number(payload.modelLatencyMs);
+                }
                 if (status === 'queued' || status === 'running') updatePayload._terminalStatus = false;
                 if (['passed', 'failed', 'cancelled', 'skipped'].includes(status)) updatePayload._terminalStatus = true;
                 updateNodeData(canvasNodeId, updatePayload);
@@ -1916,6 +2097,28 @@ export function useRuntimeConnection({
                 if (Array.isArray(payload.loadedSkills)) nodePatch.loaded_skills = payload.loadedSkills.map(String);
                 if (Array.isArray(payload.activityLog)) nodePatch.activity_log = payload.activityLog as NodeExecutionRecord['activity_log'];
                 if (Array.isArray(payload.referenceUrls)) nodePatch.reference_urls = payload.referenceUrls.map(String);
+                if (payload.currentAction !== undefined) nodePatch.current_action = String(payload.currentAction || '');
+                if (Array.isArray(payload.workSummary)) nodePatch.work_summary = payload.workSummary.map(String);
+                if (payload.toolCallStats && typeof payload.toolCallStats === 'object') {
+                    nodePatch.tool_call_stats = Object.fromEntries(
+                        Object.entries(payload.toolCallStats as Record<string, unknown>).map(([key, value]) => [key, Number(value || 0)]),
+                    );
+                }
+                if (Array.isArray(payload.reportArtifactIds)) nodePatch.report_artifact_ids = payload.reportArtifactIds.map(String);
+                if (Array.isArray(payload.handoffArtifactIds)) nodePatch.handoff_artifact_ids = payload.handoffArtifactIds.map(String);
+                if (payload.dossierArtifactId !== undefined) nodePatch.dossier_artifact_id = String(payload.dossierArtifactId || '');
+                if (payload.summaryArtifactId !== undefined) nodePatch.summary_artifact_id = String(payload.summaryArtifactId || '');
+                if (payload.blockingReason !== undefined) nodePatch.blocking_reason = String(payload.blockingReason || '');
+                if (payload.latestReviewDecision !== undefined) nodePatch.latest_review_decision = String(payload.latestReviewDecision || '');
+                if (payload.latestReviewReportArtifactId !== undefined) nodePatch.latest_review_report_artifact_id = String(payload.latestReviewReportArtifactId || '');
+                if (payload.latestMergeManifestArtifactId !== undefined) nodePatch.latest_merge_manifest_artifact_id = String(payload.latestMergeManifestArtifactId || '');
+                if (payload.latestDeploymentReceiptArtifactId !== undefined) nodePatch.latest_deployment_receipt_artifact_id = String(payload.latestDeploymentReceiptArtifactId || '');
+                // v3.0.5: Code output metrics
+                if (payload.codeLines !== undefined) nodePatch.code_lines = Number(payload.codeLines || 0);
+                if (payload.totalLines !== undefined) nodePatch.total_lines = Number(payload.totalLines || 0);
+                if (payload.codeKb !== undefined) nodePatch.code_kb = Number(payload.codeKb || 0);
+                if (Array.isArray(payload.codeLanguages)) nodePatch.code_languages = payload.codeLanguages.map(String);
+                if (payload.modelLatencyMs !== undefined) nodePatch.model_latency_ms = Number(payload.modelLatencyMs || 0);
                 if (payload.errorMessage !== undefined) nodePatch.error_message = String(payload.errorMessage || '');
                 if (Array.isArray(payload.artifactIds)) nodePatch.artifact_ids = payload.artifactIds.map(String);
                 if (payload.startedAt !== undefined) nodePatch.started_at = toEpochSeconds(payload.startedAt, 0);
@@ -1967,6 +2170,10 @@ export function useRuntimeConnection({
                 const incomingSkills = Array.isArray(payload.loadedSkills) ? payload.loadedSkills.map(String) : [];
                 const existingSkills = Array.isArray(existingData.loadedSkills) ? (existingData.loadedSkills as string[]) : [];
                 const mergedSkills = [...new Set([...existingSkills, ...incomingSkills])];
+                if (payload.nodeKey !== undefined) {
+                    update.rawNodeKey = String(payload.nodeKey || '');
+                    update.nodeType = normalizeCanvasNodeType(payload.nodeKey || existingData.nodeType || 'builder');
+                }
                 update.runtime = String(payload.runtime || 'openclaw');
                 if (progressPct !== undefined) update.progress = progressPct;
                 if (partialOutput) {
@@ -1988,6 +2195,15 @@ export function useRuntimeConnection({
                 if (mergedSkills.length > 0) update.loadedSkills = mergedSkills;
                 if (phase) update.phase = phase;
                 if (toolCall) update.toolCall = toolCall;
+                if (payload.modelLatencyMs !== undefined && Number(payload.modelLatencyMs) > 0) {
+                    update.modelLatencyMs = Number(payload.modelLatencyMs);
+                }
+                if (payload.codeLines !== undefined && Number(payload.codeLines) > 0) {
+                    update.codeLines = Number(payload.codeLines);
+                }
+                if (payload.codeLanguages !== undefined && Array.isArray(payload.codeLanguages) && payload.codeLanguages.length > 0) {
+                    update.codeLanguages = (payload.codeLanguages as string[]).map(String);
+                }
                 if (Object.keys(update).length) updateNodeData(canvasNodeId, update);
                 if (Array.isArray(payload.activityLog) && payload.activityLog.length > 0) {
                     const normalizedActivityLog = (payload.activityLog as Array<{ ts?: number; msg?: string; type?: string }>)
@@ -2040,6 +2256,14 @@ export function useRuntimeConnection({
                 if (partialOutput) progressPatch.output_summary = partialOutput;
                 if (progressPct !== undefined) progressPatch.progress = progressPct;
                 if (phase) progressPatch.phase = phase;
+                if (payload.currentAction !== undefined) progressPatch.current_action = String(payload.currentAction || '');
+                if (Array.isArray(payload.workSummary)) progressPatch.work_summary = payload.workSummary.map(String);
+                if (payload.toolCallStats && typeof payload.toolCallStats === 'object') {
+                    progressPatch.tool_call_stats = Object.fromEntries(
+                        Object.entries(payload.toolCallStats as Record<string, unknown>).map(([key, value]) => [key, Number(value || 0)]),
+                    );
+                }
+                if (payload.blockingReason !== undefined) progressPatch.blocking_reason = String(payload.blockingReason || '');
                 if (typeof payload._neVersion === 'number') progressPatch.version = payload._neVersion;
                 onMergeNodeExecution(progressPatch);
             }
@@ -2194,13 +2418,14 @@ export function useRuntimeConnection({
                 });
             }
 
+            // v3.1: Always clear running state on run_complete, even if no subtask details.
+            setRunning(false);
             // §FIX: Display completion report card (same as orchestrator_complete)
             const ocSubtasks = Array.isArray(payload.subtasks) ? payload.subtasks as Array<{
                 id: string; agent: string; status: string; retries: number;
                 work_summary?: string[]; files_created?: string[]; error?: string;
             }> : [];
             if (ocSubtasks.length > 0) {
-                setRunning(false);
                 const diffRaw = String(payload.difficulty || difficulty).toLowerCase();
                 const runDifficulty: 'simple' | 'standard' | 'pro' = (
                     diffRaw === 'simple' || diffRaw === 'pro' || diffRaw === 'standard'
@@ -2219,6 +2444,9 @@ export function useRuntimeConnection({
                         retries: Number(st.retries || 0),
                         filesCreated: Array.isArray(st.files_created) ? st.files_created : undefined,
                         workSummary: Array.isArray(st.work_summary) ? st.work_summary : undefined,
+                        codeLines: Number((st as any).code_lines || 0) || undefined,
+                        codeKb: Number((st as any).code_kb || 0) || undefined,
+                        codeLanguages: Array.isArray((st as any).code_languages) ? (st as any).code_languages : undefined,
                     })),
                     previewUrl: completionPreviewUrl || runPreviewUrlRef.current || undefined,
                 };
@@ -2273,16 +2501,28 @@ export function useRuntimeConnection({
     }, [connected]);
 
     // ── Send goal ──
-    const handleSendGoal = useCallback((goal: string) => {
-        addMessage('user', goal, 'You', '👤');
+    const handleSendGoal = useCallback((goal: string, attachments: ChatAttachment[] = []) => {
+        const normalizedGoal = goal.trim();
+        const effectiveGoal = normalizedGoal || defaultGoalFromAttachments(lang);
+        addMessage('user', effectiveGoal, 'You', '👤', undefined, undefined, attachments);
         if (connected) {
             resetRunState();
             const recentHistory = messages
-                .filter(m => m.role === 'user' || m.role === 'agent')
+                .filter((m) => isHistoryConversationMessage(m) && (m.content.trim() || m.completionData))
                 .slice(-7)
-                .map(m => ({ role: m.role, content: m.content.slice(0, 500) }));
-            recentHistory.push({ role: 'user', content: goal.slice(0, 500) });
+                .map((m) => {
+                    const completionSummary = m.completionData
+                        ? `Run summary: ${m.completionData.completed}/${m.completionData.total} nodes completed, retries=${m.completionData.retries}, duration=${m.completionData.durationSeconds}s.`
+                        : '';
+                    const historyContent = [m.content, completionSummary].filter(Boolean).join('\n').trim();
+                    return {
+                        role: m.role,
+                        content: buildMessageContentForHistory(historyContent, m.attachments || []),
+                    };
+                });
+            recentHistory.push({ role: 'user', content: buildMessageContentForHistory(effectiveGoal, attachments) });
             const effectiveGoalRuntime = goalRuntime === 'openclaw' ? 'openclaw' : 'local';
+            const userCanvasPlan = buildRunGoalPlan(nodes, edges);
             if (effectiveGoalRuntime === 'openclaw') {
                 addMessage(
                     'system',
@@ -2294,14 +2534,33 @@ export function useRuntimeConnection({
                     '#a855f7',
                 );
             }
-            sendGoal(goal, undefined, recentHistory, difficulty, effectiveGoalRuntime, sessionId);
+            if (userCanvasPlan) {
+                addMessage(
+                    'system',
+                    lang === 'zh'
+                        ? `检测到你当前画布上的 ${userCanvasPlan.nodes.length} 个自定义节点，本轮会优先按你的节点编排执行。`
+                        : `Detected ${userCanvasPlan.nodes.length} custom canvas nodes. This run will follow your canvas workflow first.`,
+                    'Evermind',
+                    '🧭',
+                );
+            }
+            sendGoal(
+                effectiveGoal,
+                undefined,
+                recentHistory,
+                difficulty,
+                effectiveGoalRuntime,
+                sessionId,
+                attachments,
+                userCanvasPlan,
+            );
             addMessage('system', lang === 'zh' ? '已收到目标，正在规划执行...' : 'Goal received — planning...', 'Evermind', '🧠');
         } else {
             addMessage('system',
                 lang === 'zh' ? '后端未连接。请运行：<code>cd backend && python server.py</code>' : 'Backend offline. Run: <code>cd backend && python server.py</code>',
                 'System', '⚠️');
         }
-    }, [connected, sendGoal, addMessage, messages, difficulty, goalRuntime, lang, resetRunState, sessionId]);
+    }, [connected, sendGoal, addMessage, messages, difficulty, goalRuntime, lang, resetRunState, sessionId, nodes, edges]);
 
     // ── Run workflow from canvas ──
     const handleRun = useCallback(() => {

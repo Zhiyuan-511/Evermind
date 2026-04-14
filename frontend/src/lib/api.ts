@@ -1,6 +1,7 @@
 /* Evermind — REST API Client */
 
-import type { RunReportRecord, RunSubtaskReport, SelfCheckItem, SkillLibraryRecord, TaskCard, TaskMode, TaskPriority, TaskStatus } from '@/lib/types';
+import type { ChatAttachment, RunReportRecord, RunSubtaskReport, SelfCheckItem, SkillLibraryRecord, TaskCard, TaskMode, TaskPriority, TaskStatus } from '@/lib/types';
+import { MAX_CHAT_ATTACHMENTS, MAX_CHAT_ATTACHMENT_BYTES, normalizeChatAttachment } from '@/lib/chatAttachments';
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -250,6 +251,17 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     return promise;
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 0x8000;
+    let binary = '';
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+        const chunk = bytes.subarray(index, index + chunkSize);
+        binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+}
+
 interface ApiRequestOptions {
     signal?: AbortSignal;
 }
@@ -295,6 +307,56 @@ export const getOpenClawGuide = () => apiFetch<{
     };
 }>('/api/openclaw-guide');
 
+export const uploadChatAttachments = async (
+    sessionId: string,
+    files: File[],
+): Promise<{ attachments: ChatAttachment[]; rejected: string[] }> => {
+    const selected = Array.isArray(files) ? files.slice(0, MAX_CHAT_ATTACHMENTS) : [];
+    const rejected: string[] = [];
+    const accepted = selected.filter((file) => {
+        if (file.size <= MAX_CHAT_ATTACHMENT_BYTES) return true;
+        rejected.push(`${file.name}: exceeds ${Math.round(MAX_CHAT_ATTACHMENT_BYTES / (1024 * 1024))}MB`);
+        return false;
+    });
+    if (accepted.length === 0) return { attachments: [], rejected };
+
+    const payloadFiles = await Promise.all(accepted.map(async (file) => ({
+        name: file.name,
+        mime_type: file.type || 'application/octet-stream',
+        size: file.size,
+        content_base64: arrayBufferToBase64(await file.arrayBuffer()),
+    })));
+
+    const response = await fetch(`${API_BASE}/api/chat/attachments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            session_id: String(sessionId || '').trim(),
+            files: payloadFiles,
+        }),
+        signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) {
+        let body: unknown;
+        try { body = await response.json(); } catch { /* ignore */ }
+        const msg = (body && typeof body === 'object' && 'error' in body)
+            ? String((body as Record<string, unknown>).error)
+            : `Attachment upload failed: ${response.status}`;
+        throw new ApiError(response.status, msg, body);
+    }
+    const data = await response.json() as {
+        attachments?: unknown[];
+        rejected?: Array<{ name?: string; error?: string }>;
+    };
+    const attachments = (Array.isArray(data.attachments) ? data.attachments : [])
+        .map((item) => normalizeChatAttachment(item))
+        .filter((item): item is ChatAttachment => !!item);
+    const rejectedFromServer = Array.isArray(data.rejected)
+        ? data.rejected.map((item) => `${String(item?.name || 'attachment')}: ${String(item?.error || 'rejected')}`)
+        : [];
+    return { attachments, rejected: [...rejected, ...rejectedFromServer] };
+};
+
 // Models
 export const getModels = () => apiFetch<{ models: Array<{ id: string; provider: string; supports_tools: boolean }> }>('/api/models');
 
@@ -302,12 +364,8 @@ export const getModels = () => apiFetch<{ models: Array<{ id: string; provider: 
 export const getPlugins = () => apiFetch<{ plugins: Array<{ name: string; display_name: string; description: string; icon: string }> }>('/api/plugins');
 export const getPluginDefaults = () => apiFetch<{ defaults: Record<string, string[]> }>('/api/plugins/defaults');
 
-// Workflows
+// Workflows (read-only — mutation APIs removed in v3.5 cleanup)
 export const getWorkflows = () => apiFetch<{ workflows: unknown[] }>('/api/workflows');
-export const createWorkflow = (data: unknown) => apiFetch('/api/workflows', { method: 'POST', body: JSON.stringify(data) });
-export const getWorkflow = (id: string) => apiFetch(`/api/workflows/${id}`);
-export const updateWorkflow = (id: string, data: unknown) => apiFetch(`/api/workflows/${id}`, { method: 'PUT', body: JSON.stringify(data) });
-export const deleteWorkflow = (id: string) => apiFetch(`/api/workflows/${id}`, { method: 'DELETE' });
 
 // Tasks
 export const getTasks = async (options?: ApiRequestOptions & { sessionId?: string }) => {
@@ -489,6 +547,8 @@ export interface WorkflowTemplateSummary {
     label: string;
     description: string;
     nodeCount: number;
+    nodeCountMin?: number;
+    nodeCountMax?: number;
 }
 
 export const listWorkflowTemplates = async (): Promise<{ templates: WorkflowTemplateSummary[] }> => {
@@ -547,32 +607,8 @@ export const listNodeExecutions = async (runId?: string, options?: ApiRequestOpt
     return apiFetch(`/api/node-executions${qs}`, { signal: options?.signal });
 };
 
-export const createNodeExecution = async (data: Partial<NodeExecutionRecord> & { run_id: string }): Promise<{ nodeExecution: NodeExecutionRecord }> => {
-    return apiFetch('/api/node-executions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-    });
-};
-
 export const getNodeExecution = async (nodeId: string, options?: ApiRequestOptions): Promise<{ nodeExecution: NodeExecutionRecord }> => {
     return apiFetch(`/api/node-executions/${nodeId}`, { signal: options?.signal });
-};
-
-export const updateNodeExecution = async (nodeId: string, data: Partial<NodeExecutionRecord>): Promise<{ nodeExecution: NodeExecutionRecord }> => {
-    return apiFetch(`/api/node-executions/${nodeId}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-    });
-};
-
-export const transitionNodeExecution = async (nodeId: string, status: string): Promise<{ success: boolean; node_execution?: NodeExecutionRecord; error?: string }> => {
-    return apiFetch(`/api/node-executions/${nodeId}/transition`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status }),
-    });
 };
 
 export const retryNodeExecution = async (nodeId: string): Promise<{ nodeExecution: NodeExecutionRecord; retriedFrom: string }> => {

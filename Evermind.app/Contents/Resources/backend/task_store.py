@@ -126,6 +126,24 @@ def _normalize_activity_log(value: Any, *, limit: int = 80, message_limit: int =
     return items[-limit:]
 
 
+def _normalize_counter_map(
+    value: Any,
+    *,
+    limit: int = 40,
+    key_limit: int = 80,
+) -> Dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: Dict[str, int] = {}
+    for raw_key, raw_value in list(value.items())[:limit]:
+        key = _truncate_text(raw_key, key_limit).strip()
+        if not key:
+            continue
+        normalized[key] = max(0, _coerce_int(raw_value, 0))
+    return normalized
+
+
 def _normalize_selfcheck_items(value: Any) -> List[Dict[str, Any]]:
     if not isinstance(value, list):
         return []
@@ -240,17 +258,26 @@ VALID_NODE_STATUSES = {
 }
 
 VALID_NODE_TRANSITIONS: Dict[str, List[str]] = {
-    "queued":            ["running", "skipped", "cancelled"],
+    "queued":            ["running", "blocked", "skipped", "cancelled"],
     "running":           ["passed", "failed", "blocked", "waiting_approval", "cancelled"],
-    "passed":            ["running"],  # allow same canonical node to be reopened for orchestrator-driven rework
-    "failed":            ["running"],  # local canonical retries reopen the same node execution
+    "passed":            ["running", "queued"],  # allow reopening for orchestrator-driven rework/requeue
+    "failed":            ["running", "skipped", "queued"],  # soft-skip or requeue
     "blocked":           ["running", "skipped", "cancelled"],
     "waiting_approval":  ["running", "passed", "failed", "cancelled"],
     "skipped":           [],
     "cancelled":         [],   # terminal; rerun creates new NodeExecution
 }
 
-VALID_TRIGGER_SOURCES = {"openclaw", "openclaw_planner", "ui", "api", "retry", "resume"}
+VALID_TRIGGER_SOURCES = {
+    "openclaw",
+    "openclaw_planner",
+    "user_canvas",
+    "optimization_pass",
+    "ui",
+    "api",
+    "retry",
+    "resume",
+}
 VALID_RUNTIMES = {"local", "openclaw"}
 MAX_NODE_RETRY_COUNT = 5
 
@@ -263,6 +290,10 @@ VALID_ARTIFACT_TYPES = {
     "deployment_notes", "raw_log", "preview_ref",
     "browser_trace", "browser_capture", "state_snapshot",
     "qa_session_capture", "qa_session_video", "qa_session_log",
+    "node_transcript", "node_summary_report", "source_bundle",
+    "builder_handoff_report", "merge_manifest", "merge_execution_report",
+    "deployment_receipt", "review_rollback_report", "execution_dossier",
+    "qa_evidence_bundle",
 }
 
 
@@ -326,9 +357,28 @@ class NodeExecutionRecord:
     loaded_skills: List[str] = field(default_factory=list)
     activity_log: List[Dict[str, Any]] = field(default_factory=list)
     reference_urls: List[str] = field(default_factory=list)
+    current_action: str = ""
+    work_summary: List[str] = field(default_factory=list)
+    tool_call_stats: Dict[str, int] = field(default_factory=dict)
+    report_artifact_ids: List[str] = field(default_factory=list)
+    handoff_artifact_ids: List[str] = field(default_factory=list)
+    dossier_artifact_id: str = ""
+    summary_artifact_id: str = ""
+    blocking_reason: str = ""
+    latest_review_decision: str = ""
+    latest_review_report_artifact_id: str = ""
+    latest_merge_manifest_artifact_id: str = ""
+    latest_deployment_receipt_artifact_id: str = ""
     version: int = 0
     timeout_seconds: int = 0  # 0 = use default (600s for node)
     depends_on_keys: List[str] = field(default_factory=list)  # P3: node_key deps from template
+    code_lines: int = 0
+    total_lines: int = 0
+    code_kb: float = 0.0
+    code_languages: List[str] = field(default_factory=list)
+    model_latency_ms: int = 0
+    walkthrough_report: str = ""
+    files_created: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict:
         return asdict(self)
@@ -1086,6 +1136,18 @@ class NodeExecutionStore:
             loaded_skills=_normalize_string_list(data.get("loaded_skills"), limit=20, item_limit=80),
             activity_log=_normalize_activity_log(data.get("activity_log"), limit=80),
             reference_urls=_normalize_string_list(data.get("reference_urls"), limit=20, item_limit=500),
+            current_action=_truncate_text(data.get("current_action", ""), 500),
+            work_summary=_normalize_string_list(data.get("work_summary"), limit=12, item_limit=240),
+            tool_call_stats=_normalize_counter_map(data.get("tool_call_stats"), limit=40, key_limit=80),
+            report_artifact_ids=_normalize_string_list(data.get("report_artifact_ids"), limit=100, item_limit=120),
+            handoff_artifact_ids=_normalize_string_list(data.get("handoff_artifact_ids"), limit=100, item_limit=120),
+            dossier_artifact_id=_truncate_text(data.get("dossier_artifact_id", ""), 120),
+            summary_artifact_id=_truncate_text(data.get("summary_artifact_id", ""), 120),
+            blocking_reason=_truncate_text(data.get("blocking_reason", ""), 2000),
+            latest_review_decision=_truncate_text(data.get("latest_review_decision", ""), 40),
+            latest_review_report_artifact_id=_truncate_text(data.get("latest_review_report_artifact_id", ""), 120),
+            latest_merge_manifest_artifact_id=_truncate_text(data.get("latest_merge_manifest_artifact_id", ""), 120),
+            latest_deployment_receipt_artifact_id=_truncate_text(data.get("latest_deployment_receipt_artifact_id", ""), 120),
             version=1,
             timeout_seconds=max(0, _coerce_int(data.get("timeout_seconds", 0))),
             depends_on_keys=_normalize_string_list(data.get("depends_on_keys"), limit=20, item_limit=100),
@@ -1126,7 +1188,7 @@ class NodeExecutionStore:
         if new_status == "running":
             if previous_status in ("passed", "failed"):
                 node.retry_count = min(MAX_NODE_RETRY_COUNT, max(0, node.retry_count) + 1)
-            if previous_status in ("passed", "failed", "skipped", "cancelled"):
+            if previous_status in ("passed", "failed", "blocked", "skipped", "cancelled"):
                 node.started_at = now
                 node.ended_at = 0.0
                 node.progress = 5
@@ -1138,6 +1200,15 @@ class NodeExecutionStore:
         if new_status in ("passed", "failed", "skipped", "cancelled"):
             node.ended_at = now
             node.progress = 100
+        elif new_status == "blocked":
+            node.ended_at = now
+            node.progress = 0  # blocked = never executed, progress should be 0
+        elif new_status == "queued":
+            node.started_at = 0.0
+            node.ended_at = 0.0
+            node.progress = 0
+            node.error_message = ""
+            node.output_summary = ""
         node.updated_at = now
         node.version += 1
         self.save()
@@ -1182,6 +1253,31 @@ class NodeExecutionStore:
                 limit=20,
                 item_limit=500,
             )
+        if "current_action" in data:
+            node.current_action = _truncate_text(data["current_action"], 500)
+        if "work_summary" in data:
+            node.work_summary = _normalize_string_list(data["work_summary"], limit=12, item_limit=240)
+        if "tool_call_stats" in data:
+            node.tool_call_stats = _normalize_counter_map(data["tool_call_stats"], limit=40, key_limit=80)
+        if "tool_call_stats_merge" in data:
+            merged_stats = dict(node.tool_call_stats)
+            for key, value in _normalize_counter_map(data["tool_call_stats_merge"], limit=40, key_limit=80).items():
+                merged_stats[key] = value
+            node.tool_call_stats = merged_stats
+        if "blocking_reason" in data:
+            node.blocking_reason = _truncate_text(data["blocking_reason"], 2000)
+        if "latest_review_decision" in data:
+            node.latest_review_decision = _truncate_text(data["latest_review_decision"], 40)
+        if "dossier_artifact_id" in data:
+            node.dossier_artifact_id = _truncate_text(data["dossier_artifact_id"], 120)
+        if "summary_artifact_id" in data:
+            node.summary_artifact_id = _truncate_text(data["summary_artifact_id"], 120)
+        if "latest_review_report_artifact_id" in data:
+            node.latest_review_report_artifact_id = _truncate_text(data["latest_review_report_artifact_id"], 120)
+        if "latest_merge_manifest_artifact_id" in data:
+            node.latest_merge_manifest_artifact_id = _truncate_text(data["latest_merge_manifest_artifact_id"], 120)
+        if "latest_deployment_receipt_artifact_id" in data:
+            node.latest_deployment_receipt_artifact_id = _truncate_text(data["latest_deployment_receipt_artifact_id"], 120)
         if "retry_count" in data:
             node.retry_count = _coerce_int(data["retry_count"])
         if "retried_from_id" in data:
@@ -1200,8 +1296,34 @@ class NodeExecutionStore:
                 if aid not in existing:
                     node.artifact_ids.append(aid)
                     existing.add(aid)
+        if "report_artifact_ids" in data:
+            existing = set(node.report_artifact_ids)
+            for aid in _normalize_string_list(data["report_artifact_ids"], limit=100, item_limit=120):
+                if aid not in existing:
+                    node.report_artifact_ids.append(aid)
+                    existing.add(aid)
+        if "handoff_artifact_ids" in data:
+            existing = set(node.handoff_artifact_ids)
+            for aid in _normalize_string_list(data["handoff_artifact_ids"], limit=100, item_limit=120):
+                if aid not in existing:
+                    node.handoff_artifact_ids.append(aid)
+                    existing.add(aid)
         if "depends_on_keys" in data:
             node.depends_on_keys = _normalize_string_list(data["depends_on_keys"], limit=20, item_limit=100)
+        if "code_lines" in data:
+            node.code_lines = max(0, _coerce_int(data["code_lines"]))
+        if "total_lines" in data:
+            node.total_lines = max(0, _coerce_int(data["total_lines"]))
+        if "code_kb" in data:
+            node.code_kb = max(0.0, float(data.get("code_kb", 0.0) or 0.0))
+        if "code_languages" in data:
+            node.code_languages = _normalize_string_list(data["code_languages"], limit=30, item_limit=40)
+        if "model_latency_ms" in data:
+            node.model_latency_ms = max(0, _coerce_int(data["model_latency_ms"]))
+        if "walkthrough_report" in data:
+            node.walkthrough_report = _truncate_text(data["walkthrough_report"], 8000)
+        if "files_created" in data:
+            node.files_created = _normalize_string_list(data["files_created"], limit=20, item_limit=200)
         node.updated_at = max(0.0, _coerce_float(data.get("updated_at"), time.time()))
         node.version += 1
         self.save()
@@ -1298,6 +1420,29 @@ class ArtifactStore:
             self.save()
             return True
         return False
+
+    def upsert_by_node_and_type(self, data: Dict) -> Dict:
+        """Save or replace an artifact matching the same (node_execution_id, artifact_type).
+
+        When a node is re-run after rejection, this replaces the old report
+        instead of accumulating stale copies. Falls back to save_artifact
+        for new entries.
+        """
+        self._ensure_loaded()
+        ne_id = _truncate_text(data.get("node_execution_id", ""), 120)
+        a_type = str(data.get("artifact_type", "")).strip()
+        if ne_id and a_type:
+            # Find existing artifact of same type for this node
+            existing_id = None
+            for aid, art in self._artifacts.items():
+                if art.node_execution_id == ne_id and art.artifact_type == a_type:
+                    existing_id = aid
+                    break
+            if existing_id:
+                # Update in-place: reuse the existing ID
+                data = dict(data)
+                data["id"] = existing_id
+        return self.save_artifact(data)
 
 
 # ─────────────────────────────────────────────

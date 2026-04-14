@@ -38,7 +38,7 @@ DEFAULT_APP = Path.home() / "Desktop" / "Evermind.app"
 DEFAULT_WS_URL = "ws://127.0.0.1:8765/ws"
 DEFAULT_STORE_DIR = Path.home() / ".evermind"
 DEFAULT_BACKEND_LOG = DEFAULT_STORE_DIR / "logs" / "evermind-backend.log"
-TERMINAL_RUN_STATES = {"done", "failed", "cancelled", "waiting_review"}
+TERMINAL_RUN_STATES = {"done", "failed", "cancelled", "waiting_review", "waiting_selfcheck"}
 
 RUNTIME_FILES = [
     "agent_skills.py",
@@ -192,7 +192,11 @@ def _iter_run_nodes(run_id: str, store_dir: Path) -> Iterable[Dict[str, Any]]:
     if not path.exists():
         return []
     obj = _load_json_retry(path)
-    nodes = obj if isinstance(obj, list) else obj.get("executions", [])
+    nodes = (
+        obj
+        if isinstance(obj, list)
+        else obj.get("node_executions", obj.get("executions", []))
+    )
     return [item for item in nodes if item.get("run_id") == run_id]
 
 
@@ -337,7 +341,7 @@ async def _monitor_run(run_id: str, store_dir: Path, *, timeout_s: int) -> int:
         if run and str(run.get("status") or "") in TERMINAL_RUN_STATES:
             _print(f"[done] terminal run status={run.get('status')}")
             _print_terminal_summary(run_id, store_dir)
-            return 0 if str(run.get("status")) in {"done", "waiting_review"} else 1
+            return 0 if str(run.get("status")) in {"done", "waiting_review", "waiting_selfcheck"} else 1
 
         await asyncio.sleep(2)
 

@@ -2,6 +2,8 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { ChatAttachment } from '@/lib/types';
+import type { RunGoalPlanPayload } from '@/lib/workflowPlan';
 
 interface WSMessage {
     type: string;
@@ -102,13 +104,25 @@ export function useWebSocket({ url, onMessage, reconnectInterval = 3000 }: UseWe
 
     const sendGoal = useCallback((
         goal: string,
-        model = 'gpt-5.4',
+        model = 'kimi-coding',
         chatHistory?: Array<{role: string; content: string}>,
         difficulty = 'standard',
         runtime: 'local' | 'openclaw' = 'local',
         sessionId = '',
+        attachments: ChatAttachment[] = [],
+        plan: RunGoalPlanPayload | null = null,
     ) => {
-        send({ type: 'run_goal', goal, model, chat_history: chatHistory || [], difficulty, runtime, session_id: sessionId });
+        send({
+            type: 'run_goal',
+            goal,
+            model,
+            chat_history: chatHistory || [],
+            difficulty,
+            runtime,
+            session_id: sessionId,
+            attachments,
+            ...(plan ? { plan } : {}),
+        });
     }, [send]);
 
     const runWorkflow = useCallback((nodes: unknown[], edges: unknown[]) => {

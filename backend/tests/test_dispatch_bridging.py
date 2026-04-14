@@ -323,3 +323,87 @@ class TestDispatchBridgingIntegration:
                 assert task["status"] == "done"
                 assert task["latest_summary"] == "Auto-complete summary"
                 assert task["latest_risk"] == "Minor residual risk"
+
+
+class TestDispatchPayloadContracts:
+    def test_parallel_game_support_builder_dispatch_gets_runtime_support_contract(self, ws_env):
+        ts = task_store.get_task_store()
+        rs = task_store.get_run_store()
+        ns = task_store.get_node_execution_store()
+        task = ts.create_task({
+            "title": "TPS Game",
+            "description": "创建一个 3D 第三人称射击游戏，要有怪物、武器、大地图和可玩的战斗体验。",
+        })
+        run = rs.create_run({"task_id": task["id"], "runtime": "openclaw"})
+        rid = run["id"]
+
+        analyst = ns.create_node_execution({"run_id": rid, "node_key": "analyst", "node_label": "Analyst"})
+        builder1 = ns.create_node_execution({
+            "run_id": rid,
+            "node_key": "builder1",
+            "node_label": "Builder 1",
+            "input_summary": "负责主循环和核心视角",
+            "depends_on_keys": ["analyst"],
+        })
+        builder2 = ns.create_node_execution({
+            "run_id": rid,
+            "node_key": "builder2",
+            "node_label": "Builder 2",
+            "input_summary": "负责 HUD、武器反馈和支持模块",
+            "depends_on_keys": ["analyst"],
+        })
+        merger = ns.create_node_execution({
+            "run_id": rid,
+            "node_key": "merger",
+            "node_label": "Merger",
+            "input_summary": "整合 builder1 与 builder2 的成果",
+            "depends_on_keys": ["builder1", "builder2"],
+        })
+        rs.update_run(rid, {"node_execution_ids": [analyst["id"], builder1["id"], builder2["id"], merger["id"]]})
+
+        payload = server._build_dispatch_payload(rid, builder2["id"])
+
+        assert payload["builderLaneRole"] == "support"
+        assert payload["builder_lane_role"] == "support"
+        assert payload["canWriteRootIndex"] is False
+        assert payload["can_write_root_index"] is False
+        assert payload["allowedHtmlTargets"] == []
+        assert payload["dependsOnKeys"] == ["analyst"]
+        assert "[BUILDER RUNTIME SUPPORT CONTRACT]" in payload["inputSummary"]
+        assert "support lane" in payload["inputSummary"]
+        assert "Do NOT emit or overwrite" in payload["inputSummary"]
+        assert "index.html" in payload["inputSummary"]
+
+    def test_parallel_game_merger_dispatch_gets_integrator_contract(self, ws_env):
+        ts = task_store.get_task_store()
+        rs = task_store.get_run_store()
+        ns = task_store.get_node_execution_store()
+        task = ts.create_task({
+            "title": "TPS Game",
+            "description": "创建一个 3D 第三人称射击游戏，要有怪物、武器、大地图和可玩的战斗体验。",
+        })
+        run = rs.create_run({"task_id": task["id"], "runtime": "openclaw"})
+        rid = run["id"]
+
+        ns.create_node_execution({"run_id": rid, "node_key": "builder1", "node_label": "Builder 1"})
+        ns.create_node_execution({"run_id": rid, "node_key": "builder2", "node_label": "Builder 2"})
+        merger = ns.create_node_execution({
+            "run_id": rid,
+            "node_key": "merger",
+            "node_label": "Merger",
+            "input_summary": "整合 builder1 与 builder2 的成果",
+            "depends_on_keys": ["builder1", "builder2"],
+        })
+
+        payload = server._build_dispatch_payload(rid, merger["id"])
+
+        assert payload["builderLaneRole"] == "merger"
+        assert payload["builder_lane_role"] == "merger"
+        assert payload["builderMergerLike"] is True
+        assert payload["builder_merger_like"] is True
+        assert payload["canWriteRootIndex"] is True
+        assert payload["allowedHtmlTargets"] == ["index.html"]
+        assert payload["dependsOnKeys"] == ["builder1", "builder2"]
+        assert "[BUILDER RUNTIME MERGER CONTRACT]" in payload["inputSummary"]
+        assert "final merger/integrator" in payload["inputSummary"]
+        assert "every non-empty local JS/CSS/JSON support file" in payload["inputSummary"]

@@ -353,7 +353,7 @@ function PreviewCenter({
                 key={previewUrl}
                 src={previewUrl}
                 title="Website Preview"
-                sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-pointer-lock"
                 allow="keyboard-map; gamepad"
                 tabIndex={0}
                 onLoad={(e) => {

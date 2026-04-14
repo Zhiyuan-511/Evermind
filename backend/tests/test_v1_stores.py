@@ -90,6 +90,12 @@ class TestRunStoreCRUD(_TempDirMixin, unittest.TestCase):
         run = self.store.create_run({"task_id": "t1", "trigger_source": "invalid"})
         self.assertEqual(run["trigger_source"], "ui")
 
+    def test_create_accepts_custom_run_goal_sources(self):
+        user_canvas = self.store.create_run({"task_id": "t1", "trigger_source": "user_canvas"})
+        optimize = self.store.create_run({"task_id": "t1", "trigger_source": "optimization_pass"})
+        self.assertEqual(user_canvas["trigger_source"], "user_canvas")
+        self.assertEqual(optimize["trigger_source"], "optimization_pass")
+
     def test_delete_run(self):
         run = self.store.create_run({"task_id": "t1"})
         self.assertTrue(self.store.delete_run(run["id"]))

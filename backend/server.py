@@ -4,16 +4,20 @@ FastAPI + WebSocket server that bridges the frontend UI with the execution engin
 """
 
 import asyncio
+import base64
 from collections import deque
 from contextlib import asynccontextmanager
 try:
     import fcntl
 except ImportError:
     fcntl = None
+import importlib
 import json
 import logging
+import mimetypes
 import os
 import re
+import signal
 import shutil
 import sys
 import time
@@ -64,6 +68,31 @@ from preview_validation import (
 from runtime_paths import ensure_output_dir_alias, resolve_output_dir, resolve_state_dir
 from node_roles import normalize_node_role
 from agent_skills import list_skill_catalog, install_skill_from_github, remove_installed_skill
+
+_SESSION_CONTINUATION_HINT_RE = re.compile(
+    r"(继续|接着|延续|沿用|基于上次|在这个基础上|在上个版本上|上一轮|刚才那个|同一个项目|继续优化|"
+    r"continue|keep iterating|same project|same site|based on the previous|iterate on the current)",
+    re.IGNORECASE,
+)
+_SESSION_ITERATIVE_EDIT_HINT_RE = re.compile(
+    r"(修改|改一下|再改|再优化|微调|调整|完善|打磨|修一下|修复|修正|修补|继续做|继续完善|"
+    r"modify|revise|refine|iterate|tweak|polish)",
+    re.IGNORECASE,
+)
+_SESSION_DEICTIC_PROJECT_HINT_RE = re.compile(
+    r"(这个|这次|当前|现有|刚才|上次|上一版|上一轮|前一个|同一个|该项目|该网站|该游戏|这个游戏|这个网站|当前项目|当前网站|当前游戏|"
+    r"this|current|existing|previous|same|that one|the site|the game|the project)",
+    re.IGNORECASE,
+)
+_SESSION_REFERENTIAL_ISSUE_HINT_RE = re.compile(
+    r"(写得还可以|还有一点问题|这些问题|这些地方|上面的问题|当前的问题|existing issues|remaining issues|those issues|fix the issues)",
+    re.IGNORECASE,
+)
+_SESSION_NEW_PROJECT_HINT_RE = re.compile(
+    r"(全新|新建|重新做一个|重新创建|从零开始|另外做一个|另一个|新项目|新网站|新游戏|"
+    r"brand new|new project|new site|new game|from scratch|create a new|build a new)",
+    re.IGNORECASE,
+)
 
 # ─────────────────────────────────────────────
 # Setup
@@ -143,6 +172,484 @@ def _normalize_string_list(value: Any) -> List[str]:
     else:
         items = [value]
     return [str(item) for item in items if str(item).strip()]
+
+
+def _safe_session_segment(value: Any) -> str:
+    raw = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(value or "").strip()).strip("-._")
+    return (raw or f"session-{int(time.time())}")[:80]
+
+
+def _safe_filename(value: Any, fallback: str = "attachment.bin") -> str:
+    name = Path(str(value or fallback)).name.strip()
+    if not name:
+        name = fallback
+    safe = re.sub(r"[^a-zA-Z0-9._ -]+", "_", name).strip(" .")
+    return (safe or fallback)[:160]
+
+
+def _guess_attachment_kind(name: str, mime_type: str) -> str:
+    normalized_mime = str(mime_type or "").strip().lower()
+    suffix = Path(name).suffix.lower()
+    if normalized_mime.startswith("image/") or suffix in IMAGE_ATTACHMENT_EXTENSIONS:
+        return "image"
+    return "file"
+
+
+def _store_chat_attachment_bytes(
+    *,
+    session_id: str,
+    name: str,
+    mime_type: str,
+    raw_bytes: bytes,
+) -> Dict[str, Any]:
+    session_dir = CHAT_UPLOADS_DIR / _safe_session_segment(session_id)
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    safe_name = _safe_filename(name)
+    stem = Path(safe_name).stem[:80] or "attachment"
+    suffix = Path(safe_name).suffix[:20]
+    unique_name = f"{int(time.time() * 1000)}_{os.urandom(4).hex()}_{stem}{suffix}"
+    target = session_dir / unique_name
+    target.write_bytes(raw_bytes)
+
+    guessed_mime = str(mime_type or mimetypes.guess_type(safe_name)[0] or "application/octet-stream").strip() or "application/octet-stream"
+    return {
+        "id": target.stem[:120],
+        "name": safe_name,
+        "path": str(target),
+        "mime_type": guessed_mime[:160],
+        "size": len(raw_bytes),
+        "kind": _guess_attachment_kind(safe_name, guessed_mime),
+    }
+
+
+def _chat_attachment_public_url(request: Request, file_path: Path) -> str:
+    try:
+        rel = file_path.resolve().relative_to(CHAT_UPLOADS_DIR.resolve())
+        rel_path = "/".join(rel.parts)
+    except Exception:
+        rel_path = file_path.name
+    return str(request.base_url).rstrip("/") + f"/uploads/{rel_path}"
+
+
+def _serialize_chat_attachment(record: Dict[str, Any], request: Request) -> Dict[str, Any]:
+    path_value = Path(str(record.get("path") or "")).expanduser()
+    kind = str(record.get("kind") or _guess_attachment_kind(path_value.name, str(record.get("mime_type") or "")))
+    return {
+        "id": str(record.get("id") or path_value.stem)[:120],
+        "name": str(record.get("name") or path_value.name)[:220],
+        "path": str(path_value),
+        "mimeType": str(record.get("mime_type") or record.get("mimeType") or "application/octet-stream")[:160],
+        "size": max(0, int(record.get("size") or 0)),
+        "kind": kind,
+        "previewUrl": _chat_attachment_public_url(request, path_value) if kind == "image" else "",
+    }
+
+
+def _normalize_run_goal_attachments(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    uploads_root = CHAT_UPLOADS_DIR.resolve()
+    for item in value[:MAX_CHAT_ATTACHMENTS]:
+        if not isinstance(item, dict):
+            continue
+        raw_path = str(item.get("path") or "").strip()
+        if not raw_path:
+            continue
+        try:
+            resolved = Path(raw_path).expanduser().resolve()
+        except Exception:
+            continue
+        try:
+            resolved.relative_to(uploads_root)
+        except Exception:
+            continue
+        if not resolved.exists() or not resolved.is_file():
+            continue
+        dedupe_key = str(resolved)
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        name = str(item.get("name") or resolved.name).strip()[:220] or resolved.name
+        mime_type = str(item.get("mimeType") or item.get("mime_type") or mimetypes.guess_type(name)[0] or "application/octet-stream").strip()[:160]
+        result.append({
+            "id": str(item.get("id") or resolved.stem)[:120],
+            "name": name,
+            "path": str(resolved),
+            "mime_type": mime_type or "application/octet-stream",
+            "size": resolved.stat().st_size,
+            "kind": _guess_attachment_kind(name, mime_type),
+        })
+    return result
+
+
+def _build_attachment_context_block(attachments: List[Dict[str, Any]]) -> str:
+    if not attachments:
+        return ""
+    lines = [
+        "[ATTACHED FILES]",
+        "The user attached these files for this run. Reuse them and preserve their intent when editing or generating output.",
+    ]
+    for attachment in attachments[:MAX_CHAT_ATTACHMENTS]:
+        size = int(attachment.get("size") or 0)
+        lines.append(
+            f"- {attachment.get('name')} | kind={attachment.get('kind')} | type={attachment.get('mime_type')} | size={size} bytes"
+        )
+        lines.append(f"  stored_path: {attachment.get('path')}")
+    return "\n".join(lines)
+
+
+def _compose_node_input_summary(
+    base_summary: Any,
+    *,
+    effective_goal: str = "",
+    session_context_note: str = "",
+    cross_session_memory_note: str = "",
+    limit: int = 2000,
+) -> str:
+    parts: List[str] = []
+    summary = str(base_summary or "").strip()
+    if summary:
+        parts.append(summary)
+    goal_text = str(effective_goal or "").strip()
+    if goal_text:
+        parts.append(f"[RUN GOAL]\n{goal_text}")
+    session_note = str(session_context_note or "").strip()
+    if session_note:
+        parts.append(f"[SESSION CONTEXT]\n{session_note}")
+    memory_note = str(cross_session_memory_note or "").strip()
+    if memory_note:
+        parts.append(f"[RECENT RELATED RUN MEMORY]\n{memory_note}")
+    combined = "\n\n".join(part for part in parts if part).strip()
+    return combined[:limit]
+
+
+def _goal_requests_session_continuation(goal: str, chat_history: Optional[List[Dict[str, Any]]] = None) -> bool:
+    goal_text = str(goal or "").strip()
+    if not goal_text:
+        return False
+    if _SESSION_NEW_PROJECT_HINT_RE.search(goal_text):
+        return False
+    try:
+        from orchestrator import is_continuation_input
+        if is_continuation_input(goal_text):
+            return True
+    except Exception:
+        pass
+    if _SESSION_CONTINUATION_HINT_RE.search(goal_text):
+        return True
+    if _SESSION_ITERATIVE_EDIT_HINT_RE.search(goal_text) and _SESSION_DEICTIC_PROJECT_HINT_RE.search(goal_text):
+        return True
+    if _SESSION_ITERATIVE_EDIT_HINT_RE.search(goal_text) and _SESSION_REFERENTIAL_ISSUE_HINT_RE.search(goal_text):
+        return True
+
+    history = chat_history or []
+    if len(history) >= 2 and _SESSION_ITERATIVE_EDIT_HINT_RE.search(goal_text):
+        last_user_turn = next(
+            (
+                str(item.get("content") or "").strip()
+                for item in reversed(history)
+                if isinstance(item, dict) and str(item.get("role") or "").strip().lower() == "user"
+            ),
+            "",
+        )
+        if last_user_turn and (
+            _SESSION_CONTINUATION_HINT_RE.search(last_user_turn)
+            or _SESSION_DEICTIC_PROJECT_HINT_RE.search(last_user_turn)
+        ):
+            return True
+    return False
+
+
+_CROSS_SESSION_MEMORY_MAX_AGE_S = 14 * 24 * 60 * 60
+_CROSS_SESSION_MEMORY_MIN_KEY_CHARS = 24
+_CROSS_SESSION_MEMORY_NOTE_LIMIT = 1200
+_PROJECT_MEMORY_DIGEST_LIMIT = 3200
+_PROJECT_MEMORY_NODE_LIMIT = 6
+_PROJECT_MEMORY_NODE_ORDER = {
+    "planner": 1,
+    "analyst": 2,
+    "uidesign": 3,
+    "scribe": 4,
+    "imagegen": 5,
+    "spritesheet": 6,
+    "assetimport": 7,
+    "builder": 8,
+    "builder1": 9,
+    "builder2": 10,
+    "merger": 11,
+    "reviewer": 12,
+    "tester": 13,
+    "deployer": 14,
+    "debugger": 15,
+}
+
+
+def _normalize_goal_memory_key(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", text)
+    return text[:2000]
+
+
+def _goal_task_type(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        import task_classifier as _tc
+        return str(_tc.classify(text).task_type or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _find_related_task_for_cross_session_memory(goal: str, *, session_id: str = "") -> Optional[Dict[str, Any]]:
+    normalized_goal = _normalize_goal_memory_key(goal)
+    if len(normalized_goal) < _CROSS_SESSION_MEMORY_MIN_KEY_CHARS:
+        return None
+
+    goal_task_type = _goal_task_type(goal)
+    now = time.time()
+    candidates = get_task_store().list_tasks()
+    for task in candidates:
+        if not isinstance(task, dict):
+            continue
+        candidate_session_id = str(task.get("session_id") or "").strip()
+        if session_id and candidate_session_id == session_id:
+            continue
+        updated_at = _to_epoch_seconds(task.get("updated_at"))
+        if updated_at and updated_at < now - _CROSS_SESSION_MEMORY_MAX_AGE_S:
+            continue
+        summary = str(task.get("latest_summary") or "").strip()
+        risk = str(task.get("latest_risk") or "").strip()
+        verdict = str(task.get("review_verdict") or "").strip()
+        issues = task.get("review_issues")
+        has_memory = bool(summary or risk or verdict or (isinstance(issues, list) and issues))
+        if not has_memory:
+            continue
+        candidate_seed = str(task.get("description") or task.get("title") or "").strip()
+        candidate_key = _normalize_goal_memory_key(candidate_seed)
+        if len(candidate_key) < _CROSS_SESSION_MEMORY_MIN_KEY_CHARS:
+            continue
+        candidate_task_type = _goal_task_type(candidate_seed)
+        if goal_task_type and candidate_task_type and goal_task_type != candidate_task_type:
+            continue
+        exact_match = candidate_key == normalized_goal
+        prefix_match = candidate_key.startswith(normalized_goal) or normalized_goal.startswith(candidate_key)
+        if exact_match or prefix_match:
+            return task
+    return None
+
+
+def _build_cross_session_memory_note(task: Optional[Dict[str, Any]]) -> str:
+    if not isinstance(task, dict):
+        return ""
+
+    lines = [
+        "Recent related run detected from a different session/client.",
+        "Use these lessons to preserve continuity after relay/client/session changes, but do NOT treat them as permission to reuse old artifacts unless this run explicitly requests continuation.",
+    ]
+    title = str(task.get("title") or "").strip()
+    summary = str(task.get("latest_summary") or "").strip()
+    risk = str(task.get("latest_risk") or "").strip()
+    verdict = str(task.get("review_verdict") or "").strip().lower()
+    if title:
+        lines.append(f"Previous task: {title}")
+    if summary:
+        lines.append(f"Previous summary: {summary}")
+    if risk:
+        lines.append(f"Known risk: {risk}")
+    if verdict:
+        lines.append(f"Previous review verdict: {verdict}")
+    issues = task.get("review_issues")
+    if isinstance(issues, list):
+        normalized_issues = [str(item).strip() for item in issues if str(item).strip()]
+        if normalized_issues:
+            lines.append("Previous review issues: " + " | ".join(normalized_issues[:4]))
+    note = "\n".join(lines).strip()
+    if len(note) <= _CROSS_SESSION_MEMORY_NOTE_LIMIT:
+        return note
+    return note[:_CROSS_SESSION_MEMORY_NOTE_LIMIT].rstrip() + "..."
+
+
+def _compact_memory_text(value: Any, *, limit: int = 260) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "..."
+
+
+def _latest_task_run(task: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(task, dict):
+        return None
+    run_ids = task.get("run_ids")
+    if not isinstance(run_ids, list):
+        return None
+    rs = get_run_store()
+    runs: List[Dict[str, Any]] = []
+    for run_id in run_ids:
+        run = rs.get_run(str(run_id or "").strip())
+        if isinstance(run, dict):
+            runs.append(run)
+    if not runs:
+        return None
+    runs.sort(
+        key=lambda item: (
+            _to_epoch_seconds(item.get("updated_at"))
+            or _to_epoch_seconds(item.get("ended_at"))
+            or _to_epoch_seconds(item.get("created_at"))
+        ),
+        reverse=True,
+    )
+    return runs[0]
+
+
+def _project_memory_artifact_hint(node: Dict[str, Any]) -> str:
+    if not isinstance(node, dict):
+        return ""
+    artifact_store = get_artifact_store()
+    candidates = [
+        ("latest_review_report_artifact_id", "review report"),
+        ("latest_merge_manifest_artifact_id", "merge report"),
+        ("latest_deployment_receipt_artifact_id", "deployment receipt"),
+        ("summary_artifact_id", "summary report"),
+        ("dossier_artifact_id", "execution dossier"),
+    ]
+    for field_name, label in candidates:
+        artifact_id = str(node.get(field_name) or "").strip()
+        if not artifact_id:
+            continue
+        artifact = artifact_store.get_artifact(artifact_id)
+        if not isinstance(artifact, dict):
+            continue
+        path = _compact_memory_text(artifact.get("path") or "", limit=140)
+        title = _compact_memory_text(artifact.get("title") or "", limit=100)
+        if path:
+            return f"{label}: {path}"
+        if title:
+            return f"{label}: {title}"
+    return ""
+
+
+def _project_memory_node_line(node: Dict[str, Any]) -> str:
+    if not isinstance(node, dict):
+        return ""
+    label = str(node.get("node_label") or node.get("node_key") or "Node").strip()
+    status = str(node.get("status") or "").strip().lower() or "unknown"
+    summary_items = node.get("work_summary") if isinstance(node.get("work_summary"), list) else []
+    summary = "；".join(str(item).strip() for item in summary_items[:2] if str(item).strip())
+    if not summary:
+        summary = (
+            str(node.get("output_summary") or "").strip()
+            or str(node.get("current_action") or "").strip()
+            or str(node.get("error_message") or "").strip()
+            or str(node.get("blocking_reason") or "").strip()
+        )
+    summary = _compact_memory_text(summary, limit=240)
+    if not summary:
+        return ""
+    extras: List[str] = []
+    loaded_skills = node.get("loaded_skills") if isinstance(node.get("loaded_skills"), list) else []
+    if loaded_skills:
+        extras.append("skills=" + ", ".join(str(skill).strip() for skill in loaded_skills[:4] if str(skill).strip()))
+    refs = node.get("reference_urls") if isinstance(node.get("reference_urls"), list) else []
+    if refs:
+        extras.append(f"refs={len([item for item in refs if str(item).strip()])}")
+    artifact_hint = _project_memory_artifact_hint(node)
+    if artifact_hint:
+        extras.append(artifact_hint)
+    suffix = f" ({'; '.join(extras)})" if extras else ""
+    return f"- {label} [{status}]: {summary}{suffix}"
+
+
+def _build_project_memory_digest(
+    task: Optional[Dict[str, Any]],
+    *,
+    continuation: bool,
+) -> str:
+    if not isinstance(task, dict):
+        return ""
+
+    lines: List[str] = [
+        "Project memory digest from the latest known state of this project.",
+        (
+            "This run is explicitly continuing the same project. Patch existing files and preserve the strongest implemented parts."
+            if continuation
+            else "This run is related to a previous project. Reuse lessons and failure history, but only reuse artifacts if the user explicitly asks for continuation."
+        ),
+    ]
+    title = _compact_memory_text(task.get("title") or "", limit=180)
+    summary = _compact_memory_text(task.get("latest_summary") or "", limit=320)
+    risk = _compact_memory_text(task.get("latest_risk") or "", limit=220)
+    verdict = _compact_memory_text(task.get("review_verdict") or "", limit=60).lower()
+    related_files = task.get("related_files") if isinstance(task.get("related_files"), list) else []
+    issues = [
+        _compact_memory_text(item, limit=180)
+        for item in (task.get("review_issues") if isinstance(task.get("review_issues"), list) else [])
+        if str(item or "").strip()
+    ]
+    if title:
+        lines.append(f"Previous task: {title}")
+    if summary:
+        lines.append(f"Latest summary: {summary}")
+    if risk:
+        lines.append(f"Latest risk: {risk}")
+    if verdict:
+        lines.append(f"Latest review verdict: {verdict}")
+    if issues:
+        lines.append("Latest review issues:")
+        lines.extend(f"- {item}" for item in issues[:5])
+    if related_files:
+        file_list = [str(item).strip() for item in related_files[:8] if str(item).strip()]
+        if file_list:
+            lines.append("Known project files: " + ", ".join(file_list))
+
+    latest_run = _latest_task_run(task)
+    if isinstance(latest_run, dict):
+        run_status = _compact_memory_text(latest_run.get("status") or "", limit=40)
+        run_summary = _compact_memory_text(latest_run.get("summary") or "", limit=320)
+        run_risks = latest_run.get("risks") if isinstance(latest_run.get("risks"), list) else []
+        if run_status:
+            lines.append(f"Latest run status: {run_status}")
+        if run_summary:
+            lines.append(f"Latest run summary: {run_summary}")
+        if run_risks:
+            normalized_risks = [_compact_memory_text(item, limit=180) for item in run_risks if str(item or "").strip()]
+            if normalized_risks:
+                lines.append("Latest run remaining risks:")
+                lines.extend(f"- {item}" for item in normalized_risks[:4])
+
+        run_id = str(latest_run.get("id") or "").strip()
+        if run_id:
+            nodes = get_node_execution_store().list_node_executions(run_id=run_id) or []
+            if nodes:
+                nodes = sorted(
+                    nodes,
+                    key=lambda item: (
+                        _PROJECT_MEMORY_NODE_ORDER.get(str(item.get("node_key") or "").strip().lower(), 999),
+                        -_to_epoch_seconds(item.get("updated_at")),
+                    ),
+                )
+                node_lines: List[str] = []
+                for node in nodes:
+                    line = _project_memory_node_line(node)
+                    if not line:
+                        continue
+                    node_lines.append(line)
+                    if len(node_lines) >= _PROJECT_MEMORY_NODE_LIMIT:
+                        break
+                if node_lines:
+                    lines.append("Latest node carry-forward:")
+                    lines.extend(node_lines)
+
+    digest = "\n".join(line for line in lines if str(line or "").strip()).strip()
+    if len(digest) <= _PROJECT_MEMORY_DIGEST_LIMIT:
+        return digest
+    return digest[:_PROJECT_MEMORY_DIGEST_LIMIT].rstrip() + "..."
 
 
 def _coerce_float(value: Any, default: float = 0.0) -> float:
@@ -702,6 +1209,14 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 # Keep the legacy /tmp alias synced to the active runtime directory so older
 # prompts and preview assumptions cannot drift onto stale artifacts.
 LEGACY_OUTPUT_ALIAS = ensure_output_dir_alias(OUTPUT_DIR)
+CHAT_UPLOADS_DIR = STATE_DIR / "uploads"
+CHAT_UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+MAX_CHAT_ATTACHMENTS = max(1, coerce_int(os.getenv("EVERMIND_CHAT_ATTACHMENT_MAX_FILES", 8), 8, minimum=1, maximum=24))
+MAX_CHAT_ATTACHMENT_BYTES = max(
+    64 * 1024,
+    coerce_int(os.getenv("EVERMIND_CHAT_ATTACHMENT_MAX_BYTES", 12 * 1024 * 1024), 12 * 1024 * 1024, minimum=64 * 1024),
+)
+IMAGE_ATTACHMENT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".svg", ".bmp", ".avif"}
 
 # Path to the original frontend HTML (parent directory)
 FRONTEND_HTML = Path(__file__).parent.parent / "evermind_godmode_final.html"
@@ -715,8 +1230,12 @@ async def _broadcast_ws_event(data: Dict[str, Any], *, exclude_ws: Optional[WebS
             continue
         try:
             await client_ws.send_json(data)
-        except Exception:
+        except (RuntimeError, OSError):
+            # v3.1: Only evict on connection-level errors (broken pipe, disconnected).
+            # Transient send failures should not permanently evict the client.
             stale_clients.append(client_ws)
+        except Exception as exc:
+            logger.debug("Non-fatal broadcast error: %s", str(exc)[:200])
     for client_ws in stale_clients:
         connected_clients.discard(client_ws)
 
@@ -1120,7 +1639,8 @@ def _auto_chain_next_node(run_id: str) -> "list[str] | str | None":
         lower = str(node_key or "").strip().lower()
         return lower in {"reviewer", "deployer", "tester"} or lower.startswith(("reviewer_", "deployer_", "tester_"))
 
-    while True:
+    MAX_CHAIN_ITERATIONS = 50
+    for _chain_iter in range(MAX_CHAIN_ITERATIONS):
         nes = ns.list_node_executions(run_id=run_id)
         if not nes:
             return None
@@ -1158,12 +1678,17 @@ def _auto_chain_next_node(run_id: str) -> "list[str] | str | None":
             return ready
 
         if blocked:
+            cancelled_any = False
             for blocked_id in blocked:
                 transitioned = ns.transition_node(blocked_id, "cancelled")
                 if transitioned.get("success"):
+                    cancelled_any = True
                     ns.update_node_execution(blocked_id, {
                         "error_message": "Blocked by failed dependencies.",
                     })
+            if not cancelled_any:
+                logger.warning("_auto_chain_next_node: blocked nodes could not be cancelled, breaking loop")
+                return None
             continue
 
         statuses = {ne.get("status") for ne in nes}
@@ -1171,6 +1696,9 @@ def _auto_chain_next_node(run_id: str) -> "list[str] | str | None":
             return "__ALL_DONE__"
 
         return None
+
+    logger.error("_auto_chain_next_node: exceeded %d iterations for run %s", MAX_CHAIN_ITERATIONS, run_id)
+    return None
 
 
 def _cancel_run_cascade(run_id: str) -> Dict[str, Any]:
@@ -1232,6 +1760,197 @@ def _build_cancel_payload(run_id: str, *, cancelled_nodes: int = 0, reason: str 
     return payload
 
 
+_DISPATCH_MERGER_LIKE_RE = re.compile(
+    r"\b(?:final merger|merger|integrator|integration|assemble|assembly|merge)\b",
+    re.IGNORECASE,
+)
+
+
+def _dispatch_goal_wants_multi_page(goal: str) -> bool:
+    text = str(goal or "").strip()
+    if not text:
+        return False
+    try:
+        import task_classifier as _tc
+
+        return bool(_tc.wants_multi_page(text))
+    except Exception:
+        return False
+
+
+def _dispatch_node_is_merger_like(node_snapshot: Optional[Dict[str, Any]]) -> bool:
+    haystack = "\n".join(
+        str((node_snapshot or {}).get(field) or "")
+        for field in ("node_key", "node_label", "input_summary")
+    )
+    return bool(_DISPATCH_MERGER_LIKE_RE.search(haystack))
+
+
+def _dispatch_builder_lane_profile(
+    run_id: str,
+    node_execution_id: str,
+    *,
+    goal: str = "",
+) -> Dict[str, Any]:
+    ne_snapshot = get_node_execution_store().get_node_execution(node_execution_id) or {}
+    raw_key = str(ne_snapshot.get("node_key") or "").strip()
+    normalized = normalize_node_role(raw_key) or raw_key.lower()
+    merger_like = normalized == "merger" or _dispatch_node_is_merger_like(ne_snapshot)
+    if normalized != "builder" and not merger_like:
+        return {}
+
+    run_nodes = sorted(
+        get_node_execution_store().list_node_executions(run_id=run_id) or [],
+        key=lambda item: (_coerce_float(item.get("created_at"), 0.0), str(item.get("id") or "")),
+    )
+    builder_nodes = [
+        item
+        for item in run_nodes
+        if normalize_node_role(str(item.get("node_key") or "").strip()) == "builder"
+        and not _dispatch_node_is_merger_like(item)
+    ]
+    builder_keys = [
+        str(item.get("node_key") or "").strip()
+        for item in builder_nodes
+        if str(item.get("node_key") or "").strip()
+    ]
+    primary_builder = builder_nodes[0] if builder_nodes else None
+    primary_builder_key = str((primary_builder or {}).get("node_key") or "").strip()
+    task_type = _goal_task_type(goal)
+    multi_page_goal = _dispatch_goal_wants_multi_page(goal)
+    merger_present = any(
+        normalize_node_role(str(item.get("node_key") or "").strip()) == "merger"
+        or _dispatch_node_is_merger_like(item)
+        for item in run_nodes
+    )
+    depends_on_keys = [
+        str(dep).strip()
+        for dep in (ne_snapshot.get("depends_on_keys") or [])
+        if str(dep).strip()
+    ]
+    patch_mode = bool(
+        normalized == "builder"
+        and not merger_like
+        and len(builder_nodes) > 1
+        and task_type == "game"
+        and not multi_page_goal
+        and not merger_present
+        and primary_builder_key
+        and str(ne_snapshot.get("id") or "") != str((primary_builder or {}).get("id") or "")
+        and primary_builder_key in depends_on_keys
+    )
+
+    if merger_like:
+        can_write_root_index = True
+        lane_role = "merger"
+    elif len(builder_nodes) <= 1:
+        can_write_root_index = True
+        lane_role = "primary"
+    elif patch_mode:
+        can_write_root_index = True
+        lane_role = "patch"
+    else:
+        can_write_root_index = str(ne_snapshot.get("id") or "") == str((primary_builder or {}).get("id") or "")
+        lane_role = "primary" if can_write_root_index else "support"
+
+    allowed_html_targets = ["index.html"] if can_write_root_index and not multi_page_goal else []
+    return {
+        "lane_role": lane_role,
+        "task_type": task_type,
+        "can_write_root_index": can_write_root_index,
+        "allowed_html_targets": allowed_html_targets,
+        "builder_merger_like": merger_like,
+        "builder_patch_mode": patch_mode,
+        "primary_builder_key": primary_builder_key,
+        "parallel_builder_keys": builder_keys[:4],
+        "depends_on_keys": depends_on_keys[:8],
+        "merger_present": merger_present,
+    }
+
+
+def _dispatch_builder_runtime_contract(profile: Optional[Dict[str, Any]]) -> str:
+    details = profile if isinstance(profile, dict) else {}
+    lane_role = str(details.get("lane_role") or "").strip().lower()
+    if not lane_role:
+        return ""
+
+    output_root = str(OUTPUT_DIR)
+    task_type = str(details.get("task_type") or "").strip().lower()
+    primary_builder_key = str(details.get("primary_builder_key") or "Builder 1").strip()
+    peer_builder_keys = [
+        str(item).strip()
+        for item in (details.get("parallel_builder_keys") or [])
+        if str(item).strip()
+    ]
+
+    lines: List[str]
+    if lane_role == "support":
+        lines = [
+            "[BUILDER RUNTIME SUPPORT CONTRACT]",
+            "This builder is a support lane for the current run.",
+            f"Do NOT emit or overwrite {output_root}/index.html in this run.",
+            (
+                f"Write browser-native support artifacts only under {output_root}/, such as "
+                f"{output_root}/js/weaponSystem.js, {output_root}/css/hud.css, or {output_root}/data/encounters.json."
+            ),
+            "Support JS must be browser-native and must not use CommonJS exports or require(...).",
+        ]
+        if primary_builder_key:
+            lines.append(
+                f"{primary_builder_key} owns the shipped root artifact; merger will integrate retained support files."
+            )
+        return "\n".join(lines)
+
+    if lane_role == "merger":
+        lines = [
+            "[BUILDER RUNTIME MERGER CONTRACT]",
+            "This builder is the final merger/integrator for the current run.",
+            f"First inspect {output_root}/index.html and every non-empty local JS/CSS/JSON support file before editing.",
+            "Integrate retained support work into the shipped root artifact. Do NOT leave support files unwired or undeployed.",
+            "Ship one playable browser entry artifact for reviewer/deployer and avoid blank-screen or endless-loader regressions.",
+        ]
+    elif lane_role == "patch":
+        lines = [
+            "[BUILDER RUNTIME PATCH CONTRACT]",
+            "This builder is a sequential root-patch lane for the current run.",
+            f"Patch the existing {output_root}/index.html instead of starting from scratch.",
+            "Preserve the already-working gameplay loop and only refine the assigned fixes in place.",
+        ]
+    else:
+        lines = [
+            "[BUILDER RUNTIME PRIMARY CONTRACT]",
+            "This builder owns the shipped root artifact for the current run.",
+            f"Deliver and preserve {output_root}/index.html as the playable root entry.",
+            "Do NOT ship a blank screen, endless loader, or unwired controls/camera shell.",
+        ]
+        peer_support_keys = [key for key in peer_builder_keys if key != primary_builder_key]
+        if peer_support_keys:
+            lines.append(
+                f"{', '.join(peer_support_keys[:2])} own support work and must not be overwritten from this lane."
+            )
+        if bool(details.get("merger_present")):
+            lines.append("A downstream merger will integrate retained support files before review/deploy.")
+
+    if task_type == "game":
+        lines.append(
+            "Game guardrails: keep controls non-mirrored, upward mouse drag looks up, crosshair visible, and projectile traces readable."
+        )
+    return "\n".join(lines)
+
+
+def _append_dispatch_runtime_contract(input_summary: str, profile: Optional[Dict[str, Any]]) -> str:
+    summary = str(input_summary or "").strip()
+    contract = _dispatch_builder_runtime_contract(profile)
+    if not contract:
+        return summary
+    header = contract.splitlines()[0].strip()
+    if header and header in summary:
+        return summary
+    if not summary:
+        return contract
+    return f"{summary}\n\n{contract}".strip()
+
+
 def _build_dispatch_payload(
     run_id: str,
     node_execution_id: str,
@@ -1246,6 +1965,17 @@ def _build_dispatch_payload(
     task_id = str(run_snapshot.get("task_id", "") or "")
     if task_id:
         task_snapshot = get_task_store().get_task(task_id)
+    goal_text = task_snapshot.get("description", task_snapshot.get("title", "")) if task_snapshot else ""
+    dispatch_builder_profile = _dispatch_builder_lane_profile(
+        run_id,
+        node_execution_id,
+        goal=goal_text,
+    )
+    dispatch_input_summary = _append_dispatch_runtime_contract(
+        ne_snapshot.get("input_summary", ""),
+        dispatch_builder_profile,
+    )
+    runtime_contract = _dispatch_builder_runtime_contract(dispatch_builder_profile)
 
     payload: Dict[str, Any] = {
         "runId": run_id,
@@ -1254,14 +1984,44 @@ def _build_dispatch_payload(
         "runStatus": run_snapshot.get("status", ""),
         "runtime": run_snapshot.get("runtime", ""),
         "workflowTemplateId": run_snapshot.get("workflow_template_id", ""),
+        "sessionId": task_snapshot.get("session_id", "") if task_snapshot else "",
+        "goal": goal_text,
         "activeNodeExecutionIds": run_snapshot.get("active_node_execution_ids", []),
         "nodeExecutionId": node_execution_id,
         "nodeKey": ne_snapshot.get("node_key", ""),
         "nodeLabel": ne_snapshot.get("node_label", ""),
+        "inputSummary": dispatch_input_summary,
+        "taskDescription": dispatch_input_summary,
+        "assignedModel": ne_snapshot.get("assigned_model", ""),
+        "loadedSkills": ne_snapshot.get("loaded_skills", []),
         "_neVersion": ne_snapshot.get("version", 0),
         "_runVersion": run_snapshot.get("version", 0),
         "_taskVersion": task_snapshot.get("version", 0) if task_snapshot else 0,
     }
+    depends_on_keys = ne_snapshot.get("depends_on_keys", [])
+    if isinstance(depends_on_keys, list) and depends_on_keys:
+        payload["dependsOnKeys"] = depends_on_keys
+        payload["depends_on_keys"] = depends_on_keys
+    if runtime_contract:
+        payload["runtimeContract"] = runtime_contract
+        payload["runtime_contract"] = runtime_contract
+    if dispatch_builder_profile:
+        payload["taskType"] = dispatch_builder_profile.get("task_type", "")
+        payload["task_type"] = dispatch_builder_profile.get("task_type", "")
+        payload["builderLaneRole"] = dispatch_builder_profile.get("lane_role", "")
+        payload["builder_lane_role"] = dispatch_builder_profile.get("lane_role", "")
+        payload["canWriteRootIndex"] = bool(dispatch_builder_profile.get("can_write_root_index"))
+        payload["can_write_root_index"] = bool(dispatch_builder_profile.get("can_write_root_index"))
+        payload["allowedHtmlTargets"] = list(dispatch_builder_profile.get("allowed_html_targets") or [])
+        payload["allowed_html_targets"] = list(dispatch_builder_profile.get("allowed_html_targets") or [])
+        payload["builderMergerLike"] = bool(dispatch_builder_profile.get("builder_merger_like"))
+        payload["builder_merger_like"] = bool(dispatch_builder_profile.get("builder_merger_like"))
+        payload["builderPatchMode"] = bool(dispatch_builder_profile.get("builder_patch_mode"))
+        payload["builder_patch_mode"] = bool(dispatch_builder_profile.get("builder_patch_mode"))
+        payload["parallelBuilderKeys"] = list(dispatch_builder_profile.get("parallel_builder_keys") or [])
+        payload["parallel_builder_keys"] = list(dispatch_builder_profile.get("parallel_builder_keys") or [])
+        payload["primaryBuilderKey"] = str(dispatch_builder_profile.get("primary_builder_key") or "")
+        payload["primary_builder_key"] = str(dispatch_builder_profile.get("primary_builder_key") or "")
     if auto_chained:
         payload["autoChained"] = True
     if launch_triggered:
@@ -1340,6 +2100,7 @@ def _save_connector_artifact(
 # Mount the active runtime output directory directly. A compatibility alias at
 # /tmp/evermind_output is maintained separately for older prompts / tooling.
 # ─────────────────────────────────────────────
+app.mount("/uploads", StaticFiles(directory=str(CHAT_UPLOADS_DIR), html=False), name="uploads")
 app.mount("/preview", StaticFiles(directory=str(OUTPUT_DIR), html=True), name="preview")
 
 
@@ -1976,6 +2737,52 @@ async def list_models():
     return {"models": bridge.get_available_models()}
 
 
+@app.post("/api/chat/attachments")
+async def upload_chat_attachments(request: Request, payload: Dict[str, Any] = Body(default={})):
+    session_id = _safe_session_segment(payload.get("session_id") or payload.get("sessionId") or "")
+    raw_files = payload.get("files")
+    files = raw_files if isinstance(raw_files, list) else []
+    stored: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, str]] = []
+
+    for item in files[:MAX_CHAT_ATTACHMENTS]:
+        if not isinstance(item, dict):
+            rejected.append({"name": "attachment", "error": "invalid payload"})
+            continue
+        name = _safe_filename(item.get("name") or "attachment.bin")
+        mime_type = str(item.get("mime_type") or item.get("mimeType") or mimetypes.guess_type(name)[0] or "application/octet-stream")
+        encoded = str(item.get("content_base64") or "").strip()
+        if not encoded:
+            rejected.append({"name": name, "error": "empty file payload"})
+            continue
+        try:
+            raw_bytes = base64.b64decode(encoded, validate=True)
+        except Exception:
+            rejected.append({"name": name, "error": "invalid base64 payload"})
+            continue
+        if len(raw_bytes) <= 0:
+            rejected.append({"name": name, "error": "empty file"})
+            continue
+        if len(raw_bytes) > MAX_CHAT_ATTACHMENT_BYTES:
+            rejected.append({"name": name, "error": f"file too large ({len(raw_bytes)} bytes)"})
+            continue
+        try:
+            stored.append(_store_chat_attachment_bytes(
+                session_id=session_id,
+                name=name,
+                mime_type=mime_type,
+                raw_bytes=raw_bytes,
+            ))
+        except Exception as exc:
+            rejected.append({"name": name, "error": f"save failed: {exc}"})
+
+    return {
+        "sessionId": session_id,
+        "attachments": [_serialize_chat_attachment(item, request) for item in stored],
+        "rejected": rejected,
+    }
+
+
 @app.get("/api/plugins")
 async def list_plugins():
     """List all available plugins with their metadata."""
@@ -1995,7 +2802,7 @@ async def list_plugins():
     }
 
 
-from proxy_relay import get_relay_manager
+from proxy_relay import get_relay_manager, relay_template_catalog, resolve_relay_template
 from privacy import get_masker, update_masker_settings, BUILTIN_PATTERNS
 
 
@@ -2385,7 +3192,7 @@ async def launch_run(data: Dict = Body(...)):
         return JSONResponse(status_code=404, content={"error": f"Task {task_id} not found"})
 
     template_id = str(data.get("template_id") or data.get("templateId") or "standard").strip()
-    requested_runtime = str(data.get("runtime") or "openclaw").strip()
+    requested_runtime = str(data.get("runtime") or "local").strip()
     timeout_seconds = int(data.get("timeout_seconds") or data.get("timeoutSeconds") or 0)
 
     task_goal = str(task.get("description") or task.get("title") or "").strip()
@@ -2702,8 +3509,19 @@ async def relay_add(data: Dict = Body(...)):
     if not data:
         return {"error": "No data provided"}
     base_url = (data.get("base_url") or "").strip()
+    template_id = str(data.get("template_id") or "").strip()
+    provider = str(data.get("provider", "openai") or "openai").strip()
+    api_style = str(data.get("api_style", "openai_compatible") or "openai_compatible").strip()
     if not base_url:
-        return {"error": "base_url is required"}
+        resolved_template = resolve_relay_template(
+            provider=provider,
+            api_style=api_style,
+            base_url=base_url,
+            template_id=template_id,
+        )
+        base_url = str(resolved_template.get("default_base_url") or "").strip()
+    if not base_url:
+        return {"error": "base_url is required (or provide a relay template with a default base URL)"}
     if not base_url.startswith(("http://", "https://")):
         return {"error": "base_url must start with http:// or https://"}
     mgr = get_relay_manager()
@@ -2713,10 +3531,23 @@ async def relay_add(data: Dict = Body(...)):
         api_key=data.get("api_key", ""),
         models=data.get("models", []),
         headers=data.get("headers", {}),
+        provider=provider,
+        api_style=api_style,
+        model_map=data.get("model_map", {}),
+        template_id=template_id,
+        max_retries=data.get("max_retries", 2),
+        timeout=data.get("timeout", 120),
     )
     settings = load_settings()
     _persist_relays(settings)
     return {"success": True, "endpoint": ep.to_dict(), "relay_count": len(mgr.list())}
+
+
+@app.get("/api/relay/catalog")
+async def relay_catalog():
+    """Return known relay/provider templates for fast setup."""
+    templates = relay_template_catalog()
+    return {"templates": templates, "total": len(templates)}
 
 
 @app.get("/api/relay/list")
@@ -2793,7 +3624,7 @@ async def execute_node(data: Dict = Body(...)):
 
     node = data.get("node", {"type": "builder", "name": "Test"})
     input_text = data.get("input", "")
-    model = data.get("model") or node.get("data", {}).get("model") or node.get("model", "kimi-coding")
+    model = data.get("model") or node.get("data", {}).get("model") or node.get("model", "gpt-5.3-codex")
 
     workspace = os.getenv("WORKSPACE", str(Path.home() / "Desktop"))
     output_dir = str(OUTPUT_DIR)
@@ -2822,6 +3653,9 @@ async def execute_node(data: Dict = Body(...)):
             "comfyui_url": str(os.getenv("EVERMIND_COMFYUI_URL", "") or "").strip(),
             "workflow_template": str(os.getenv("EVERMIND_COMFYUI_WORKFLOW_TEMPLATE", "") or "").strip(),
         },
+        "analyst": _normalize_analyst_settings(
+            saved_settings.get("analyst", {})
+        ),
         "node_model_preferences": _normalize_node_model_preferences(
             saved_settings.get("node_model_preferences", {})
         ),
@@ -2853,6 +3687,10 @@ async def execute_node(data: Dict = Body(...)):
     if "node_model_preferences" in data:
         bridge.config["node_model_preferences"] = _normalize_node_model_preferences(
             data.get("node_model_preferences")
+        )
+    if "analyst" in data:
+        bridge.config["analyst"] = _normalize_analyst_settings(
+            data.get("analyst")
         )
     node_type = node.get("data", {}).get("nodeType", node.get("type", ""))
     enabled_plugins = resolve_enabled_plugins_for_node(
@@ -2911,6 +3749,45 @@ def _normalize_node_model_preferences(value: Any) -> Dict[str, List[str]]:
         if chain:
             normalized[role] = chain
     return normalized
+
+
+def _normalize_analyst_preferred_sites(value: Any, *, limit: int = 12) -> List[str]:
+    items = value if isinstance(value, (list, tuple)) else str(value or "").splitlines()
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw in items:
+        site = str(raw or "").strip()
+        if not site:
+            continue
+        if not re.match(r"^https?://", site, re.IGNORECASE):
+            site = f"https://{site.lstrip('/')}"
+        site = site.rstrip("/")
+        if site in seen:
+            continue
+        seen.add(site)
+        normalized.append(site[:240])
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def _normalize_analyst_settings(value: Any) -> Dict[str, Any]:
+    source = value if isinstance(value, dict) else {}
+    crawl_intensity = str(source.get("crawl_intensity", "medium") or "medium").strip().lower()
+    if crawl_intensity not in {"off", "low", "medium", "high"}:
+        crawl_intensity = "medium"
+    return {
+        "preferred_sites": _normalize_analyst_preferred_sites(source.get("preferred_sites", [])),
+        "crawl_intensity": crawl_intensity,
+        "use_scrapling_when_available": coerce_bool(
+            source.get("use_scrapling_when_available", True),
+            default=True,
+        ),
+        "enable_query_search": coerce_bool(
+            source.get("enable_query_search", True),
+            default=True,
+        ),
+    }
 
 
 def _current_model_catalog() -> List[Dict[str, Any]]:
@@ -2981,7 +3858,7 @@ async def get_settings():
         "api_bases": settings.get("api_bases", {}),
         "workspace": settings.get("workspace", ""),
         "artifact_sync_dir": settings.get("artifact_sync_dir", ""),
-        "default_model": settings.get("default_model", "kimi-coding"),
+        "default_model": settings.get("default_model", "gpt-5.3-codex"),
         "privacy_enabled": settings.get("privacy", {}).get("enabled", True),
         "builder_enable_browser": coerce_bool(settings.get("builder", {}).get("enable_browser_search", False), default=False),
         "tester_run_smoke": coerce_bool(settings.get("tester_run_smoke", True), default=True),
@@ -2993,13 +3870,16 @@ async def get_settings():
         "max_retries": coerce_int(settings.get("max_retries", 3), 3, minimum=1, maximum=8),
         "image_generation": settings.get("image_generation", {}),
         "image_generation_available": is_image_generation_available(settings),
+        "analyst": _normalize_analyst_settings(settings.get("analyst", {})),
         "node_model_preferences": _normalize_node_model_preferences(
             settings.get("node_model_preferences", {})
         ),
+        "thinking_depth": str(settings.get("thinking_depth", "deep")).strip().lower(),
         "model_catalog": model_catalog,
         "relay_endpoints": get_relay_manager().list(),
         "relay_count": len(get_relay_manager().list()),
         "has_keys": {k: bool(v) for k, v in settings.get("api_keys", {}).items()},
+        "cli_mode": settings.get("cli_mode", {"enabled": False, "preferred_cli": "", "preferred_model": "", "detected_clis": {}, "node_cli_overrides": {}}),
     }
 
 
@@ -3038,6 +3918,13 @@ async def save_user_settings(data: Dict = Body(...)):
         patch["node_model_preferences"] = _normalize_node_model_preferences(
             patch.get("node_model_preferences")
         )
+    if "thinking_depth" in patch:
+        raw_depth = str(patch.get("thinking_depth", "deep")).strip().lower()
+        patch["thinking_depth"] = raw_depth if raw_depth in ("fast", "deep") else "deep"
+    if "analyst" in patch:
+        patch["analyst"] = _normalize_analyst_settings(
+            patch.get("analyst")
+        )
     if "builder_enable_browser" in patch:
         builder_browser = coerce_bool(patch["builder_enable_browser"], default=False)
         patch.setdefault("builder", {})
@@ -3049,6 +3936,15 @@ async def save_user_settings(data: Dict = Body(...)):
         patch["image_generation"] = {
             "comfyui_url": str(image_patch.get("comfyui_url", "") or "").strip(),
             "workflow_template": str(image_patch.get("workflow_template", "") or "").strip(),
+        }
+    if "cli_mode" in patch and isinstance(patch.get("cli_mode"), dict):
+        cli_patch = dict(patch.get("cli_mode") or {})
+        patch["cli_mode"] = {
+            "enabled": bool(cli_patch.get("enabled", False)),
+            "preferred_cli": str(cli_patch.get("preferred_cli", "") or "").strip(),
+            "preferred_model": str(cli_patch.get("preferred_model", "") or "").strip(),
+            "detected_clis": cli_patch.get("detected_clis", {}),
+            "node_cli_overrides": cli_patch.get("node_cli_overrides", {}),
         }
     merged = _merge_settings(load_settings(), patch)
     if "relay_endpoints" not in (data or {}):
@@ -3101,6 +3997,9 @@ async def save_user_settings(data: Dict = Body(...)):
             "configured_providers": configured_providers,
             "available_models": available_models,
             "image_generation_available": is_image_generation_available(merged),
+            "analyst": _normalize_analyst_settings(
+                merged.get("analyst", {})
+            ),
             "node_model_preferences": _normalize_node_model_preferences(
                 merged.get("node_model_preferences", {})
             ),
@@ -3118,6 +4017,252 @@ async def validate_keys(data: Dict = Body(...)):
             result = validate_api_key(provider, key)
             results[provider] = result
     return {"results": results}
+
+
+# ─────────────────────────────────────────────
+# CLI Backend Endpoints
+# ─────────────────────────────────────────────
+from cli_backend import get_detector, get_executor, is_cli_mode_enabled, CLI_PROFILES
+
+
+@app.get("/api/cli/detect")
+async def detect_clis(force: bool = False):
+    """Detect all available AI CLI tools on this machine."""
+    detector = get_detector()
+    detected = await detector.detect_all(force=force)
+    available_names = [name for name, info in detected.items() if info.get("available")]
+    return {
+        "clis": detected,
+        "available": available_names,
+        "available_count": len(available_names),
+        "supported": list(CLI_PROFILES.keys()),
+    }
+
+
+@app.post("/api/cli/test")
+async def test_cli(data: Dict = Body(...)):
+    """Smoke-test a specific CLI tool to verify it works."""
+    cli_name = str(data.get("cli", "") or "").strip()
+    if not cli_name:
+        return {"success": False, "error": "No CLI name provided"}
+    detector = get_detector()
+    result = await detector.test_cli(cli_name)
+    return result
+
+
+@app.post("/api/cli/test-all")
+async def test_all_clis():
+    """Detect and smoke-test all available CLIs in parallel."""
+    detector = get_detector()
+    detected = await detector.detect_all(force=True)
+    available = [name for name, info in detected.items() if info.get("available")]
+    results = {}
+    if available:
+        tasks = [detector.test_cli(name) for name in available]
+        tested = await asyncio.gather(*tasks, return_exceptions=True)
+        for name, result in zip(available, tested):
+            if isinstance(result, Exception):
+                results[name] = {"success": False, "error": str(result)[:200]}
+            else:
+                results[name] = result
+    return {
+        "results": results,
+        "available": available,
+        "supported": list(CLI_PROFILES.keys()),
+    }
+
+
+@app.get("/api/cli/models")
+async def get_cli_model_options():
+    """Return available model options for each registered CLI."""
+    from cli_backend import CLI_MODEL_OPTIONS, CLI_PROFILES
+    return {
+        "models": CLI_MODEL_OPTIONS,
+        "supported_clis": list(CLI_PROFILES.keys()),
+    }
+
+
+@app.post("/api/models/speed-test")
+async def model_speed_test(data: Dict = Body(default={})):
+    """Test latency for all configured models.
+
+    V4.3: Provides real-time speed data so users can pick the fastest model.
+    Tests each model with a trivial prompt and returns TTFT + total latency.
+    Only tests models whose provider has an API key configured.
+    """
+    import asyncio as _asyncio
+    from ai_bridge import AIBridge, MODEL_REGISTRY, PROVIDER_ENV_KEY_MAP
+
+    settings = load_settings()
+    api_keys = settings.get("api_keys", {})
+    api_bases = settings.get("api_bases", {})
+
+    # Determine which models to test: only those with a configured key
+    requested_models = data.get("models")
+    results = {}
+
+    # Build list of testable models
+    testable = []
+    for model_name, info in MODEL_REGISTRY.items():
+        if requested_models and model_name not in requested_models:
+            continue
+        provider = info.get("provider", "")
+        # Map provider to the settings key name
+        provider_key_map = {
+            "openai": "openai", "anthropic": "anthropic", "google": "gemini",
+            "deepseek": "deepseek", "kimi": "kimi", "qwen": "qwen",
+            "zhipu": "zhipu", "doubao": "doubao", "yi": "yi", "minimax": "minimax",
+        }
+        settings_key = provider_key_map.get(provider, provider)
+        has_key = bool(str(api_keys.get(settings_key, "") or "").strip())
+        if not has_key and provider != "ollama":
+            results[model_name] = {
+                "ok": False, "latency_ms": 0, "error": "no_api_key",
+                "provider": provider,
+            }
+            continue
+        testable.append(model_name)
+
+    # Create bridge with current config
+    bridge_config = {
+        "api_keys": api_keys,
+        "api_bases": api_bases,
+    }
+    bridge = AIBridge(config=bridge_config)
+
+    # V4.5: Enhanced speed test with TTFT, realistic prompt, multi-iteration
+    import time as _time
+    import litellm as _litellm_mod
+
+    # Realistic prompt (~80 tokens) — exercises real model behavior
+    _SPEED_TEST_PROMPT = (
+        "You are a helpful coding assistant. A user asks: "
+        "'How do I create a basic HTTP server in Python that handles GET and POST requests?' "
+        "Reply in 2-3 concise sentences."
+    )
+    _SPEED_TEST_ITERATIONS = 2  # Balance accuracy vs speed
+
+    def _test_model_sync(name: str) -> tuple:
+        """Test a single model with TTFT tracking and multi-iteration."""
+        info = MODEL_REGISTRY.get(name, {})
+        litellm_id = info.get("litellm_id", name)
+        provider = str(info.get("provider") or "").lower()
+
+        # Build request kwargs
+        messages = [{"role": "user", "content": _SPEED_TEST_PROMPT}]
+        kwargs = {
+            "model": litellm_id,
+            "messages": messages,
+            "max_tokens": 60,
+            "timeout": 18,
+            "num_retries": 0,
+            "stream": True,
+        }
+        if info.get("api_base"):
+            kwargs["api_base"] = info["api_base"]
+        if info.get("extra_headers"):
+            kwargs["extra_headers"] = info["extra_headers"]
+        resolved_key = bridge._resolved_api_key_for_model_info(info)
+        if resolved_key:
+            kwargs["api_key"] = resolved_key
+        # Kimi thinking mode fix
+        if provider == "kimi":
+            kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+
+        ttft_samples = []
+        total_samples = []
+        last_error = ""
+
+        for _iter in range(_SPEED_TEST_ITERATIONS):
+            t0 = _time.monotonic()
+            ttft_recorded = False
+            try:
+                response = _litellm_mod.completion(**kwargs)
+                content_parts = []
+                for chunk in response:
+                    if not ttft_recorded and chunk.choices and chunk.choices[0].delta:
+                        c = getattr(chunk.choices[0].delta, "content", None)
+                        if c:
+                            ttft_samples.append(int((_time.monotonic() - t0) * 1000))
+                            ttft_recorded = True
+                            content_parts.append(c)
+                    elif chunk.choices and chunk.choices[0].delta:
+                        c = getattr(chunk.choices[0].delta, "content", None)
+                        if c:
+                            content_parts.append(c)
+                total_ms = int((_time.monotonic() - t0) * 1000)
+                reply = "".join(content_parts).strip()
+                if reply:
+                    total_samples.append(total_ms)
+                else:
+                    last_error = "empty_reply"
+            except Exception as exc:
+                last_error = str(exc)[:200]
+
+        if not total_samples:
+            return name, {
+                "ok": False,
+                "latency_ms": 0,
+                "ttft_ms": 0,
+                "error": last_error or "all_iterations_failed",
+                "provider": info.get("provider", ""),
+                "iterations": _SPEED_TEST_ITERATIONS,
+            }
+
+        # Use best (min) values — represents true capability
+        best_total = min(total_samples)
+        best_ttft = min(ttft_samples) if ttft_samples else best_total
+        median_total = sorted(total_samples)[len(total_samples) // 2]
+
+        return name, {
+            "ok": True,
+            "latency_ms": best_total,
+            "ttft_ms": best_ttft,
+            "median_ms": median_total,
+            "error": "",
+            "provider": info.get("provider", ""),
+            "iterations": len(total_samples),
+        }
+
+    # Run in batches of 5 — offload to thread pool
+    loop = _asyncio.get_event_loop()
+    for i in range(0, len(testable), 5):
+        batch = testable[i:i+5]
+        batch_results = await _asyncio.gather(*[
+            loop.run_in_executor(None, _test_model_sync, m)
+            for m in batch
+        ])
+        for name, result in batch_results:
+            results[name] = result
+
+    return {"results": results, "tested_count": len(testable), "total_models": len(MODEL_REGISTRY)}
+
+
+@app.get("/api/models")
+async def list_models():
+    """List all available models with their provider and capabilities."""
+    from ai_bridge import MODEL_REGISTRY
+    settings = load_settings()
+    api_keys = settings.get("api_keys", {})
+
+    models = []
+    provider_key_map = {
+        "openai": "openai", "anthropic": "anthropic", "google": "gemini",
+        "deepseek": "deepseek", "kimi": "kimi", "qwen": "qwen",
+        "zhipu": "zhipu", "doubao": "doubao", "yi": "yi", "minimax": "minimax",
+    }
+    for name, info in MODEL_REGISTRY.items():
+        provider = info.get("provider", "")
+        settings_key = provider_key_map.get(provider, provider)
+        has_key = bool(str(api_keys.get(settings_key, "") or "").strip())
+        models.append({
+            "id": name,
+            "provider": provider,
+            "has_key": has_key or provider == "ollama",
+            "supports_tools": info.get("supports_tools", False),
+            "supports_cua": info.get("supports_cua", False),
+        })
+    return {"models": models}
 
 
 @app.get("/api/usage")
@@ -3143,9 +4288,9 @@ _ROLE_TIMEOUT_HINTS: Dict[str, int] = {
     "builder": 1020,    # legacy base hint; helper below expands this for long Kimi multi-file runs
     "planner": 180,     # lightweight spec output
     "analyst": 540,     # browser research can be slow
-    "imagegen": 240,    # optional asset discovery / prompt-pack stage
-    "spritesheet": 180, # compact manifest planning only
-    "assetimport": 150, # compact manifest normalization only
+    "imagegen": 300,    # optional asset discovery / prompt-pack stage
+    "spritesheet": 210, # compact manifest planning only
+    "assetimport": 240, # compact manifest normalization only
     "polisher": 540,    # premium motion/finish pass
     "reviewer": 480,    # review + browser validation
     "tester": 480,      # smoke + interaction tests
@@ -3199,6 +4344,60 @@ def _node_timeout_limit_seconds(ne_dict: Dict[str, Any]) -> int:
     if normalized == "builder":
         return max(explicit_timeout, timeout_hint)
     return explicit_timeout
+
+
+def _run_timeout_budget_seconds_for_node(node_key: str) -> int:
+    raw_key = str(node_key or "").strip()
+    normalized = normalize_node_role(raw_key) or raw_key.lower()
+    budget = _node_timeout_hint_seconds(normalized)
+    builder_like = normalized == "builder" or bool(
+        re.search(r"\b(?:merger|integrator|integration|assemble|assembly|merge)\b", raw_key, re.IGNORECASE)
+    )
+    if builder_like:
+        # Builder + merger nodes can escalate their internal execution budget above
+        # the initial per-node hint during long Kimi repair/merge passes. Use a
+        # more realistic critical-path budget at the run level so the outer watchdog
+        # does not cancel the whole run while a valid builder/merger lane is active.
+        budget = max(budget, 2400 + _watchdog_timeout_grace_seconds())
+    return budget
+
+
+def _estimate_run_timeout_seconds(nodes_def: List[Dict[str, Any]]) -> int:
+    if not isinstance(nodes_def, list) or not nodes_def:
+        return DEFAULT_RUN_TIMEOUT_S
+
+    graph: Dict[str, List[str]] = {}
+    weights: Dict[str, int] = {}
+    for node_def in nodes_def:
+        key = str((node_def or {}).get("key") or "").strip()
+        if not key:
+            continue
+        deps = [str(dep).strip() for dep in ((node_def or {}).get("depends_on") or []) if str(dep).strip()]
+        graph[key] = deps
+        weights[key] = _run_timeout_budget_seconds_for_node(key)
+
+    if not weights:
+        return DEFAULT_RUN_TIMEOUT_S
+
+    memo: Dict[str, int] = {}
+
+    def _longest_path(node_key: str, stack: Set[str]) -> int:
+        if node_key in memo:
+            return memo[node_key]
+        if node_key in stack:
+            return weights.get(node_key, DEFAULT_NODE_TIMEOUT_S)
+        stack.add(node_key)
+        dep_budget = 0
+        for dep in graph.get(node_key, []):
+            dep_budget = max(dep_budget, _longest_path(dep, stack))
+        stack.discard(node_key)
+        total = dep_budget + weights.get(node_key, DEFAULT_NODE_TIMEOUT_S)
+        memo[node_key] = total
+        return total
+
+    critical_path = max(_longest_path(node_key, set()) for node_key in weights)
+    run_budget = critical_path + max(600, _watchdog_timeout_grace_seconds() * 3)
+    return min(10800, max(DEFAULT_RUN_TIMEOUT_S, run_budget))
 
 
 async def _timeout_watchdog():
@@ -3288,6 +4487,77 @@ async def _timeout_watchdog():
             logger.warning(f"[Watchdog] Error in timeout watchdog: {e}")
 
 
+# ─────────────────────────────────────────────
+# SIGHUP Hot-Reload: reload key modules without restarting
+# ─────────────────────────────────────────────
+# Inspired by Claude Code's live provider reconfiguration pattern.
+# When `sync:local-app` updates files on disk, sending SIGHUP to
+# the running Python sidecar reloads frequently-changed modules so
+# the operator doesn't need to restart the app after every sync.
+
+_HOT_RELOAD_MODULES = [
+    "workflow_templates",
+    "task_classifier",
+    "html_postprocess",
+    "node_roles",
+    "agent_skills",
+    "orchestrator",
+    "ai_bridge",
+]
+
+
+def _handle_sighup(signum, frame):
+    """Reload key modules on SIGHUP without restarting the process."""
+    reloaded = []
+    failed = []
+    for mod_name in _HOT_RELOAD_MODULES:
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        try:
+            importlib.reload(mod)
+            reloaded.append(mod_name)
+        except Exception as e:
+            failed.append(f"{mod_name}: {e}")
+    # Re-import references that server.py holds directly
+    if "workflow_templates" in reloaded:
+        try:
+            global get_template, list_templates, template_nodes
+            import workflow_templates as _wt
+            get_template = _wt.get_template
+            list_templates = _wt.list_templates
+            template_nodes = _wt.template_nodes
+        except Exception:
+            pass
+    if "node_roles" in reloaded:
+        try:
+            global normalize_node_role
+            import node_roles as _nr
+            normalize_node_role = _nr.normalize_node_role
+        except Exception:
+            pass
+    # §FIX: Rebind `from X import Y` references that server.py holds directly.
+    # Without this, importlib.reload() updates the module object but the old
+    # class/function references cached in server.py's global scope stay stale.
+    if "ai_bridge" in reloaded:
+        try:
+            global AIBridge, MODEL_REGISTRY
+            import ai_bridge as _ab
+            AIBridge = _ab.AIBridge
+            MODEL_REGISTRY = _ab.MODEL_REGISTRY
+        except Exception:
+            pass
+    if "orchestrator" in reloaded:
+        try:
+            global Orchestrator
+            import orchestrator as _orch
+            Orchestrator = _orch.Orchestrator
+        except Exception:
+            pass
+    summary = f"reloaded={reloaded}" + (f" failed={failed}" if failed else "")
+    logger.info(f"[HotReload] SIGHUP received — {summary}")
+
+
 @asynccontextmanager
 async def lifespan(application):
     """FastAPI lifespan: start/stop background tasks."""
@@ -3298,6 +4568,16 @@ async def lifespan(application):
         raise RuntimeError(lock_error)
     _watchdog_task = asyncio.create_task(_timeout_watchdog())
     logger.info("[Watchdog] Timeout watchdog started")
+    # Register SIGHUP handler for hot-reload (macOS/Linux only)
+    # Guard with try/except: signal.signal() must be called from the main thread.
+    # During tests (httpx.AsyncClient / TestClient), lifespan runs in a worker thread.
+    if hasattr(signal, "SIGHUP"):
+        try:
+            signal.signal(signal.SIGHUP, _handle_sighup)
+            logger.info("[HotReload] SIGHUP handler registered — send SIGHUP to reload modules")
+        except ValueError:
+            # Not running in main thread (test environment)
+            pass
     yield
     # ── Shutdown ──
     logger.info("Server shutting down — closing all connections...")
@@ -3352,13 +4632,16 @@ async def websocket_endpoint(ws: WebSocket):
     allowed_dirs_env = os.getenv("ALLOWED_DIRS", "")
     allowed_dirs = [p for p in allowed_dirs_env.split(",") if p] if allowed_dirs_env else [workspace, output_dir, "/tmp"]
     saved_settings = load_settings()
+    # v4.0-fix: Prefer decrypted API keys from saved_settings (config.json)
+    # over env vars, which may be stale if .env was changed after server start.
+    _saved_keys = saved_settings.get("api_keys") or {}
     config = {
-        "openai_api_key": os.getenv("OPENAI_API_KEY", ""),
-        "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
-        "gemini_api_key": os.getenv("GEMINI_API_KEY", ""),
-        "deepseek_api_key": os.getenv("DEEPSEEK_API_KEY", ""),
-        "kimi_api_key": os.getenv("KIMI_API_KEY", ""),
-        "qwen_api_key": os.getenv("QWEN_API_KEY", ""),
+        "openai_api_key": str(_saved_keys.get("openai") or os.getenv("OPENAI_API_KEY", "") or "").strip(),
+        "anthropic_api_key": str(_saved_keys.get("anthropic") or os.getenv("ANTHROPIC_API_KEY", "") or "").strip(),
+        "gemini_api_key": str(_saved_keys.get("gemini") or os.getenv("GEMINI_API_KEY", "") or "").strip(),
+        "deepseek_api_key": str(_saved_keys.get("deepseek") or os.getenv("DEEPSEEK_API_KEY", "") or "").strip(),
+        "kimi_api_key": str(_saved_keys.get("kimi") or os.getenv("KIMI_API_KEY", "") or "").strip(),
+        "qwen_api_key": str(_saved_keys.get("qwen") or os.getenv("QWEN_API_KEY", "") or "").strip(),
         "workspace": workspace,
         "output_dir": output_dir,
         "max_timeout": coerce_int(os.getenv("SHELL_TIMEOUT", "30"), 30, minimum=5, maximum=600),
@@ -3375,9 +4658,17 @@ async def websocket_endpoint(ws: WebSocket):
             "comfyui_url": str(os.getenv("EVERMIND_COMFYUI_URL", "") or "").strip(),
             "workflow_template": str(os.getenv("EVERMIND_COMFYUI_WORKFLOW_TEMPLATE", "") or "").strip(),
         },
+        "analyst": _normalize_analyst_settings(
+            saved_settings.get("analyst", {})
+        ),
         "node_model_preferences": _normalize_node_model_preferences(
             saved_settings.get("node_model_preferences", {})
         ),
+        "thinking_depth": str(saved_settings.get("thinking_depth", "deep")).strip().lower() or "deep",
+        "cli_mode": saved_settings.get("cli_mode", {
+            "enabled": False, "preferred_cli": "", "preferred_model": "",
+            "detected_clis": {}, "node_cli_overrides": {},
+        }),
     }
 
     # Create executor for this client
@@ -3416,6 +4707,7 @@ async def websocket_endpoint(ws: WebSocket):
         "max_retries": coerce_int(config.get("max_retries", 3), 3, minimum=1, maximum=8),
         "image_generation": config.get("image_generation", {}),
         "image_generation_available": is_image_generation_available(config),
+        "analyst": _normalize_analyst_settings(config.get("analyst", {})),
         "node_model_preferences": config.get("node_model_preferences", {}),
         "openclaw": _build_openclaw_guide_payload(),
     })
@@ -3513,6 +4805,19 @@ async def websocket_endpoint(ws: WebSocket):
                     config["node_model_preferences"] = _normalize_node_model_preferences(
                         new_config.get("node_model_preferences")
                     )
+                if "thinking_depth" in new_config:
+                    raw_depth = str(new_config.get("thinking_depth", "deep")).strip().lower()
+                    if raw_depth in ("fast", "deep"):
+                        config["thinking_depth"] = raw_depth
+                        # Propagate to ai_bridge config so both bridge and
+                        # orchestrator see the change immediately.
+                        if ai_bridge and hasattr(ai_bridge, "config") and isinstance(ai_bridge.config, dict):
+                            ai_bridge.config["thinking_depth"] = raw_depth
+                        logger.info("thinking_depth updated to '%s' via update_config", raw_depth)
+                if "analyst" in new_config:
+                    config["analyst"] = _normalize_analyst_settings(
+                        new_config.get("analyst")
+                    )
                 if isinstance(new_config.get("image_generation"), dict):
                     image_cfg = dict(new_config.get("image_generation") or {})
                     config["image_generation"] = {
@@ -3523,6 +4828,21 @@ async def websocket_endpoint(ws: WebSocket):
                     os.environ["EVERMIND_COMFYUI_WORKFLOW_TEMPLATE"] = config["image_generation"]["workflow_template"]
                 if isinstance(new_config.get("builder"), dict) and "enable_browser_search" in new_config.get("builder", {}):
                     config["builder_enable_browser"] = coerce_bool(new_config["builder"].get("enable_browser_search"), default=False)
+                # v3.0.3: UI language propagation for language-aware reports
+                if "ui_language" in new_config:
+                    ui_lang = str(new_config.get("ui_language", "en") or "en").strip().lower()[:10]
+                    config["ui_language"] = ui_lang if ui_lang in ("en", "zh") else "en"
+                # Sync cli_mode from saved settings to in-memory config
+                # (cli_mode is saved via /api/settings/save, but update_config
+                #  needs to pick up the latest so ai_bridge sees it)
+                try:
+                    _saved_cli = load_settings().get("cli_mode") or {}
+                    if isinstance(_saved_cli, dict) and _saved_cli.get("enabled"):
+                        config["cli_mode"] = _saved_cli
+                except Exception:
+                    pass
+                if "cli_mode" in new_config and isinstance(new_config.get("cli_mode"), dict):
+                    config["cli_mode"] = new_config["cli_mode"]
                 # Apply privacy settings
                 if new_config.get("privacy"):
                     from privacy import update_masker_settings
@@ -3554,6 +4874,7 @@ async def websocket_endpoint(ws: WebSocket):
                     "max_retries": coerce_int(config.get("max_retries", 3), 3, minimum=1, maximum=8),
                     "image_generation": config.get("image_generation", {}),
                     "image_generation_available": is_image_generation_available(config),
+                    "analyst": _normalize_analyst_settings(config.get("analyst", {})),
                     "node_model_preferences": config.get("node_model_preferences", {}),
                 })
 
@@ -3597,8 +4918,14 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg_type == "run_goal":
                 # P0-1: Autonomous mode — bridge into canonical task/run/NE system
                 goal = msg.get("goal", "")
-                model = msg.get("model", "kimi-coding")
-                requested_model = str(model or "kimi-coding")
+                settings_default_model = str(
+                    _saved_settings.get("default_model", "") or ""
+                ).strip()
+                raw_frontend_model = msg.get("model", "")
+                explicit_frontend_model = str(raw_frontend_model or "").strip()
+                model = explicit_frontend_model or settings_default_model or "gpt-5.3-codex"
+                requested_model = str(model or "gpt-5.3-codex")
+                launch_model_is_user_selected = bool(explicit_frontend_model)
                 difficulty = str(msg.get("difficulty", "standard")).strip().lower()
                 if difficulty not in ("simple", "standard", "pro"):
                     difficulty = "standard"
@@ -3623,6 +4950,12 @@ async def websocket_endpoint(ws: WebSocket):
                             "role": role,
                             "content": str(h["content"])[:800],  # F7-2: Increased from 500 to preserve design context
                         })
+
+                safe_attachments = _normalize_run_goal_attachments(msg.get("attachments", []))
+                attachment_context = _build_attachment_context_block(safe_attachments)
+                effective_goal = goal.strip()
+                if attachment_context:
+                    effective_goal = f"{effective_goal}\n\n{attachment_context}".strip()
 
                 # ── Auto-detect model if default has no key ──
                 if model == "gpt-5.4" and not os.environ.get("OPENAI_API_KEY"):
@@ -3653,9 +4986,92 @@ async def websocket_endpoint(ws: WebSocket):
                     ts = get_task_store()
                     task_title = goal[:80].strip() or "Interactive Task"
                     session_id = str(msg.get("session_id", msg.get("sessionId", "")) or "").strip()[:120]
+                    prior_session_tasks = ts.list_tasks(session_id=session_id) if session_id else []
+                    previous_session_task = prior_session_tasks[0] if prior_session_tasks else None
+                    cross_session_memory_task = None
+                    cross_session_memory_note = ""
+                    project_memory_source_task = None
+                    project_memory_digest = ""
+                    if not previous_session_task:
+                        cross_session_memory_task = _find_related_task_for_cross_session_memory(
+                            effective_goal or goal,
+                            session_id=session_id,
+                        )
+                        cross_session_memory_note = _build_cross_session_memory_note(cross_session_memory_task)
+                    # ── P0 FIX 2026-04-05: conservative session continuation ──
+                    # Same-session runs should inherit artifacts ONLY when the
+                    # new goal explicitly reads like an iterative follow-up.
+                    # A fresh run with a full same-type brief must start clean.
+                    session_continuation = False
+                    if previous_session_task:
+                        try:
+                            import task_classifier as _tc
+                            _cur_type = _tc.classify(goal).task_type
+                            _prev_title = str(previous_session_task.get("title") or "")
+                            _prev_desc = str(previous_session_task.get("description") or "")
+                            _prev_summary = str(previous_session_task.get("latest_summary") or "")
+                            _prev_risk = str(previous_session_task.get("latest_risk") or "")
+                            _prev_issues = previous_session_task.get("review_issues")
+                            _prev_issue_text = " ".join(
+                                str(item).strip()
+                                for item in (_prev_issues if isinstance(_prev_issues, list) else [])
+                                if str(item).strip()
+                            )
+                            _prev_seed = "\n".join(
+                                item for item in [_prev_title, _prev_desc, _prev_summary, _prev_risk, _prev_issue_text] if item
+                            ).strip()
+                            _prev_type = _tc.classify(_prev_seed or _prev_title or _prev_desc).task_type
+                            same_type = (_cur_type == _prev_type)
+                            continuation_intent = _goal_requests_session_continuation(goal, safe_history)
+                            session_continuation = same_type and continuation_intent
+                            if not same_type:
+                                logger.info(
+                                    "Session continuation blocked — task type changed: %s → %s",
+                                    _prev_type, _cur_type,
+                                )
+                            elif not continuation_intent:
+                                logger.info(
+                                    "Session continuation blocked — current goal does not look like an iterative edit: %s",
+                                    goal[:160],
+                                )
+                        except Exception as _e:
+                            # Fallback conservative: do NOT preserve previous
+                            # artifacts if classification or heuristics fail.
+                            session_continuation = False
+                            logger.warning("task_classifier unavailable for continuation check: %s", _e)
+                    session_context_note = ""
+                    if previous_session_task and session_continuation:
+                        prev_title = str(previous_session_task.get("title") or "").strip()
+                        prev_summary = str(previous_session_task.get("latest_summary") or "").strip()
+                        prev_status = str(previous_session_task.get("status") or "").strip()
+                        if prev_title:
+                            session_context_note = f"Continue editing the same session project. Previous task: {prev_title}"
+                        if prev_summary:
+                            session_context_note = (
+                                f"{session_context_note}. Previous summary: {prev_summary}"
+                                if session_context_note else
+                                f"Previous summary: {prev_summary}"
+                            )
+                        if prev_status:
+                            session_context_note = (
+                                f"{session_context_note}. Previous status: {prev_status}"
+                                if session_context_note else
+                                f"Previous status: {prev_status}"
+                            )
+                        project_memory_source_task = previous_session_task
+                        project_memory_digest = _build_project_memory_digest(
+                            previous_session_task,
+                            continuation=True,
+                        )
+                    elif cross_session_memory_task:
+                        project_memory_source_task = cross_session_memory_task
+                        project_memory_digest = _build_project_memory_digest(
+                            cross_session_memory_task,
+                            continuation=False,
+                        )
                     task_record = ts.create_task({
                         "title": task_title,
-                        "description": goal[:2000],
+                        "description": effective_goal[:2000],
                         "session_id": session_id,
                     })
                     canonical_task_id = task_record["id"]
@@ -3663,6 +5079,11 @@ async def websocket_endpoint(ws: WebSocket):
                     # 2. Select nodes: custom plan.nodes (OpenClaw Planner Mode)
                     #    or system template (human / fallback mode)
                     custom_plan = msg.get("plan", {})
+                    custom_plan_source = str(
+                        custom_plan.get("source", "")
+                        if isinstance(custom_plan, dict)
+                        else ""
+                    ).strip().lower()
                     custom_nodes_raw = custom_plan.get("nodes", []) if isinstance(custom_plan, dict) else []
                     valid_custom_nodes = []
                     for cn in (custom_nodes_raw or [])[:20]:
@@ -3691,30 +5112,51 @@ async def websocket_endpoint(ws: WebSocket):
                                     if isinstance(d, str)
                                 ][:10],
                             })
+                    internal_optimize_plan = False
                     if valid_custom_nodes:
                         # OpenClaw Planner Mode — agent-defined nodes
                         nodes_def = valid_custom_nodes
                         template_id = "custom"
                         logger.info(
-                            f"[run_goal] Using OpenClaw custom plan: "
+                            f"[run_goal] Using custom plan ({custom_plan_source or 'external'}): "
                             f"{len(nodes_def)} nodes "
                             f"[{', '.join(n['key'] for n in nodes_def)}]"
                         )
+                    elif session_continuation:
+                        tpl = get_template("optimize", goal=effective_goal or goal)
+                        template_id = "optimize"
+                        nodes_def = tpl["nodes"] if tpl else []
+                        internal_optimize_plan = bool(nodes_def)
+                        if internal_optimize_plan:
+                            logger.info(
+                                "[run_goal] Using optimize continuation flow: %s",
+                                ", ".join(str(n.get("key") or "") for n in nodes_def),
+                            )
                     else:
                         # Human / fallback mode — use system template
-                        tpl = get_template(difficulty, goal=goal)
+                        tpl = get_template(difficulty, goal=effective_goal or goal)
                         template_id = difficulty
-                        nodes_def = tpl["nodes"] if tpl else get_template("standard", goal=goal)["nodes"]
+                        nodes_def = tpl["nodes"] if tpl else get_template("standard", goal=effective_goal or goal)["nodes"]
                         if not tpl:
                             template_id = "standard"
 
                     # 3. Create run
                     rs = get_run_store()
+                    run_timeout_seconds = _estimate_run_timeout_seconds(nodes_def)
                     run_record = rs.create_run({
                         "task_id": canonical_task_id,
                         "runtime": effective_runtime,
                         "workflow_template_id": template_id,
-                        "trigger_source": "ui" if not valid_custom_nodes else "openclaw_planner",
+                        "timeout_seconds": run_timeout_seconds,
+                        "trigger_source": (
+                            custom_plan_source
+                            if valid_custom_nodes and custom_plan_source
+                            else "openclaw_planner"
+                            if valid_custom_nodes
+                            else "optimization_pass"
+                            if internal_optimize_plan
+                            else "ui"
+                        ),
                     })
                     canonical_run_id = run_record["id"]
                     ts.link_run(canonical_task_id, canonical_run_id)
@@ -3724,15 +5166,37 @@ async def websocket_endpoint(ws: WebSocket):
                     created_nes = []
                     for node_def in nodes_def:
                         from agent_skills import resolve_skill_names_for_goal
-                        # §FIX: Use the auto-selected model (e.g. kimi-coding) instead
-                        # of the OpenClaw-specified model (e.g. gpt-5.4) when the latter
-                        # is not available. The auto-selection at L2507 already resolved
-                        # the correct model into `model`.
                         requested_node_model = str(node_def.get("model", "") or "").strip()
-                        effective_node_model = model  # auto-selected, confirmed available
+                        # Start from the session-level launch model, then let the bridge
+                        # resolve the role-aware preferred route so canonical node cards
+                        # reflect the actual model that will be attempted first.
+                        effective_node_model = model
                         node_key = str(node_def["key"] or "").strip()
                         normalized_node_key = normalize_node_role(node_key) or node_key
-                        input_summary = node_def.get("task", node_def.get("label", node_key))
+                        input_summary = _compose_node_input_summary(
+                            node_def.get("task", node_def.get("label", node_key)),
+                            effective_goal=effective_goal,
+                            session_context_note=session_context_note,
+                            cross_session_memory_note=cross_session_memory_note,
+                        )
+                        preferred_provider = ""
+                        try:
+                            preview_node = {
+                                "type": normalized_node_key,
+                                "model": effective_node_model,
+                                "model_is_default": (not launch_model_is_user_selected and not requested_node_model),
+                                "goal": effective_goal,
+                            }
+                            effective_node_model = ai_bridge.preferred_model_for_node(
+                                preview_node,
+                                effective_node_model,
+                            )
+                            preferred_provider = str(
+                                ai_bridge._resolve_model(effective_node_model).get("provider", "") or ""
+                            )[:60]
+                        except Exception:
+                            effective_node_model = effective_node_model or requested_node_model or model
+                            preferred_provider = ""
                         # Set per-role timeout so the watchdog uses the correct
                         # limit instead of the global DEFAULT_NODE_TIMEOUT_S.
                         ne_timeout = _node_timeout_hint_seconds(normalized_node_key)
@@ -3743,7 +5207,11 @@ async def websocket_endpoint(ws: WebSocket):
                             "input_summary": input_summary,
                             "depends_on_keys": node_def.get("depends_on", []),
                             "assigned_model": effective_node_model,
-                            "loaded_skills": resolve_skill_names_for_goal(normalized_node_key, str(input_summary or goal)),
+                            "assigned_provider": preferred_provider,
+                            "loaded_skills": resolve_skill_names_for_goal(
+                                normalized_node_key,
+                                str(input_summary or effective_goal or goal),
+                            ),
                             "timeout_seconds": ne_timeout,
                         })
                         created_nes.append(ne)
@@ -3770,13 +5238,26 @@ async def websocket_endpoint(ws: WebSocket):
                             }
                             for ne in created_nes
                         ],
-                        "is_custom_plan": bool(valid_custom_nodes),
+                        "is_custom_plan": bool(valid_custom_nodes or internal_optimize_plan),
+                        "session_id": session_id,
+                        "session_continuation": session_continuation,
+                        "session_context_note": session_context_note,
+                        "cross_session_memory_note": cross_session_memory_note,
+                        "project_memory_digest": project_memory_digest,
+                        "project_memory_source_task_id": str((project_memory_source_task or {}).get("id") or ""),
+                        "effective_goal": effective_goal,
                         "state_snapshot": {
                             "created_at": time.time(),
                             "difficulty": difficulty,
                             "template_id": template_id,
                             "requested_runtime": requested_runtime,
                             "effective_runtime": effective_runtime,
+                            "effective_goal": effective_goal,
+                            "session_id": session_id,
+                            "session_continuation": session_continuation,
+                            "previous_task_id": str((previous_session_task or {}).get("id") or ""),
+                            "cross_session_memory_task_id": str((cross_session_memory_task or {}).get("id") or ""),
+                            "project_memory_source_task_id": str((project_memory_source_task or {}).get("id") or ""),
                             "node_order": [str(ne.get("node_key") or "") for ne in created_nes],
                             "depends_graph": {
                                 str(ne.get("node_key") or ""): list(ne.get("depends_on_keys") or [])
@@ -3797,6 +5278,11 @@ async def websocket_endpoint(ws: WebSocket):
                         "templateId": template_id,
                         "requestedRuntime": requested_runtime,
                         "effectiveRuntime": effective_runtime,
+                        "sessionContinuation": session_continuation,
+                        "crossSessionMemory": bool(cross_session_memory_note),
+                        "crossSessionMemoryTaskId": str((cross_session_memory_task or {}).get("id") or ""),
+                        "projectMemory": bool(project_memory_digest),
+                        "projectMemoryTaskId": str((project_memory_source_task or {}).get("id") or ""),
                     }
                     # The sender may disconnect immediately after posting `run_goal`.
                     # ACK delivery to the requester must not block task creation or
@@ -3825,7 +5311,8 @@ async def websocket_endpoint(ws: WebSocket):
                     logger.info(
                         f"[P0-1] Created canonical task={canonical_task_id} "
                         f"run={canonical_run_id} template={template_id} "
-                        f"model={model} NEs={len(created_nes)}"
+                        f"model={model} NEs={len(created_nes)} "
+                        f"session_continuation={session_continuation}"
                     )
                 except Exception as e:
                     logger.warning(f"[P0-1] Failed to create canonical context: {e}")
@@ -3896,7 +5383,7 @@ async def websocket_endpoint(ws: WebSocket):
                         """Wrapper that syncs canonical run status on orchestrator completion."""
                         try:
                             report = await orchestrator.run(
-                                goal, model,
+                                effective_goal, model,
                                 conversation_history=safe_history,
                                 difficulty=difficulty,
                                 canonical_context=canonical_context,
@@ -4746,7 +6233,16 @@ async def websocket_endpoint(ws: WebSocket):
                 preserved += 1
                 continue
             _cancel_tracked_task(t)
-        executor.stop()
+        # v3.1: Only stop executor if no detached tasks are still running.
+        # Previously, executor.stop() was called unconditionally, killing
+        # background runs even when cancel_on_disconnect=False was set.
+        if not _detached_tasks:
+            executor.stop()
+        else:
+            logger.info(
+                "Executor kept alive: %s detached task(s) still running",
+                len(_detached_tasks),
+            )
         if preserved:
             logger.info(
                 "Client %s disconnected; preserved %s detached background task(s)",

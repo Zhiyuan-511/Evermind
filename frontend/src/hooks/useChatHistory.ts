@@ -1,13 +1,16 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import type { ChatMessage, ChatHistorySession } from '@/lib/types';
+import type { ChatAttachment, ChatMessage, ChatHistorySession } from '@/lib/types';
+import { normalizeChatAttachment } from '@/lib/chatAttachments';
 
 // ── Constants ──
 const CHAT_HISTORY_STORAGE_KEY = 'evermind-chat-history-v1';
 const ACTIVE_CHAT_SESSION_STORAGE_KEY = 'evermind-active-chat-session-v1';
 const MAX_HISTORY_SESSIONS = 30;
-const MAX_MESSAGES_PER_SESSION = 400;
+const MAX_MESSAGES_PER_SESSION = 800;
+const MAX_VISIBLE_MESSAGES = 300;
+const MAX_CONSOLE_MESSAGES = 500;
 
 // ── Helpers ──
 function now() {
@@ -82,6 +85,14 @@ function normalizeCompletionData(value: unknown): ChatMessage['completionData'] 
     };
 }
 
+function normalizeAttachments(value: unknown): ChatAttachment[] | undefined {
+    if (!Array.isArray(value)) return undefined;
+    const attachments = value
+        .map((item) => normalizeChatAttachment(item))
+        .filter((item): item is ChatAttachment => !!item);
+    return attachments.length > 0 ? attachments : undefined;
+}
+
 function normalizeMessage(msg: unknown): ChatMessage | null {
     if (!msg || typeof msg !== 'object') return null;
     const value = msg as Partial<ChatMessage>;
@@ -95,6 +106,7 @@ function normalizeMessage(msg: unknown): ChatMessage | null {
         icon: typeof value.icon === 'string' ? value.icon : undefined,
         timestamp: typeof value.timestamp === 'string' ? value.timestamp : now(),
         borderColor: typeof value.borderColor === 'string' ? value.borderColor : undefined,
+        attachments: normalizeAttachments((value as Record<string, unknown>).attachments),
         completionData: normalizeCompletionData(value.completionData),
     };
 }
@@ -135,7 +147,7 @@ export interface UseChatHistoryReturn {
     historySessions: ChatHistorySession[];
     activeSessionId: string;
     workflowName: string;
-    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: ChatMessage['completionData']) => void;
+    addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: ChatMessage['completionData'], attachments?: ChatAttachment[]) => void;
     handleCreateSession: () => void;
     handleSelectSession: (sessionId: string) => void;
     handleDeleteSession: (sessionId: string) => void;
@@ -232,6 +244,7 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
                         && m.role === normalizedMessages[i]?.role
                         && m.content === normalizedMessages[i]?.content
                         && m.timestamp === normalizedMessages[i]?.timestamp
+                        && JSON.stringify(m.attachments || null) === JSON.stringify(normalizedMessages[i]?.attachments || null)
                         && JSON.stringify(m.completionData || null) === JSON.stringify(normalizedMessages[i]?.completionData || null)
                     ));
                 const nextTitle = inferSessionTitle(normalizedMessages, lang, session.title);
@@ -252,6 +265,7 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
         icon?: string,
         borderColor?: string,
         completionData?: ChatMessage['completionData'],
+        attachments?: ChatAttachment[],
     ) => {
         const msg: ChatMessage = {
             id: Date.now().toString(36) + Math.random().toString(36).slice(2),
@@ -260,8 +274,34 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
             sender, icon, borderColor,
             timestamp: now(),
             completionData,
+            attachments: attachments && attachments.length > 0 ? attachments : undefined,
         };
-        setMessages((prev) => [...prev, msg].slice(-MAX_MESSAGES_PER_SESSION));
+        // §FIX: Apply separate caps for console logs vs visible messages
+        // to prevent heartbeat log flooding from evicting milestone messages.
+        setMessages((prev) => {
+            const next = [...prev, msg];
+            if (next.length <= MAX_MESSAGES_PER_SESSION) return next;
+            // Split into visible (milestone/user) and console messages
+            const visible: ChatMessage[] = [];
+            const console: ChatMessage[] = [];
+            for (const m of next) {
+                if (m.sender === 'console') {
+                    console.push(m);
+                } else {
+                    visible.push(m);
+                }
+            }
+            // Apply separate caps, keeping newest of each category
+            const cappedVisible = visible.length > MAX_VISIBLE_MESSAGES
+                ? visible.slice(-MAX_VISIBLE_MESSAGES)
+                : visible;
+            const cappedConsole = console.length > MAX_CONSOLE_MESSAGES
+                ? console.slice(-MAX_CONSOLE_MESSAGES)
+                : console;
+            // Merge back in chronological order by id (timestamp-based)
+            return [...cappedVisible, ...cappedConsole]
+                .sort((a, b) => a.id.localeCompare(b.id));
+        });
     }, []);
 
     // ── Session CRUD ──

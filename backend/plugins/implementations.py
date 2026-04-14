@@ -1,11 +1,12 @@
 """
 Evermind Backend — Plugin Implementations
-Built-in plugins: screenshot, browser, file_ops, comfyui, shell, git, computer_use, ui_control
+Built-in plugins: screenshot, browser, source_fetch, file_ops, comfyui, shell, git, computer_use, ui_control
 """
 
 import asyncio
 import base64
 import hashlib
+import html
 import io
 import json
 import logging
@@ -15,13 +16,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import Request, urlopen
 
-from html_postprocess import postprocess_generated_text
+from html_postprocess import materialize_local_runtime_assets, postprocess_generated_text
 from preview_validation import inspect_html_integrity, is_bootstrap_html_artifact, validate_html_content
 
 try:
@@ -32,6 +34,38 @@ except Exception:  # pragma: no cover - optional dependency
 from .base import Plugin, PluginResult, PluginRegistry, SecurityLevel
 
 logger = logging.getLogger("evermind.plugins")
+
+
+_ACTIVE_FILE_OPS_WRITE_TOKENS: Dict[str, str] = {}
+_FILE_OPS_READ_HISTORY: Dict[str, set[str]] = {}
+_SHARED_ROOT_ASSET_NAMES = {"styles.css", "app.js", "style.css", "main.css", "main.js", "script.js"}
+
+
+def set_active_file_ops_write_token(node_execution_id: str, token: str) -> None:
+    node_execution_id = str(node_execution_id or "").strip()
+    token = str(token or "").strip()
+    if not node_execution_id or not token:
+        return
+    for key in list(_FILE_OPS_READ_HISTORY.keys()):
+        if key == node_execution_id or key.startswith(f"{node_execution_id}:"):
+            _FILE_OPS_READ_HISTORY.pop(key, None)
+    _ACTIVE_FILE_OPS_WRITE_TOKENS[node_execution_id] = token
+
+
+def clear_active_file_ops_write_token(node_execution_id: str, token: Optional[str] = None) -> None:
+    node_execution_id = str(node_execution_id or "").strip()
+    token = str(token or "").strip()
+    if not node_execution_id:
+        return
+    current = _ACTIVE_FILE_OPS_WRITE_TOKENS.get(node_execution_id)
+    if current is None:
+        return
+    if token and current != token:
+        return
+    _ACTIVE_FILE_OPS_WRITE_TOKENS.pop(node_execution_id, None)
+    for key in list(_FILE_OPS_READ_HISTORY.keys()):
+        if key == node_execution_id or key.startswith(f"{node_execution_id}:"):
+            _FILE_OPS_READ_HISTORY.pop(key, None)
 
 
 # ─────────────────────────────────────────────
@@ -105,6 +139,7 @@ class BrowserPlugin(Plugin):
         self._headless = True
         self._requested_headless = True
         self._launch_note = ""
+        self._force_headless_session = False
         self._bound_page_identity = None
         self._console_errors: List[Dict[str, str]] = []
         self._page_errors: List[str] = []
@@ -115,10 +150,28 @@ class BrowserPlugin(Plugin):
         self._trace_active = False
 
     def _resolve_headless(self, context: Dict[str, Any] | None = None) -> bool:
+        if self._force_headless_session:
+            return True
         if isinstance(context, dict) and "browser_headful" in context:
             return not bool(context.get("browser_headful"))
         env_headful = str(os.getenv("EVERMIND_BROWSER_HEADFUL", "0")).strip().lower() in ("1", "true", "yes", "on")
         return not env_headful
+
+    async def _create_context_and_page(self, *, headless: bool):
+        self._context = await self._browser.new_context(viewport={"width": 1280, "height": 800})
+        self._page = await self._context.new_page()
+        self._headless = headless
+
+    async def _relaunch_headless_after_visible_failure(self, launch_args: List[str], reason: Exception):
+        logger.warning("BrowserPlugin forcing headless fallback after visible browser failure: %s", reason)
+        self._force_headless_session = True
+        await self.shutdown()
+        from playwright.async_api import async_playwright
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(headless=True, args=launch_args)
+        self._launch_note = f"forced headless fallback: {reason}"
+        await self._create_context_and_page(headless=True)
+        self._requested_headless = False
 
     async def _ensure_browser(self, context: Dict[str, Any] | None = None):
         self._active_plugin_context = dict(context or {})
@@ -149,15 +202,33 @@ class BrowserPlugin(Plugin):
                     raise
                 # Fall back so workflow can continue even if GUI launch is blocked.
                 logger.warning("BrowserPlugin headful launch failed; falling back to headless: %s", launch_err)
+                self._force_headless_session = True
                 self._browser = await self._playwright.chromium.launch(headless=True, args=launch_args)
                 headless = True
                 self._launch_note = f"requested headful, fallback to headless: {launch_err}"
-            self._context = await self._browser.new_context(viewport={"width": 1280, "height": 800})
-            self._page = await self._context.new_page()
-            self._headless = headless
+            try:
+                await self._create_context_and_page(headless=headless)
+            except Exception as context_err:
+                if headless or requested_headless:
+                    raise
+                await self._relaunch_headless_after_visible_failure(launch_args, context_err)
             self._requested_headless = requested_headless
         elif self._page is None or self._page.is_closed():
-            self._page = await self._context.new_page()
+            try:
+                self._page = await self._context.new_page()
+            except Exception:
+                # P0 FIX 2026-04-04: Browser/context may be closed between checks.
+                # TargetClosedError is a common race here — recreate from scratch.
+                await self.shutdown()
+                from playwright.async_api import async_playwright
+                self._playwright = await async_playwright().start()
+                try:
+                    self._browser = await self._playwright.chromium.launch(headless=headless, args=launch_args)
+                except Exception:
+                    self._force_headless_session = True
+                    self._browser = await self._playwright.chromium.launch(headless=True, args=launch_args)
+                    headless = True
+                await self._create_context_and_page(headless=headless)
         if not self._headless:
             try:
                 await self._page.bring_to_front()
@@ -1344,7 +1415,627 @@ class BrowserPlugin(Plugin):
 
 
 # ─────────────────────────────────────────────
-# 3. File Operations Plugin
+# 3. Source Fetch Plugin
+# ─────────────────────────────────────────────
+class _SourceFetchHTMLExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._skip_depth = 0
+        self._title_depth = 0
+        self._code_depth = 0
+        self._title_chunks: List[str] = []
+        self._text_chunks: List[str] = []
+        self._code_chunks: List[str] = []
+        self._current_code: List[str] = []
+        self.links: List[str] = []
+
+    def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]):
+        lower = str(tag or "").strip().lower()
+        if lower in {"script", "style", "noscript"}:
+            self._skip_depth += 1
+            return
+        if lower == "title":
+            self._title_depth += 1
+            return
+        if lower in {"pre", "code"}:
+            self._code_depth += 1
+            return
+        if lower == "a":
+            href = ""
+            for key, value in attrs or []:
+                if str(key or "").strip().lower() == "href" and value:
+                    href = str(value).strip()
+                    break
+            if href and href not in self.links:
+                self.links.append(href)
+
+    def handle_endtag(self, tag: str):
+        lower = str(tag or "").strip().lower()
+        if lower in {"script", "style", "noscript"}:
+            self._skip_depth = max(0, self._skip_depth - 1)
+            return
+        if lower == "title":
+            self._title_depth = max(0, self._title_depth - 1)
+            return
+        if lower in {"pre", "code"}:
+            self._code_depth = max(0, self._code_depth - 1)
+            if self._code_depth == 0 and self._current_code:
+                code = "".join(self._current_code).strip()
+                if code:
+                    self._code_chunks.append(code)
+                self._current_code = []
+
+    def handle_data(self, data: str):
+        if not data or self._skip_depth > 0:
+            return
+        if self._title_depth > 0:
+            self._title_chunks.append(data)
+            return
+        if self._code_depth > 0:
+            self._current_code.append(data)
+            return
+        stripped = re.sub(r"\s+", " ", data).strip()
+        if stripped:
+            self._text_chunks.append(stripped)
+
+    @property
+    def title(self) -> str:
+        return re.sub(r"\s+", " ", "".join(self._title_chunks)).strip()
+
+    @property
+    def text(self) -> str:
+        return re.sub(r"\s+", " ", "\n".join(self._text_chunks)).strip()
+
+    @property
+    def code_blocks(self) -> List[str]:
+        return [block for block in self._code_chunks if block.strip()]
+
+
+class SourceFetchPlugin(Plugin):
+    name = "source_fetch"
+    display_name = "Source Fetch"
+    description = "Search and fetch readable source code or docs. Supports GitHub/doc search, URL batches, and optional Scrapling/Crawl4AI extraction."
+    icon = "fa-code-branch"
+    security_level = SecurityLevel.L1
+
+    _RAW_TEXT_SUFFIXES = {
+        ".c", ".cc", ".cpp", ".css", ".go", ".h", ".hpp", ".html", ".java", ".js",
+        ".json", ".jsx", ".mjs", ".md", ".php", ".py", ".rb", ".rs", ".sh", ".sql",
+        ".svg", ".toml", ".ts", ".tsx", ".txt", ".xml", ".yaml", ".yml",
+    }
+
+    def _get_parameters_schema(self):
+        return {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "HTTP(S) URL to fetch"},
+                "urls": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional batch of HTTP(S) URLs to fetch concurrently",
+                },
+                "query": {
+                    "type": "string",
+                    "description": "Optional web/source search query. Prefer GitHub/docs-oriented queries.",
+                },
+                "domains": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional domain allow-list for query search, such as ['github.com', 'threejs.org']",
+                },
+                "top_k": {
+                    "type": "integer",
+                    "description": "Maximum search results to return when using query mode",
+                    "default": 5,
+                },
+                "max_chars": {
+                    "type": "integer",
+                    "description": "Maximum characters to return in the extracted content",
+                    "default": 8000,
+                },
+                "prefer_code": {
+                    "type": "boolean",
+                    "description": "Prefer raw source / code blocks when possible",
+                    "default": True,
+                },
+                "include_links": {
+                    "type": "boolean",
+                    "description": "Include a small set of links discovered on the page",
+                    "default": False,
+                },
+            },
+            "required": [],
+        }
+
+    def _normalized_search_domains(self, value: Any) -> List[str]:
+        items = value if isinstance(value, (list, tuple)) else str(value or "").split(",")
+        normalized: List[str] = []
+        seen: set[str] = set()
+        for raw in items:
+            text = str(raw or "").strip().lower()
+            if not text:
+                continue
+            if text.startswith("http://") or text.startswith("https://"):
+                text = str(urlparse(text).netloc or "").strip().lower()
+            text = text.lstrip(".")
+            if text.startswith("www."):
+                text = text[4:]
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            normalized.append(text[:120])
+            if len(normalized) >= 12:
+                break
+        return normalized
+
+    def _preferred_domains_from_context(self, context: Optional[Dict[str, Any]]) -> List[str]:
+        analyst_cfg = {}
+        if isinstance(context, dict) and isinstance(context.get("analyst"), dict):
+            analyst_cfg = context.get("analyst") or {}
+        preferred_sites = analyst_cfg.get("preferred_sites", []) if isinstance(analyst_cfg, dict) else []
+        return self._normalized_search_domains(preferred_sites)
+
+    def _query_search_enabled(self, context: Optional[Dict[str, Any]]) -> bool:
+        analyst_cfg = {}
+        if isinstance(context, dict) and isinstance(context.get("analyst"), dict):
+            analyst_cfg = context.get("analyst") or {}
+        return bool(analyst_cfg.get("enable_query_search", True))
+
+    def _crawl_intensity(self, context: Optional[Dict[str, Any]]) -> str:
+        analyst_cfg = {}
+        if isinstance(context, dict) and isinstance(context.get("analyst"), dict):
+            analyst_cfg = context.get("analyst") or {}
+        intensity = str(analyst_cfg.get("crawl_intensity", "medium") or "medium").strip().lower()
+        if intensity not in {"off", "low", "medium", "high"}:
+            intensity = "medium"
+        return intensity
+
+    def _default_top_k(self, context: Optional[Dict[str, Any]]) -> int:
+        return {
+            "off": 2,
+            "low": 3,
+            "medium": 5,
+            "high": 8,
+        }.get(self._crawl_intensity(context), 5)
+
+    def _max_batch_urls(self, context: Optional[Dict[str, Any]]) -> int:
+        return {
+            "off": 2,
+            "low": 3,
+            "medium": 5,
+            "high": 8,
+        }.get(self._crawl_intensity(context), 5)
+
+    def _scrapling_enabled(self, context: Optional[Dict[str, Any]]) -> bool:
+        analyst_cfg = {}
+        if isinstance(context, dict) and isinstance(context.get("analyst"), dict):
+            analyst_cfg = context.get("analyst") or {}
+        return bool(analyst_cfg.get("use_scrapling_when_available", True))
+
+    def _normalize_source_url(self, url: str, prefer_code: bool) -> str:
+        parsed = urlparse(url)
+        host = str(parsed.netloc or "").strip().lower()
+        if host != "github.com" or not prefer_code:
+            return url
+        parts = [part for part in str(parsed.path or "").split("/") if part]
+        if len(parts) >= 5 and parts[2] == "blob":
+            owner, repo, _blob, branch = parts[:4]
+            remainder = "/".join(parts[4:])
+            return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{remainder}"
+        return url
+
+    def _looks_like_raw_text(self, url: str, content_type: str = "") -> bool:
+        parsed = urlparse(url)
+        host = str(parsed.netloc or "").strip().lower()
+        path = str(parsed.path or "").strip().lower()
+        if host in {"raw.githubusercontent.com", "gist.githubusercontent.com"}:
+            return True
+        if content_type and any(token in content_type.lower() for token in ("text/plain", "application/json", "application/javascript")):
+            return True
+        return any(path.endswith(suffix) for suffix in self._RAW_TEXT_SUFFIXES)
+
+    def _domain_matches(self, url: str, domains: List[str]) -> bool:
+        if not domains:
+            return True
+        host = str(urlparse(url).netloc or "").strip().lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return any(host == domain or host.endswith(f".{domain}") for domain in domains)
+
+    def _decode_duckduckgo_href(self, href: str) -> str:
+        text = str(href or "").strip()
+        if not text:
+            return ""
+        if text.startswith("//"):
+            text = "https:" + text
+        parsed = urlparse(text)
+        if "duckduckgo.com" not in str(parsed.netloc or "").lower():
+            return text
+        query = parse_qs(parsed.query)
+        redirected = query.get("uddg", [])
+        if redirected:
+            return str(redirected[0] or "").strip()
+        return text
+
+    def _strip_html_text(self, value: str) -> str:
+        cleaned = re.sub(r"<[^>]+>", " ", str(value or ""))
+        return re.sub(r"\s+", " ", html.unescape(cleaned)).strip()
+
+    async def _search_with_duckduckgo(
+        self,
+        query: str,
+        domains: List[str],
+        top_k: int,
+    ) -> List[Dict[str, str]]:
+        def _read() -> str:
+            request = Request(
+                "https://html.duckduckgo.com/html/",
+                data=urlencode({"q": query}).encode("utf-8"),
+                headers={
+                    "User-Agent": "EvermindSourceFetch/1.0 (+https://evermind.local)",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+            )
+            with urlopen(request, timeout=20) as response:
+                payload = response.read(1_000_000)
+                content_type = str(response.headers.get("Content-Type") or "").strip()
+            return self._decode_body(payload, content_type)
+
+        html_text = await asyncio.to_thread(_read)
+        results: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        anchor_re = re.compile(
+            r"<a[^>]+class=[\"'][^\"']*result__a[^\"']*[\"'][^>]+href=[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+            re.IGNORECASE | re.DOTALL,
+        )
+        for match in anchor_re.finditer(html_text):
+            href = self._decode_duckduckgo_href(match.group(1))
+            title = self._strip_html_text(match.group(2))
+            if not href or not title or href in seen or not self._domain_matches(href, domains):
+                continue
+            seen.add(href)
+            tail = html_text[match.end(): match.end() + 1200]
+            snippet_match = re.search(
+                r"result__snippet[^>]*>(.*?)</(?:a|div|span)>",
+                tail,
+                re.IGNORECASE | re.DOTALL,
+            )
+            snippet = self._strip_html_text(snippet_match.group(1) if snippet_match else "")
+            results.append({
+                "title": title[:180],
+                "url": href[:500],
+                "snippet": snippet[:320],
+            })
+            if len(results) >= top_k:
+                break
+        return results
+
+    def _decode_body(self, payload: bytes, content_type: str) -> str:
+        charset_match = re.search(r"charset=([A-Za-z0-9._-]+)", content_type or "", re.IGNORECASE)
+        charset = charset_match.group(1) if charset_match else "utf-8"
+        try:
+            return payload.decode(charset, errors="ignore")
+        except Exception:
+            return payload.decode("utf-8", errors="ignore")
+
+    def _truncate(self, text: str, max_chars: int) -> str:
+        cleaned = str(text or "").strip()
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[: max(0, max_chars - 3)].rstrip() + "..."
+
+    def _extract_html_payload(
+        self,
+        html_text: str,
+        *,
+        url: str,
+        max_chars: int,
+        include_links: bool,
+        engine: str,
+    ) -> Dict[str, Any]:
+        extractor = _SourceFetchHTMLExtractor()
+        extractor.feed(html_text)
+        title = extractor.title
+        content = extractor.text or re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html_text)).strip()
+        code_blocks = [
+            self._truncate(html.unescape(block), min(max_chars // 2, 2400))
+            for block in extractor.code_blocks[:3]
+        ]
+        data: Dict[str, Any] = {
+            "url": url,
+            "engine": engine,
+            "source_kind": "html",
+            "title": title,
+            "content": self._truncate(content, max_chars),
+            "code_blocks": code_blocks,
+        }
+        if include_links:
+            data["links"] = extractor.links[:12]
+        return data
+
+    def _extract_text_payload(
+        self,
+        text: str,
+        *,
+        url: str,
+        max_chars: int,
+        engine: str,
+        source_kind: str,
+    ) -> Dict[str, Any]:
+        normalized = str(text or "").replace("\r\n", "\n").strip()
+        code_blocks = [self._truncate(normalized, min(max_chars, 2400))]
+        return {
+            "url": url,
+            "engine": engine,
+            "source_kind": source_kind,
+            "title": Path(urlparse(url).path).name or url,
+            "content": self._truncate(normalized, max_chars),
+            "code_blocks": code_blocks,
+        }
+
+    async def _fetch_with_scrapling(
+        self,
+        url: str,
+        *,
+        max_chars: int,
+        include_links: bool,
+    ) -> Optional[Dict[str, Any]]:
+        try:
+            from scrapling.fetchers import Fetcher  # type: ignore
+        except Exception:
+            return None
+
+        def _read() -> Any:
+            try:
+                return Fetcher.get(url, stealthy_headers=True)  # type: ignore[attr-defined]
+            except TypeError:
+                return Fetcher.get(url)  # type: ignore[attr-defined]
+
+        try:
+            response = await asyncio.to_thread(_read)
+        except Exception as exc:
+            logger.warning("source_fetch scrapling failed for %s: %s", url, exc)
+            return None
+
+        html_text = ""
+        for attr in ("html_content", "content", "body", "text", "raw_html"):
+            value = getattr(response, attr, "")
+            if isinstance(value, str) and value.strip():
+                html_text = value
+                break
+        if not html_text:
+            html_text = str(response or "").strip()
+        if not html_text:
+            return None
+
+        data = self._extract_html_payload(
+            html_text,
+            url=url,
+            max_chars=max_chars,
+            include_links=include_links,
+            engine="scrapling",
+        )
+        return data if data.get("content") else None
+
+    async def _fetch_with_crawl4ai(self, url: str, max_chars: int, include_links: bool) -> Optional[Dict[str, Any]]:
+        try:
+            from crawl4ai import AsyncWebCrawler  # type: ignore
+        except Exception:
+            return None
+
+        try:
+            async with AsyncWebCrawler() as crawler:
+                result = await crawler.arun(url=url)
+        except Exception as exc:
+            logger.warning("source_fetch crawl4ai failed for %s: %s", url, exc)
+            return None
+
+        if result is None or getattr(result, "success", True) is False:
+            return None
+
+        markdown = ""
+        raw_markdown = getattr(result, "markdown", "")
+        if isinstance(raw_markdown, str):
+            markdown = raw_markdown
+        elif raw_markdown is not None:
+            for attr in ("raw_markdown", "markdown", "fit_markdown"):
+                value = getattr(raw_markdown, attr, "")
+                if isinstance(value, str) and value.strip():
+                    markdown = value
+                    break
+        if not markdown:
+            return None
+
+        title = str(getattr(result, "title", "") or "").strip()
+        links: List[str] = []
+        if include_links:
+            extracted_links = getattr(result, "links", None)
+            if isinstance(extracted_links, dict):
+                for bucket in extracted_links.values():
+                    if isinstance(bucket, list):
+                        for item in bucket:
+                            href = ""
+                            if isinstance(item, dict):
+                                href = str(item.get("href") or item.get("url") or "").strip()
+                            elif isinstance(item, str):
+                                href = item.strip()
+                            if href and href not in links:
+                                links.append(href)
+                            if len(links) >= 12:
+                                break
+                    if len(links) >= 12:
+                        break
+
+        return {
+            "url": url,
+            "engine": "crawl4ai",
+            "source_kind": "html",
+            "title": title or url,
+            "content": self._truncate(markdown, max_chars),
+            "code_blocks": [],
+            "links": links[:12] if include_links else [],
+        }
+
+    async def _fetch_with_urllib(
+        self,
+        url: str,
+        *,
+        max_chars: int,
+        include_links: bool,
+        prefer_code: bool,
+    ) -> Dict[str, Any]:
+        def _read() -> Tuple[bytes, str]:
+            request = Request(
+                url,
+                headers={
+                    "User-Agent": "EvermindSourceFetch/1.0 (+https://evermind.local)",
+                    "Accept": "text/html, text/plain, application/json, application/javascript;q=0.9, */*;q=0.8",
+                },
+            )
+            with urlopen(request, timeout=20) as response:
+                content_type = str(response.headers.get("Content-Type") or "").strip()
+                payload = response.read(2_000_000)
+            return payload, content_type
+
+        payload, content_type = await asyncio.to_thread(_read)
+        text = self._decode_body(payload, content_type)
+        if self._looks_like_raw_text(url, content_type) or (prefer_code and not text.lstrip().startswith("<")):
+            return self._extract_text_payload(
+                text,
+                url=url,
+                max_chars=max_chars,
+                engine="urllib",
+                source_kind="raw_text",
+            )
+        return self._extract_html_payload(
+            text,
+            url=url,
+            max_chars=max_chars,
+            include_links=include_links,
+            engine="urllib",
+        )
+
+    async def _fetch_single_source(
+        self,
+        url: str,
+        *,
+        max_chars: int,
+        include_links: bool,
+        prefer_code: bool,
+        context: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        normalized_url = self._normalize_source_url(url, prefer_code)
+        result = None
+        if not self._looks_like_raw_text(normalized_url):
+            if self._scrapling_enabled(context):
+                result = await self._fetch_with_scrapling(
+                    normalized_url,
+                    max_chars=max_chars,
+                    include_links=include_links,
+                )
+            if result is None:
+                result = await self._fetch_with_crawl4ai(normalized_url, max_chars, include_links)
+        if result is None:
+            result = await self._fetch_with_urllib(
+                normalized_url,
+                max_chars=max_chars,
+                include_links=include_links,
+                prefer_code=prefer_code,
+            )
+        if normalized_url != url:
+            result["requested_url"] = url
+            result["resolved_url"] = normalized_url
+        return result
+
+    async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
+        url = str(params.get("url") or "").strip()
+        urls = [
+            str(item or "").strip()
+            for item in (params.get("urls") if isinstance(params.get("urls"), list) else [])
+            if str(item or "").strip()
+        ]
+        query = str(params.get("query") or "").strip()
+        if not url and not urls and not query:
+            return PluginResult(success=False, error="Missing required parameter: url, urls, or query")
+
+        prefer_code = bool(params.get("prefer_code", True))
+        include_links = bool(params.get("include_links", False))
+        try:
+            max_chars = int(params.get("max_chars", 8000) or 8000)
+        except Exception:
+            max_chars = 8000
+        max_chars = max(800, min(max_chars, 24000))
+        try:
+            top_k = int(params.get("top_k", self._default_top_k(context)) or self._default_top_k(context))
+        except Exception:
+            top_k = self._default_top_k(context)
+        top_k = max(1, min(top_k, 12))
+
+        domains = self._normalized_search_domains(params.get("domains", []))
+        if not domains:
+            domains = self._preferred_domains_from_context(context)
+
+        if query:
+            if not self._query_search_enabled(context):
+                return PluginResult(success=False, error="source_fetch query search is disabled by analyst settings")
+            try:
+                results = await self._search_with_duckduckgo(query, domains, top_k)
+                return PluginResult(success=True, data={
+                    "engine": "duckduckgo_html",
+                    "mode": "search",
+                    "query": query,
+                    "domains": domains,
+                    "results": results,
+                })
+            except (HTTPError, URLError) as exc:
+                return PluginResult(success=False, error=f"Failed to search sources for '{query}': {exc}")
+            except Exception as exc:
+                return PluginResult(success=False, error=f"source_fetch search failed for '{query}': {exc}")
+
+        target_urls = [url] if url else urls
+        for candidate in target_urls:
+            parsed = urlparse(candidate)
+            if str(parsed.scheme or "").strip().lower() not in {"http", "https"}:
+                return PluginResult(success=False, error="source_fetch only supports http/https URLs")
+
+        try:
+            if len(target_urls) > 1:
+                tasks = [
+                    self._fetch_single_source(
+                        candidate,
+                        max_chars=max_chars,
+                        include_links=include_links,
+                        prefer_code=prefer_code,
+                        context=context,
+                    )
+                    for candidate in target_urls[: self._max_batch_urls(context)]
+                ]
+                results = await asyncio.gather(*tasks)
+                return PluginResult(success=True, data={
+                    "engine": "batch",
+                    "mode": "batch_fetch",
+                    "count": len(results),
+                    "items": results,
+                })
+
+            result = await self._fetch_single_source(
+                target_urls[0],
+                max_chars=max_chars,
+                include_links=include_links,
+                prefer_code=prefer_code,
+                context=context,
+            )
+            return PluginResult(success=True, data=result)
+        except (HTTPError, URLError) as exc:
+            return PluginResult(success=False, error=f"Failed to fetch {target_urls[0]}: {exc}")
+        except Exception as exc:
+            if len(target_urls) > 1:
+                return PluginResult(success=False, error=f"source_fetch batch failed: {exc}")
+            return PluginResult(success=False, error=f"source_fetch failed for {target_urls[0]}: {exc}")
+
+
+# ─────────────────────────────────────────────
+# 4. File Operations Plugin
 # ─────────────────────────────────────────────
 class FileOpsPlugin(Plugin):
     name = "file_ops"
@@ -1357,6 +2048,7 @@ class FileOpsPlugin(Plugin):
         "OLDER_CONTEXT_OMITTED",
         "[TRUNCATED]",
     )
+    _UNSAFE_PATH_CHAR_RE = re.compile(r"[\x00\u200b\u200c\u200d\u2060\ufeff]")
 
     def _resolve_candidate_path(self, path: str) -> Path:
         candidate = Path(str(path or "")).expanduser()
@@ -1381,6 +2073,70 @@ class FileOpsPlugin(Plugin):
 
         return any(resolved == root or root in resolved.parents or resolved.parent == root or root in resolved.parent.parents for root in roots)
 
+    def _guard_unsafe_path_text(self, path: str, action: str) -> Optional[PluginResult]:
+        raw = str(path or "")
+        if not raw:
+            return None
+        if self._UNSAFE_PATH_CHAR_RE.search(raw):
+            logger.warning("Rejected file_ops %s due to unsafe path characters: %r", action, raw)
+            return PluginResult(
+                success=False,
+                error=(
+                    f"Unsafe path rejected for file_ops action '{action}': filenames may not contain null bytes "
+                    "or invisible zero-width Unicode characters."
+                ),
+            )
+        return None
+
+    def _guard_output_dir_escape(self, path: str, action: str, context: Dict[str, Any]) -> Optional[PluginResult]:
+        if action not in {"write", "edit", "delete"}:
+            return None
+        output_root_raw = str(
+            (context or {}).get("file_ops_output_dir")
+            or (context or {}).get("output_dir")
+            or ""
+        ).strip()
+        if not output_root_raw:
+            return None
+        try:
+            output_root = Path(output_root_raw).expanduser().resolve()
+            candidate = self._resolve_candidate_path(path)
+        except Exception:
+            return None
+        if candidate == output_root or output_root in candidate.parents:
+            return None
+        # V4.6 SPEED: Auto-correct path instead of rejecting.
+        # When model writes to parent dir (e.g. output/index.html instead of
+        # output/task_6/index.html), redirect into output_root automatically.
+        # This saves 2-3 minutes of wasted regeneration per occurrence.
+        try:
+            parent_of_root = output_root.parent
+            if parent_of_root in candidate.parents or candidate.parent == parent_of_root:
+                rel_from_parent = candidate.relative_to(parent_of_root)
+                corrected = output_root / rel_from_parent
+                logger.info(
+                    "Auto-corrected file_ops %s path: %s -> %s (output_root=%s)",
+                    action, candidate, corrected, output_root,
+                )
+                # Mutate the context so downstream code uses corrected path
+                context["_auto_corrected_path"] = str(corrected)
+                return None  # Allow the write to proceed with corrected path
+        except (ValueError, RuntimeError):
+            pass
+        logger.warning(
+            "Rejected file_ops %s escaping output dir: candidate=%s output_root=%s",
+            action,
+            candidate,
+            output_root,
+        )
+        return PluginResult(
+            success=False,
+            error=(
+                f"Path escapes the runtime output directory for file_ops action '{action}': {candidate}. "
+                f"Writes must stay under {output_root}."
+            ),
+        )
+
     def _relative_to_output_root(self, path: Path, context: Dict[str, Any]) -> Optional[Path]:
         output_root_raw = str(
             (context or {}).get("file_ops_output_dir")
@@ -1396,15 +2152,10 @@ class FileOpsPlugin(Plugin):
             return None
 
     def _enforce_builder_html_targets(self, action: str, path: str, context: Dict[str, Any]) -> Optional[PluginResult]:
-        if action != "write":
+        if action not in ("write", "edit"):
             return None
         node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
         if node_type != "builder":
-            return None
-        # Only enforce strict target boundaries when explicitly enabled
-        # (multi-builder plans). Single-builder plans get targets for
-        # guidance / error hints only and are free to write any page.
-        if not bool((context or {}).get("file_ops_enforce_html_targets")):
             return None
 
         candidate = self._resolve_candidate_path(path)
@@ -1416,43 +2167,65 @@ class FileOpsPlugin(Plugin):
             for item in ((context or {}).get("file_ops_allowed_html_targets") or [])
             if str(item).strip()
         ]
-        if not allowed_targets:
-            return None
+        strict_target_boundaries = bool((context or {}).get("file_ops_enforce_html_targets"))
 
         output_root_raw = str(
             (context or {}).get("file_ops_output_dir")
             or (context or {}).get("output_dir")
             or ""
         ).strip()
+        relative = None
         if output_root_raw:
             try:
                 output_root = Path(output_root_raw).expanduser().resolve()
                 relative = candidate.relative_to(output_root)
-                if len(relative.parts) != 1:
+            except Exception:
+                if strict_target_boundaries:
                     return PluginResult(
                         success=False,
                         error=(
-                            "Builder HTML files must be written directly under the runtime output directory. "
+                            "Builder HTML writes must stay inside the runtime output directory. "
                             f"Blocked path: {candidate}"
                         ),
                     )
-            except Exception:
-                return PluginResult(
-                    success=False,
-                    error=(
-                        "Builder HTML writes must stay inside the runtime output directory. "
-                        f"Blocked path: {candidate}"
-                    ),
-                )
 
         basename = candidate.name
         can_write_root_index = bool((context or {}).get("file_ops_can_write_root_index"))
-        if basename == "index.html" and not can_write_root_index:
+        writes_root_deliverable = bool(relative and len(relative.parts) == 1)
+
+        if basename == "index.html" and writes_root_deliverable and not can_write_root_index:
             return PluginResult(
                 success=False,
                 error=(
                     "HTML target not assigned for builder: index.html. "
-                    f"Allowed HTML filenames: {', '.join(allowed_targets)}"
+                    + (
+                        f"Allowed HTML filenames: {', '.join(allowed_targets)}"
+                        if allowed_targets else
+                        "This secondary builder must not overwrite the root gameplay/site shell."
+                    )
+                ),
+            )
+
+        if not strict_target_boundaries:
+            if writes_root_deliverable and not can_write_root_index:
+                if basename == "index.html" or not allowed_targets or basename not in allowed_targets:
+                    return PluginResult(
+                        success=False,
+                        error=(
+                            "Secondary builder may not write deliverable root HTML directly in a single-output task. "
+                            "Return the improved full HTML in the model response instead of overwriting the live root artifact."
+                        ),
+                    )
+            return None
+
+        if not allowed_targets:
+            return None
+        if not writes_root_deliverable:
+            return PluginResult(
+                success=False,
+                error=(
+                    "Builder HTML files must be written directly under the runtime output directory. "
+                    f"Blocked path: {candidate}"
                 ),
             )
         if basename not in allowed_targets:
@@ -1471,11 +2244,11 @@ class FileOpsPlugin(Plugin):
         path: str,
         context: Dict[str, Any],
     ) -> Optional[PluginResult]:
-        if action != "write":
+        if action not in ("write", "edit"):
             return None
 
         node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
-        if node_type in {"builder", "polisher", "debugger"}:
+        if node_type in {"builder", "polisher", "debugger", "merger"}:
             return None
 
         candidate = self._resolve_candidate_path(path)
@@ -1508,6 +2281,75 @@ class FileOpsPlugin(Plugin):
             ),
         )
 
+    def _enforce_builder_shared_root_asset_ownership(
+        self,
+        action: str,
+        path: str,
+        context: Dict[str, Any],
+    ) -> Optional[PluginResult]:
+        if action not in ("write", "edit"):
+            return None
+
+        node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
+        if node_type != "builder":
+            return None
+
+        candidate = self._resolve_candidate_path(path)
+        if candidate.suffix.lower() not in (".css", ".js"):
+            return None
+
+        if candidate.name.lower() not in _SHARED_ROOT_ASSET_NAMES:
+            return None
+
+        relative = self._relative_to_output_root(candidate, context or {})
+        if relative is None or len(relative.parts) != 1:
+            return None
+
+        if bool((context or {}).get("file_ops_can_write_root_index")):
+            return None
+
+        return PluginResult(
+            success=False,
+            error=(
+                f"Secondary builder may not overwrite shared root asset {candidate.name}. "
+                "Root shared assets belong to the primary builder-owned live artifact; "
+                "keep changes inside your assigned HTML pages or route-local assets instead."
+            ),
+        )
+
+    def _enforce_active_write_token(self, action: str, context: Dict[str, Any]) -> Optional[PluginResult]:
+        if action not in ("write", "edit"):
+            return None
+
+        node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
+        if node_type != "builder":
+            return None
+
+        node_execution_id = str((context or {}).get("node_execution_id", "") or "").strip()
+        token = str((context or {}).get("file_ops_write_token", "") or "").strip()
+        if not node_execution_id or not token:
+            return None
+
+        active = _ACTIVE_FILE_OPS_WRITE_TOKENS.get(node_execution_id)
+        if active == token:
+            return None
+        if not active:
+            return PluginResult(
+                success=False,
+                error=(
+                    "Inactive builder file_ops write rejected because this builder attempt is no longer active. "
+                    "Re-read the latest artifact and write from the current live attempt only."
+                ),
+            )
+
+        return PluginResult(
+            success=False,
+            error=(
+                "Stale builder file_ops write rejected because a newer builder attempt is already active. "
+                "Re-read the latest artifact and write from the current attempt only."
+            ),
+        )
+
     def _validate_deliverable_html_write(
         self,
         action: str,
@@ -1515,7 +2357,7 @@ class FileOpsPlugin(Plugin):
         content: Any,
         context: Dict[str, Any],
     ) -> Optional[PluginResult]:
-        if action != "write":
+        if action not in ("write", "edit"):
             return None
 
         node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
@@ -1546,7 +2388,7 @@ class FileOpsPlugin(Plugin):
         content: Any,
         context: Dict[str, Any],
     ) -> Optional[PluginResult]:
-        if action != "write":
+        if action not in ("write", "edit"):
             return None
 
         node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
@@ -1596,7 +2438,7 @@ class FileOpsPlugin(Plugin):
         content: Any,
         context: Dict[str, Any],
     ) -> Optional[PluginResult]:
-        if action != "write":
+        if action not in ("write", "edit"):
             return None
 
         node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
@@ -1632,7 +2474,7 @@ class FileOpsPlugin(Plugin):
         content: Any,
         context: Dict[str, Any],
     ) -> Optional[PluginResult]:
-        if action != "write":
+        if action not in ("write", "edit"):
             return None
 
         node_type = str((context or {}).get("file_ops_node_type", "") or "").strip().lower()
@@ -1726,17 +2568,85 @@ class FileOpsPlugin(Plugin):
             return str(fallback_candidates[0])
         return ""
 
+    def _file_ops_attempt_key(self, context: Dict[str, Any]) -> str:
+        node_execution_id = str((context or {}).get("node_execution_id", "") or "").strip()
+        token = str((context or {}).get("file_ops_write_token", "") or "").strip()
+        if token and node_execution_id:
+            return f"{node_execution_id}:{token}"
+        return node_execution_id
+
+    def _record_builder_read(self, path: str, context: Dict[str, Any]) -> None:
+        if str((context or {}).get("file_ops_node_type", "") or "").strip().lower() != "builder":
+            return
+        attempt_key = self._file_ops_attempt_key(context or {})
+        if not attempt_key:
+            return
+        candidate = self._resolve_candidate_path(path)
+        relative = self._relative_to_output_root(candidate, context or {})
+        names = {candidate.name}
+        if relative is not None:
+            names.add(relative.as_posix())
+            names.add(relative.name)
+        bucket = _FILE_OPS_READ_HISTORY.setdefault(attempt_key, set())
+        bucket.update(name for name in names if str(name or "").strip())
+
+    def _enforce_builder_patch_read_before_write(
+        self,
+        action: str,
+        path: str,
+        context: Dict[str, Any],
+    ) -> Optional[PluginResult]:
+        if action not in ("write", "edit"):
+            return None
+        if str((context or {}).get("file_ops_node_type", "") or "").strip().lower() != "builder":
+            return None
+        if not bool((context or {}).get("file_ops_require_existing_artifact_read")):
+            return None
+
+        required_targets = [
+            Path(str(item).strip()).name
+            for item in ((context or {}).get("file_ops_required_read_targets") or [])
+            if str(item).strip()
+        ]
+        if not required_targets:
+            return None
+
+        candidate = self._resolve_candidate_path(path)
+        relative = self._relative_to_output_root(candidate, context or {})
+        candidate_names = {candidate.name}
+        if relative is not None:
+            candidate_names.add(relative.as_posix())
+            candidate_names.add(relative.name)
+        if not any(name in candidate_names for name in required_targets):
+            return None
+
+        attempt_key = self._file_ops_attempt_key(context or {})
+        seen_reads = _FILE_OPS_READ_HISTORY.get(attempt_key, set()) if attempt_key else set()
+        if any(name in seen_reads for name in required_targets):
+            return None
+
+        return PluginResult(
+            success=False,
+            error=(
+                "Builder patch-mode write blocked: you must file_ops read the current live artifact first. "
+                f"Required read target(s): {', '.join(required_targets)}."
+            ),
+        )
+
     async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
         try:
             action = params.get("action", "read")
             path = params.get("path", "")
             mode = str((context or {}).get("file_ops_mode", "read_write") or "read_write").strip().lower()
-            if mode == "read_only" and action in {"write", "delete"}:
+            if mode == "read_only" and action in {"write", "edit", "delete"}:
                 node_type = str((context or {}).get("file_ops_node_type", "node") or "node")
                 return PluginResult(
                     success=False,
                     error=f"file_ops is read-only for {node_type}; action '{action}' is blocked",
                 )
+            unsafe_path_guard = self._guard_unsafe_path_text(str(path or ""), str(action))
+            if unsafe_path_guard is not None:
+                return unsafe_path_guard
 
             output_root = str(
                 (context or {}).get("file_ops_output_dir")
@@ -1821,6 +2731,17 @@ class FileOpsPlugin(Plugin):
                         error=f"Blank path is not allowed for file_ops action '{action}'.{hint}",
                     )
 
+            stale_attempt_guard = self._enforce_active_write_token(str(action), context or {})
+            if stale_attempt_guard is not None:
+                return stale_attempt_guard
+            output_escape_guard = self._guard_output_dir_escape(str(path), str(action), context or {})
+            if output_escape_guard is not None:
+                return output_escape_guard
+            # V4.6 SPEED: Apply auto-corrected path if guard redirected it
+            if context and context.get("_auto_corrected_path"):
+                path = context.pop("_auto_corrected_path")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+
             # Security check: validate against allowed directories
             allowed_dirs = context.get("allowed_dirs", ["/tmp"]) if context else ["/tmp"]
             if not self._is_allowed_path(path, allowed_dirs):
@@ -1829,15 +2750,30 @@ class FileOpsPlugin(Plugin):
             builder_html_guard = self._enforce_builder_html_targets(str(action), str(path), context or {})
             if builder_html_guard is not None:
                 return builder_html_guard
+            shared_asset_owner_guard = self._enforce_builder_shared_root_asset_ownership(
+                str(action),
+                str(path),
+                context or {},
+            )
+            if shared_asset_owner_guard is not None:
+                return shared_asset_owner_guard
             html_owner_guard = self._enforce_deliverable_html_write_ownership(str(action), str(path), context or {})
             if html_owner_guard is not None:
                 return html_owner_guard
+            patch_read_guard = self._enforce_builder_patch_read_before_write(
+                str(action),
+                str(path),
+                context or {},
+            )
+            if patch_read_guard is not None:
+                return patch_read_guard
 
             if action == "read":
                 if not os.path.exists(path):
                     return PluginResult(success=False, error=f"File not found: {path}")
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     content = f.read(500_000)  # Limit to 500KB
+                self._record_builder_read(path, context or {})
                 return PluginResult(success=True, data={
                     "path": path, "content": content, "size": os.path.getsize(path)
                 })
@@ -1884,6 +2820,10 @@ class FileOpsPlugin(Plugin):
                 os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(content)
+                try:
+                    materialize_local_runtime_assets(Path(path), task_type=task_type)
+                except Exception as runtime_exc:
+                    logger.warning("Failed to materialize local runtime assets for %s: %s", path, runtime_exc)
                 return PluginResult(success=True, data={
                     "path": path, "size": len(content), "written": True
                 })
@@ -1898,6 +2838,72 @@ class FileOpsPlugin(Plugin):
                         "size": entry.stat().st_size if entry.is_file() else 0
                     })
                 return PluginResult(success=True, data={"path": path, "entries": entries[:200]})
+            elif action == "edit":
+                # Claude Code-style diff edit: replace old_string with new_string
+                old_string = params.get("old_string", "")
+                new_string = params.get("new_string", "")
+                if not old_string:
+                    return PluginResult(success=False, error="edit requires 'old_string'")
+                if not os.path.exists(path):
+                    return PluginResult(success=False, error=f"File not found: {path}")
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                count = content.count(old_string)
+                if count == 0:
+                    return PluginResult(success=False, error="old_string not found in file")
+                if count > 1 and not params.get("replace_all", False):
+                    return PluginResult(success=False, error=f"old_string matches {count} locations; set replace_all=true or provide more context")
+                if params.get("replace_all", False):
+                    new_content = content.replace(old_string, new_string)
+                else:
+                    new_content = content.replace(old_string, new_string, 1)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(new_content)
+                return PluginResult(success=True, data={
+                    "path": path, "replacements": count if params.get("replace_all") else 1
+                })
+            elif action == "search":
+                # Grep/glob hybrid: search file contents or find files by pattern
+                pattern = params.get("pattern", "")
+                if not pattern:
+                    return PluginResult(success=False, error="search requires 'pattern'")
+                import glob as glob_mod
+                search_path = path or "."
+                if os.path.isdir(search_path):
+                    # Glob for files, then grep inside them
+                    file_glob = params.get("glob", "**/*")
+                    matches = []
+                    files_scanned = 0
+                    max_files = 5000
+                    for fpath in glob_mod.iglob(os.path.join(search_path, file_glob), recursive=True):
+                        if not os.path.isfile(fpath):
+                            continue
+                        files_scanned += 1
+                        if files_scanned > max_files:
+                            break
+                        try:
+                            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                                for lineno, line in enumerate(f, 1):
+                                    if pattern in line:
+                                        matches.append({"file": fpath, "line": lineno, "text": line.rstrip()[:200]})
+                                        if len(matches) >= 100:
+                                            break
+                        except (OSError, UnicodeDecodeError):
+                            continue
+                        if len(matches) >= 100:
+                            break
+                    return PluginResult(success=True, data={"pattern": pattern, "matches": matches, "count": len(matches)})
+                elif os.path.isfile(search_path):
+                    matches = []
+                    with open(search_path, "r", encoding="utf-8", errors="replace") as f:
+                        for lineno, line in enumerate(f, 1):
+                            if pattern in line:
+                                matches.append({"line": lineno, "text": line.rstrip()[:200]})
+                                if len(matches) >= 100:
+                                    break
+                    return PluginResult(success=True, data={"file": search_path, "matches": matches, "count": len(matches)})
+                else:
+                    return PluginResult(success=False, error=f"Path not found: {search_path}")
             elif action == "delete":
                 if os.path.exists(path):
                     os.remove(path)
@@ -1911,9 +2917,14 @@ class FileOpsPlugin(Plugin):
         return {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["read", "write", "list", "delete"]},
+                "action": {"type": "string", "enum": ["read", "write", "edit", "search", "list", "delete"]},
                 "path": {"type": "string", "description": "File or directory path"},
-                "content": {"type": "string", "description": "Content to write (for write action)"}
+                "content": {"type": "string", "description": "Content to write (for write action)"},
+                "old_string": {"type": "string", "description": "Text to find and replace (for edit action)"},
+                "new_string": {"type": "string", "description": "Replacement text (for edit action)"},
+                "replace_all": {"type": "boolean", "description": "Replace all occurrences (for edit action, default false)"},
+                "pattern": {"type": "string", "description": "Search pattern (for search action)"},
+                "glob": {"type": "string", "description": "File glob filter for directory search (default **/*)"}
             },
             "required": ["action", "path"]
         }
@@ -2619,7 +3630,7 @@ class UIControlPlugin(Plugin):
 # ─────────────────────────────────────────────
 def register_all():
     """Register all built-in plugins."""
-    for PluginClass in [ScreenshotPlugin, BrowserPlugin, BrowserUsePlugin, FileOpsPlugin, ComfyUIPlugin,
+    for PluginClass in [ScreenshotPlugin, BrowserPlugin, SourceFetchPlugin, BrowserUsePlugin, FileOpsPlugin, ComfyUIPlugin,
                         ShellPlugin, GitPlugin, ComputerUsePlugin, UIControlPlugin]:
         PluginRegistry.register(PluginClass())
     logger.info(f"Registered {len(PluginRegistry.get_all())} plugins")

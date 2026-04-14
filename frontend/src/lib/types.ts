@@ -51,6 +51,19 @@ export interface NodeData {
     durationSeconds?: number;
     phase?: string;
     toolCall?: string;
+    referenceUrls?: string[];
+    currentAction?: string;
+    workSummary?: string[];
+    blockingReason?: string;
+    latestReviewDecision?: string;
+    artifactIds?: string[];
+    reportArtifactIds?: string[];
+    handoffArtifactIds?: string[];
+    dossierArtifactId?: string;
+    summaryArtifactId?: string;
+    modelLatencyMs?: number;
+    charsPerSec?: number;
+    firstContentSec?: number;
     hasModelPartialOutput?: boolean;
     log: LogEntry[];
 }
@@ -106,6 +119,7 @@ export interface ChatMessage {
     icon?: string;
     timestamp: string;
     borderColor?: string;
+    attachments?: ChatAttachment[];
     /** Structured completion data for RunCompletionCard (P2-3) */
     completionData?: {
         success: boolean;
@@ -121,9 +135,22 @@ export interface ChatMessage {
             retries: number;
             filesCreated?: string[];
             workSummary?: string[];
+            codeLines?: number;
+            codeKb?: number;
+            codeLanguages?: string[];
         }>;
         previewUrl?: string;
     };
+}
+
+export interface ChatAttachment {
+    id: string;
+    name: string;
+    path: string;
+    mimeType: string;
+    size: number;
+    kind: 'image' | 'file';
+    previewUrl?: string;
 }
 
 export interface ChatHistorySession {
@@ -198,6 +225,7 @@ export const NODE_TYPES: Record<string, NodeTypeInfo> = {
     deployer: { icon: 'DP', color: '#ec4899', label_en: 'Deployer', label_zh: '部署员', desc_en: 'DevOps', desc_zh: '运维部署', inputs: [{ id: 'artifact', label: 'Artifact' }], outputs: [{ id: 'url', label: 'URL' }] },
     debugger: { icon: 'DB', color: '#f59e0b', label_en: 'Debugger', label_zh: '调试器', desc_en: 'Bug Hunter', desc_zh: '错误追踪', inputs: [{ id: 'error', label: 'Error' }], outputs: [{ id: 'fix', label: 'Fix' }] },
     analyst: { icon: 'AN', color: '#8b5cf6', label_en: 'Analyst', label_zh: '分析师', desc_en: 'Data', desc_zh: '数据分析', inputs: [{ id: 'data', label: 'Data' }], outputs: [{ id: 'report', label: 'Report' }] },
+    uidesign: { icon: 'UD', color: '#38bdf8', label_en: 'UI Design', label_zh: '界面设计', desc_en: 'Visual System', desc_zh: '界面设计', inputs: [{ id: 'brief', label: 'Brief' }], outputs: [{ id: 'ui', label: 'UI Spec' }] },
     scribe: { icon: 'SC', color: '#14b8a6', label_en: 'Scribe', label_zh: '记录员', desc_en: 'Writer', desc_zh: '文档撰写', inputs: [{ id: 'content', label: 'Content' }], outputs: [{ id: 'doc', label: 'Doc' }] },
     monitor: { icon: 'MN', color: '#6366f1', label_en: 'Monitor', label_zh: '监控器', desc_en: 'Watch', desc_zh: '系统监控', inputs: [{ id: 'signal', label: 'Signal' }], outputs: [{ id: 'alert', label: 'Alert' }] },
     localshell: { icon: 'SH', color: '#64748b', label_en: 'Shell', label_zh: '终端', desc_en: 'Shell', desc_zh: '终端命令', inputs: [{ id: 'cmd', label: 'Command' }], outputs: [{ id: 'stdout', label: 'Output' }], sec: 'L3' },
@@ -292,7 +320,17 @@ export type ArtifactType =
     | 'state_snapshot'
     | 'qa_session_capture'
     | 'qa_session_video'
-    | 'qa_session_log';
+    | 'qa_session_log'
+    | 'node_transcript'
+    | 'node_summary_report'
+    | 'source_bundle'
+    | 'builder_handoff_report'
+    | 'merge_manifest'
+    | 'merge_execution_report'
+    | 'deployment_receipt'
+    | 'review_rollback_report'
+    | 'execution_dossier'
+    | 'qa_evidence_bundle';
 export type SkillOrigin = 'builtin' | 'community';
 
 export interface RunRecord {
@@ -342,9 +380,26 @@ export interface NodeExecutionRecord {
     loaded_skills?: string[];
     activity_log?: LogEntry[];
     reference_urls?: string[];
+    current_action?: string;
+    work_summary?: string[];
+    tool_call_stats?: Record<string, number>;
+    report_artifact_ids?: string[];
+    handoff_artifact_ids?: string[];
+    dossier_artifact_id?: string;
+    summary_artifact_id?: string;
+    blocking_reason?: string;
+    latest_review_decision?: string;
+    latest_review_report_artifact_id?: string;
+    latest_merge_manifest_artifact_id?: string;
+    latest_deployment_receipt_artifact_id?: string;
     version?: number;
     timeout_seconds?: number;
     depends_on_keys?: string[];
+    code_lines?: number;
+    total_lines?: number;
+    code_kb?: number;
+    code_languages?: string[];
+    model_latency_ms?: number;
 }
 
 export interface ArtifactRecord {

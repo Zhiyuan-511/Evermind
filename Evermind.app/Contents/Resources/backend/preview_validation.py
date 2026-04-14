@@ -10,16 +10,21 @@ Design goals:
 from __future__ import annotations
 
 import asyncio
+from html import unescape
 import json
 import os
 import re
+import shutil
 import socket
+import subprocess
+import tempfile
 import time
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse, unquote
 
+from release_doctor import build_release_doctor_report
 from runtime_paths import resolve_output_dir, resolve_state_dir
 
 try:
@@ -53,6 +58,9 @@ _BOOTSTRAP_HTML_RE = re.compile(
     re.IGNORECASE,
 )
 _TRUNCATION_MARKER_RE = re.compile(r"(?:\.\.\.\s*)?\[TRUNCATED\]", re.IGNORECASE)
+_SCRIPT_OPEN_TAG_RE = re.compile(r"<script\b[^>]*>", re.IGNORECASE)
+_SCRIPT_CLOSE_TAG_RE = re.compile(r"</script\s*>", re.IGNORECASE)
+_INLINE_HANDLER_ATTR_RE = re.compile(r"\s(on[a-z]+)\s*=\s*([\"'])(.*?)\2", re.IGNORECASE | re.DOTALL)
 _VISUAL_CAPTURE_SPECS: List[Dict[str, Any]] = [
     {"name": "desktop_fold", "width": 1440, "height": 960, "full_page": False},
     {"name": "desktop_full", "width": 1440, "height": 960, "full_page": True},
@@ -144,7 +152,43 @@ def inspect_html_integrity(html: str) -> Dict[str, Any]:
     ):
         if token not in lower:
             errors.append(message)
+    script_integrity = inspect_script_tag_integrity(html)
+    errors.extend(script_integrity.get("errors", []))
     return {"ok": not errors, "errors": errors}
+
+
+def inspect_script_tag_integrity(html: str) -> Dict[str, Any]:
+    text = str(html or "")
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    depth = 0
+    stray_closers = 0
+    token_re = re.compile(r"<script\b[^>]*>|</script\s*>", re.IGNORECASE)
+    for match in token_re.finditer(text):
+        token = str(match.group(0) or "").lower()
+        if token.startswith("</script"):
+            if depth <= 0:
+                stray_closers += 1
+            else:
+                depth -= 1
+        else:
+            depth += 1
+
+    if stray_closers:
+        noun = "</script> tag" if stray_closers == 1 else "</script> tags"
+        errors.append(f"Found {stray_closers} stray {noun} before any matching <script> opener")
+
+    if depth > 0:
+        missing = depth
+        noun = "script block" if missing == 1 else "script blocks"
+        errors.append(f"Missing </script> closing tag for {missing} {noun}")
+    elif stray_closers:
+        extra = stray_closers
+        noun = "</script> tag" if extra == 1 else "</script> tags"
+        warnings.append(f"Found {extra} extra {noun} without a matching <script> opener")
+
+    return {"errors": errors, "warnings": warnings}
 
 
 def _preferred_preview_candidate(html_files: List[Path], *, bucket_root: Optional[Path] = None) -> Optional[Path]:
@@ -267,6 +311,396 @@ def collect_script_context(html: str, source_file: Optional[Path] = None) -> Dic
         "has_local_script": bool(resolved_local_scripts),
         "resolved_local_scripts": resolved_local_scripts,
         "missing_local_scripts": missing_local_scripts,
+    }
+
+
+def _script_type_is_executable_js(type_value: str) -> bool:
+    normalized = str(type_value or "").strip().lower()
+    if not normalized:
+        return True
+    normalized = normalized.split(";", 1)[0].strip()
+    if normalized == "module":
+        return True
+    if normalized in {
+        "text/javascript",
+        "application/javascript",
+        "text/ecmascript",
+        "application/ecmascript",
+        "text/jscript",
+        "application/x-javascript",
+        "text/x-javascript",
+    }:
+        return True
+    return normalized.endswith("javascript") or normalized.endswith("ecmascript")
+
+
+def _script_tag_is_module(tag: str) -> bool:
+    normalized = str(_extract_tag_attr(tag, "type") or "").strip().lower()
+    normalized = normalized.split(";", 1)[0].strip()
+    return normalized == "module"
+
+
+def _summarize_node_syntax_error(stderr: str) -> str:
+    lines = [line.strip() for line in str(stderr or "").splitlines() if str(line).strip()]
+    for line in reversed(lines):
+        if "SyntaxError:" in line:
+            detail = line.split("SyntaxError:", 1)[1].strip()
+            return detail or line
+    return lines[-1] if lines else "unknown syntax error"
+
+
+def _resolve_node_binary() -> str:
+    candidates = [
+        str(os.getenv("EVERMIND_NODE_BINARY") or "").strip(),
+        shutil.which("node") or "",
+        "/opt/homebrew/bin/node",
+        "/usr/local/bin/node",
+        str(Path.home() / ".volta" / "bin" / "node"),
+    ]
+    seen: set[str] = set()
+    for raw in candidates:
+        candidate = str(raw or "").strip()
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if Path(candidate).exists() and os.access(candidate, os.X_OK):
+                return candidate
+        except Exception:
+            continue
+    return ""
+
+
+def _heuristic_js_syntax_error(script_text: str, *, label: str) -> str:
+    code = str(script_text or "")
+    state = "normal"
+    escaped = False
+    stack: List[str] = []
+    pairs = {"(": ")", "{": "}", "[": "]"}
+
+    i = 0
+    while i < len(code):
+        ch = code[i]
+        nxt = code[i + 1] if i + 1 < len(code) else ""
+
+        if state == "line_comment":
+            if ch in "\r\n":
+                state = "normal"
+            i += 1
+            continue
+        if state == "block_comment":
+            if ch == "*" and nxt == "/":
+                state = "normal"
+                i += 2
+                continue
+            i += 1
+            continue
+        if state in {"single", "double", "template"}:
+            if escaped:
+                escaped = False
+                i += 1
+                continue
+            if ch == "\\":
+                escaped = True
+                i += 1
+                continue
+            if (
+                (state == "single" and ch == "'")
+                or (state == "double" and ch == '"')
+                or (state == "template" and ch == "`")
+            ):
+                state = "normal"
+            i += 1
+            continue
+
+        if ch == "/" and nxt == "/":
+            state = "line_comment"
+            i += 2
+            continue
+        if ch == "/" and nxt == "*":
+            state = "block_comment"
+            i += 2
+            continue
+        if ch == "'":
+            state = "single"
+            i += 1
+            continue
+        if ch == '"':
+            state = "double"
+            i += 1
+            continue
+        if ch == "`":
+            state = "template"
+            i += 1
+            continue
+        if ch in pairs:
+            stack.append(ch)
+            i += 1
+            continue
+        if ch in ")}]":
+            if not stack:
+                return f"{label} appears to contain mismatched JavaScript delimiters near '{ch}'"
+            opener = stack.pop()
+            if pairs[opener] != ch:
+                return f"{label} appears to contain mismatched JavaScript delimiters near '{ch}'"
+        i += 1
+
+    if state in {"single", "double", "template"}:
+        return f"{label} appears truncated before a quoted JavaScript string or template literal closed"
+    if state == "block_comment":
+        return f"{label} appears truncated before a block comment closed"
+    if stack:
+        opener = stack[-1]
+        return (
+            f"{label} appears truncated or has unbalanced JavaScript delimiters "
+            f"(missing closing token for '{opener}')"
+        )
+
+    tail = re.sub(r"\s+", " ", code).strip()
+    if re.search(r"(?:[.=(,+\-*/?:]|\breturn\b|\bconst\b|\blet\b|\bvar\b)\s*$", tail):
+        return f"{label} appears truncated near the end of the JavaScript payload"
+    if re.search(r"\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*[^;]*$", tail):
+        return f"{label} appears truncated near the end of the JavaScript payload"
+    return ""
+
+
+def _run_node_syntax_check(
+    node_path: str,
+    script_text: str,
+    *,
+    is_module: bool,
+    label: str,
+) -> Dict[str, Any]:
+    suffix = ".mjs" if is_module else ".js"
+    temp_path: Optional[Path] = None
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=suffix, delete=False) as handle:
+            handle.write(str(script_text or ""))
+            temp_path = Path(handle.name)
+        completed = subprocess.run(
+            [node_path, "--check", str(temp_path)],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "warning": f"JavaScript syntax validation timed out for {label}"}
+    except Exception as exc:
+        return {"ok": False, "warning": f"JavaScript syntax validation failed to run for {label}: {str(exc)[:160]}"}
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    if completed.returncode == 0:
+        return {"ok": True}
+
+    detail = _summarize_node_syntax_error(completed.stderr)
+    return {"ok": False, "error": f"{label} contains invalid JavaScript syntax: {detail}"}
+
+
+def inspect_javascript_syntax(html: str, source_file: Optional[Path] = None) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    checked_scripts = 0
+    text = str(html or "")
+    if "<script" not in text.lower():
+        return {"errors": errors, "warnings": warnings, "checked_scripts": checked_scripts}
+
+    node_path = _resolve_node_binary()
+
+    script_entries: List[Dict[str, Any]] = []
+    inline_script_index = 0
+    inline_pattern = re.compile(r"(<script\b[^>]*>)(.*?)(</script\s*>)", re.IGNORECASE | re.DOTALL)
+    for match in inline_pattern.finditer(text):
+        open_tag = str(match.group(1) or "")
+        if _extract_tag_attr(open_tag, "src"):
+            continue
+        if not _script_type_is_executable_js(_extract_tag_attr(open_tag, "type")):
+            continue
+        code = str(match.group(2) or "")
+        if not code.strip():
+            continue
+        inline_script_index += 1
+        script_entries.append({
+            "label": f"Inline script #{inline_script_index}",
+            "code": code,
+            "module": _script_tag_is_module(open_tag),
+        })
+
+    local_seen: set[str] = set()
+    for tag_match in re.finditer(r"<script\b[^>]*>", text, re.IGNORECASE):
+        open_tag = str(tag_match.group(0) or "")
+        src_value = _extract_tag_attr(open_tag, "src")
+        if not src_value:
+            continue
+        if not _script_type_is_executable_js(_extract_tag_attr(open_tag, "type")):
+            continue
+        asset_path = _resolve_local_asset_href(src_value, source_file)
+        if asset_path is None:
+            continue
+        if asset_path.suffix.lower() != ".js" or not asset_path.exists() or not asset_path.is_file():
+            continue
+        try:
+            resolved_path = asset_path.resolve()
+        except Exception:
+            resolved_path = asset_path
+        path_key = str(resolved_path)
+        if path_key in local_seen:
+            continue
+        local_seen.add(path_key)
+        if "_evermind_runtime" in resolved_path.parts:
+            continue
+        try:
+            code = resolved_path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            warnings.append(
+                f"Linked local script could not be read during JavaScript syntax validation: {resolved_path.name}"
+            )
+            continue
+        script_entries.append({
+            "label": f"Local script {resolved_path.name}",
+            "code": code,
+            "module": _script_tag_is_module(open_tag),
+        })
+
+    used_heuristic_only = not bool(node_path)
+    for entry in script_entries:
+        checked_scripts += 1
+        label = str(entry.get("label") or "script")
+        code = str(entry.get("code") or "")
+        if node_path:
+            check = _run_node_syntax_check(
+                node_path,
+                code,
+                is_module=bool(entry.get("module")),
+                label=label,
+            )
+            if check.get("error"):
+                errors.append(str(check["error"]))
+                continue
+            if check.get("warning"):
+                heuristic_error = _heuristic_js_syntax_error(code, label=label)
+                if heuristic_error:
+                    errors.append(heuristic_error)
+                else:
+                    warnings.append(str(check["warning"]))
+                continue
+        else:
+            heuristic_error = _heuristic_js_syntax_error(code, label=label)
+            if heuristic_error:
+                errors.append(heuristic_error)
+                continue
+
+    if used_heuristic_only and checked_scripts:
+        warnings.append("Node.js unavailable; used heuristic JavaScript syntax validation")
+
+    return {
+        "errors": errors,
+        "warnings": warnings,
+        "checked_scripts": checked_scripts,
+    }
+
+
+def _extract_inline_handler_calls(handler_code: str) -> Optional[List[str]]:
+    code = re.sub(r"[\r\n]+", ";", unescape(str(handler_code or ""))).strip()
+    if not code:
+        return []
+
+    calls: List[str] = []
+    for raw_statement in code.split(";"):
+        statement = raw_statement.strip()
+        if not statement:
+            continue
+        normalized = re.sub(r"^\s*return\s+", "", statement, flags=re.IGNORECASE)
+        if re.fullmatch(r"(?:true|false)", normalized, re.IGNORECASE):
+            continue
+        match = re.fullmatch(
+            r"(?:(?:window|globalThis|self)\s*\.\s*)?([A-Za-z_$][\w$]*)\s*\((?:[\s\S]*)\)\s*",
+            normalized,
+            re.DOTALL,
+        )
+        if not match:
+            return None
+        calls.append(str(match.group(1) or "").strip())
+    return calls
+
+
+def _collect_defined_global_function_names(html: str, source_file: Optional[Path] = None) -> List[str]:
+    js_chunks: List[str] = []
+    inline_scripts = re.findall(
+        r"<script\b(?![^>]*\bsrc\s*=)[^>]*>(.*?)</script\s*>",
+        html or "",
+        re.IGNORECASE | re.DOTALL,
+    )
+    js_chunks.extend(chunk for chunk in inline_scripts if str(chunk).strip())
+
+    script_ctx = collect_script_context(html, source_file)
+    for raw_path in script_ctx.get("resolved_local_scripts", []) or []:
+        try:
+            js_chunks.append(Path(raw_path).read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            continue
+
+    patterns = [
+        re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(", re.IGNORECASE),
+        re.compile(
+            r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?"
+            r"(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"\b(?:window|globalThis|self)\s*\.\s*([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?"
+            r"(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>)",
+            re.IGNORECASE,
+        ),
+    ]
+
+    names: List[str] = []
+    seen = set()
+    for chunk in js_chunks:
+        for pattern in patterns:
+            for match in pattern.finditer(chunk or ""):
+                name = str(match.group(1) or "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+    return names
+
+
+def inspect_inline_handler_contract(html: str, source_file: Optional[Path] = None) -> Dict[str, Any]:
+    errors: List[str] = []
+    warnings: List[str] = []
+    referenced_handlers: List[str] = []
+    defined_handlers = _collect_defined_global_function_names(html, source_file)
+    defined_lookup = {name.lower() for name in defined_handlers}
+    seen_errors = set()
+
+    for tag_match in re.finditer(r"<([A-Za-z][\w:-]*)\b[^>]*>", html or "", re.IGNORECASE | re.DOTALL):
+        tag_text = str(tag_match.group(0) or "")
+        for attr_match in _INLINE_HANDLER_ATTR_RE.finditer(tag_text):
+            attr_name = str(attr_match.group(1) or "").lower()
+            handler_code = str(attr_match.group(3) or "")
+            calls = _extract_inline_handler_calls(handler_code)
+            if calls is None:
+                continue
+            for fn_name in calls:
+                if not fn_name:
+                    continue
+                referenced_handlers.append(fn_name)
+                error_key = (attr_name, fn_name.lower())
+                if fn_name.lower() in defined_lookup or error_key in seen_errors:
+                    continue
+                seen_errors.add(error_key)
+                errors.append(f"Inline event handler {attr_name} references undefined function {fn_name}()")
+
+    return {
+        "errors": errors,
+        "warnings": warnings,
+        "referenced_handlers": referenced_handlers,
+        "defined_handlers": defined_handlers,
     }
 
 
@@ -516,7 +950,15 @@ def validate_html_content(html: str, source_file: Optional[Path] = None) -> Dict
     warnings: List[str] = []
     score = 100
     stylesheet_ctx = collect_stylesheet_context(html, source_file)
+    script_ctx = collect_script_context(html, source_file)
+    script_integrity = inspect_script_tag_integrity(html)
+    javascript_syntax = inspect_javascript_syntax(html, source_file)
     script_safety = inspect_shared_local_script_safety(html, source_file)
+    inline_handler_contract = (
+        inspect_inline_handler_contract(html, source_file)
+        if not script_integrity.get("errors")
+        else {"errors": [], "warnings": []}
+    )
     body_structure = inspect_body_structure(html)
 
     if has_truncation_marker(html):
@@ -547,10 +989,31 @@ def validate_html_content(html: str, source_file: Optional[Path] = None) -> Dict
         warnings.append("Linked local stylesheet could not be resolved during validation")
         score -= 6
 
+    for err in script_integrity.get("errors", []) or []:
+        errors.append(err)
+        score -= 24
+    for warn in script_integrity.get("warnings", []) or []:
+        warnings.append(warn)
+        score -= 6
+
+    for err in javascript_syntax.get("errors", []) or []:
+        errors.append(err)
+        score -= 28
+    for warn in javascript_syntax.get("warnings", []) or []:
+        warnings.append(warn)
+        score -= 4
+
     for err in script_safety.get("errors", []) or []:
         errors.append(err)
         score -= 20
     for warn in script_safety.get("warnings", []) or []:
+        warnings.append(warn)
+        score -= 6
+
+    for err in inline_handler_contract.get("errors", []) or []:
+        errors.append(err)
+        score -= 20
+    for warn in inline_handler_contract.get("warnings", []) or []:
         warnings.append(warn)
         score -= 6
 
@@ -598,6 +1061,7 @@ def validate_html_content(html: str, source_file: Optional[Path] = None) -> Dict
         "bytes": html_bytes,
         "css_rules": css_rules,
         "semantic_blocks": semantic_hits,
+        "javascript_syntax_checks": javascript_syntax.get("checked_scripts", 0),
         "meaningful_body_tags": body_structure.get("meaningful_tag_count", 0),
         "visible_body_text_len": body_structure.get("visible_text_len", 0),
     }
@@ -709,6 +1173,42 @@ def summarize_vertical_content_gaps(
     }
 
 
+def detect_loading_overlay_risk(render_summary: Dict[str, Any]) -> Optional[str]:
+    overlays = render_summary.get("loading_overlays", []) if isinstance(render_summary, dict) else []
+    if not isinstance(overlays, list):
+        return None
+
+    blocking: List[Dict[str, Any]] = []
+    for item in overlays:
+        if not isinstance(item, dict):
+            continue
+        if item.get("blocking"):
+            blocking.append(item)
+    if not blocking:
+        return None
+
+    def _rank(item: Dict[str, Any]) -> Tuple[float, int, int]:
+        try:
+            coverage = float(item.get("coverage_ratio", 0) or 0)
+        except Exception:
+            coverage = 0.0
+        return (
+            coverage,
+            1 if item.get("aria_busy") else 0,
+            1 if str(item.get("position") or "").lower() == "fixed" else 0,
+        )
+
+    top = sorted(blocking, key=_rank, reverse=True)[0]
+    raw_label = str(top.get("label") or top.get("text") or "loading overlay").strip()
+    label = re.sub(r"\s+", " ", raw_label).strip() or "loading overlay"
+    if len(label) > 80:
+        label = label[:77].rstrip() + "..."
+    return (
+        "Persistent loading overlay/spinner is still visible after boot "
+        f"({label}); preview appears stuck before the playable scene becomes usable."
+    )
+
+
 def _is_port_open(host: str, port: int, timeout: float = 0.6) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -738,11 +1238,32 @@ async def _playwright_runtime_status() -> Dict[str, Optional[str]]:
             browser = await p.chromium.launch(headless=True)
             await browser.close()
 
+    def _classify_launch_failure(exc: Exception) -> Dict[str, Optional[str]]:
+        raw = str(exc or "").strip()
+        lowered = raw.lower()
+        if "bootstrap_check_in" in raw and "permission denied (1100)" in lowered:
+            return {
+                "available": False,
+                "reason": "playwright launch blocked by macOS sandbox/permission constraints",
+                "category": "sandbox_denied",
+            }
+        if "executable doesn't exist" in lowered or "browser has not been found" in lowered:
+            return {
+                "available": False,
+                "reason": "playwright browser binaries are missing",
+                "category": "browser_missing",
+            }
+        return {
+            "available": False,
+            "reason": f"playwright runtime unavailable: {raw[:140]}",
+            "category": "launch_failed",
+        }
+
     try:
         await asyncio.wait_for(_probe_launch(), timeout=8.0)
-        result = {"available": True, "reason": None}
+        result = {"available": True, "reason": None, "category": "ok"}
     except Exception as exc:
-        result = {"available": False, "reason": f"playwright runtime unavailable: {str(exc)[:140]}"}
+        result = _classify_launch_failure(exc)
 
     _PLAYWRIGHT_STATUS_CACHE["ts"] = now
     _PLAYWRIGHT_STATUS_CACHE["value"] = result
@@ -1205,7 +1726,8 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
                 else None,
             )
             response = await page.goto(preview_url, wait_until="domcontentloaded", timeout=timeout_ms)
-            await page.wait_for_timeout(350)
+            stability_wait_ms = min(1400, max(700, int(timeout_ms * 0.1)))
+            await page.wait_for_timeout(stability_wait_ms)
             title = await page.title()
             has_head = await page.evaluate("Boolean(document.head)")
             has_body = await page.evaluate("Boolean(document.body)")
@@ -1276,6 +1798,7 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
   const readableTextCount = textCandidates.filter((item) => item.contrast >= 2.4).length;
   const veryLowContrastTextCount = textCandidates.filter((item) => item.contrast < 1.35).length;
   const scrollY = Number(window.scrollY || window.pageYOffset || 0);
+  const viewportArea = Math.max(1, (window.innerWidth || 0) * (window.innerHeight || 0));
   const contentBlocks = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,img,picture,svg,video,canvas,button,a,input,textarea,select,[role="button"],[role="link"],[role="tab"],[data-evermind-content]'))
     .filter((el) => isVisible(el))
     .map((el) => {
@@ -1288,6 +1811,56 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
     .filter((item) => item.bottom - item.top >= 6)
     .sort((a, b) => a.top - b.top)
     .slice(0, 240);
+  const loadingOverlays = Array.from(document.querySelectorAll('[id],[class],[aria-busy],[role],[data-state]'))
+    .filter((el) => isVisible(el))
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      const className = typeof el.className === 'string'
+        ? el.className
+        : (el.className && typeof el.className.baseVal === 'string' ? el.className.baseVal : '');
+      const text = String(el.innerText || el.textContent || '').replace(/\\s+/g, ' ').trim();
+      const label = [
+        String(el.id || '').trim(),
+        String(className || '').trim(),
+        String(el.getAttribute('aria-label') || '').trim(),
+        String(el.getAttribute('role') || '').trim(),
+        text,
+      ].filter(Boolean).join(' ').trim().slice(0, 140);
+      const normalized = label.toLowerCase();
+      const coverageRatio = Number((((rect.width * rect.height) / viewportArea) || 0).toFixed(3));
+      const role = String(el.getAttribute('role') || '').trim().toLowerCase();
+      const ariaBusy = String(el.getAttribute('aria-busy') || '').trim().toLowerCase() === 'true';
+      const clickPrompt = /\\b(click|tap|press|start|play|continue|resume)\\b/.test(normalized);
+      const loadingHint = /\\b(loading|loader|spinner|boot|splash|initiali[sz]ing|preparing|generating|please wait)\\b/.test(normalized)
+        || ariaBusy
+        || role === 'progressbar';
+      const position = String(style.position || '').trim().toLowerCase();
+      const fixedLike = position === 'fixed' || position === 'sticky';
+      const zIndex = Number(style.zIndex || '0') || 0;
+      const blocking = loadingHint && !clickPrompt && (
+        ariaBusy
+        || role === 'progressbar'
+        || coverageRatio >= 0.18
+        || (fixedLike && coverageRatio >= 0.06)
+        || (zIndex >= 20 && coverageRatio >= 0.08)
+      );
+      return {
+        label,
+        text: text.slice(0, 100),
+        coverage_ratio: coverageRatio,
+        position,
+        aria_busy: ariaBusy,
+        blocking,
+      };
+    })
+    .filter((item) => item.label)
+    .filter((item) => item.blocking || item.coverage_ratio >= 0.04)
+    .sort((a, b) => {
+      if (Number(b.blocking) !== Number(a.blocking)) return Number(b.blocking) - Number(a.blocking);
+      return b.coverage_ratio - a.coverage_ratio;
+    })
+    .slice(0, 6);
   return {
     body_child_count: document.body ? document.body.children.length : 0,
     heading_count: document.querySelectorAll('h1,h2,h3').length,
@@ -1305,6 +1878,7 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
     very_low_contrast_text_count: veryLowContrastTextCount,
     sample_text: textCandidates.slice(0, 6).map((item) => item.text),
     content_blocks: contentBlocks,
+    loading_overlays: loadingOverlays,
   };
 }
                 """
@@ -1330,7 +1904,21 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
             viewport_height,
             scroll_height,
         )
+        loading_overlay_error = detect_loading_overlay_risk(render_summary)
+        loading_overlays = render_summary.get("loading_overlays", []) if isinstance(render_summary.get("loading_overlays"), list) else []
+        if loading_overlays:
+            render_summary["loading_overlay_count"] = len(loading_overlays)
+            render_summary["blocking_loading_overlay_count"] = sum(
+                1 for item in loading_overlays
+                if isinstance(item, dict) and item.get("blocking")
+            )
+            render_summary["loading_overlay_labels"] = [
+                str(item.get("label") or "").strip()
+                for item in loading_overlays[:4]
+                if isinstance(item, dict) and str(item.get("label") or "").strip()
+            ]
         render_summary.pop("content_blocks", None)
+        render_summary.pop("loading_overlays", None)
         render_summary.update(gap_summary)
         blank_gap_count = int(gap_summary.get("blank_gap_count", 0) or 0)
         largest_blank_gap = int(gap_summary.get("largest_blank_gap", 0) or 0)
@@ -1347,6 +1935,8 @@ async def run_playwright_smoke(preview_url: str, timeout_ms: int = 12000) -> Dic
             render_errors.append(
                 f"Large blank vertical gap detected: content disappears for about {largest_blank_gap}px between upper and lower sections"
             )
+        if loading_overlay_error:
+            render_errors.append(loading_overlay_error)
         if page_errors:
             render_errors.append("Browser runtime errors detected during preview render")
 
@@ -1441,19 +2031,28 @@ async def validate_preview(preview_url: str, run_smoke: bool = False, visual_sco
 
 def latest_preview_artifact(output_dir: Optional[Path] = None) -> Tuple[Optional[str], Optional[Path]]:
     """
-    Find the most recent previewable HTML artifact.
+    Find the canonical previewable HTML artifact.
 
-    Preview selection is bucket-based:
-    1) choose one primary preview file per task/output bucket, preferring index.html
-    2) rank buckets by newest eligible artifact mtime
+    Root-level deliverables are treated as the live preview source when present.
+    Task-local `task_x/...` HTML files are builder-local artifacts and should not
+    outrank the promoted root preview just because they were written later.
 
-    This keeps multi-page deliveries opening on their entry page instead of whichever
-    secondary page happened to be saved last.
+    Fallback selection is bucket-based only when no eligible root preview exists.
     Returns (task_id, html_file), where task_id can be "root".
     """
     out = output_dir or OUTPUT_DIR
     if not out.exists():
         return None, None
+
+    # root-level artifacts (builder/file_ops direct writes or promoted preview)
+    root_html_files = [
+        html for html in out.iterdir()
+        if html.is_file() and html.suffix.lower() in (".html", ".htm")
+    ]
+    root_html = _preferred_preview_candidate(root_html_files, bucket_root=out)
+    if root_html is not None and validate_html_file(root_html).get("ok"):
+        return "root", root_html
+
     candidates: List[Tuple[float, str, Path]] = []
 
     # task_xxx artifacts
@@ -1466,18 +2065,9 @@ def latest_preview_artifact(output_dir: Optional[Path] = None) -> Tuple[Optional
         if not html_files:
             continue
         html = _preferred_preview_candidate(html_files, bucket_root=task_dir)
-        if html is None:
+        if html is None or not validate_html_file(html).get("ok"):
             continue
         candidates.append((_latest_mtime(html_files), task_dir.name, html))
-
-    # root-level artifacts (builder/file_ops direct writes)
-    root_html_files = [
-        html for html in out.iterdir()
-        if html.is_file() and html.suffix.lower() in (".html", ".htm")
-    ]
-    root_html = _preferred_preview_candidate(root_html_files, bucket_root=out)
-    if root_html is not None:
-        candidates.append((_latest_mtime(root_html_files), "root", root_html))
 
     if not candidates:
         return None, None
@@ -1509,7 +2099,7 @@ def latest_stable_preview_artifact(output_dir: Optional[Path] = None) -> Tuple[O
                 if html.is_file() and html.suffix.lower() in (".html", ".htm")
             ]
             preview_html = _preferred_preview_candidate(html_files, bucket_root=snapshot_dir)
-            if preview_html is None:
+            if preview_html is None or not validate_html_file(preview_html).get("ok"):
                 continue
             candidates.append((_latest_mtime(html_files), run_dir.name or "stable", preview_html))
 
@@ -1555,6 +2145,7 @@ async def diagnostics_snapshot() -> Dict:
     except Exception:
         load_avg = {"1m": None, "5m": None, "15m": None}
     playwright = await _playwright_runtime_status()
+    release = build_release_doctor_report(playwright_status=playwright, current_backend_dir=Path(__file__).resolve().parent)
 
     return {
         "status": "ok",
@@ -1575,4 +2166,5 @@ async def diagnostics_snapshot() -> Dict:
             "playwright_available": bool(playwright.get("available")),
             "playwright_reason": playwright.get("reason"),
         },
+        "release": release,
     }

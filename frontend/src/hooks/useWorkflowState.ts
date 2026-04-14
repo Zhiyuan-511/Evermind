@@ -5,11 +5,27 @@ import {
     addEdge, useNodesState, useEdgesState,
     type Connection, type Node, type Edge as RFEdge,
 } from '@xyflow/react';
-import { NODE_TYPES, type ChatMessage } from '@/lib/types';
+import { NODE_TYPES } from '@/lib/types';
 import type { TemplateDef } from '@/components/TemplateGallery';
 
 let nodeCounter = 0;
 function genId() { return 'n_' + (++nodeCounter) + '_' + Date.now().toString(36); }
+function fallbackNodeInfo(type: string) {
+    const normalized = String(type || 'node').trim() || 'node';
+    const title = normalized
+        .replace(/[_-]+/g, ' ')
+        .replace(/\b\w/g, (ch) => ch.toUpperCase());
+    return {
+        icon: title.slice(0, 2).toUpperCase(),
+        color: '#64748b',
+        label_en: title,
+        label_zh: title,
+        desc_en: 'Custom Node',
+        desc_zh: '自定义节点',
+        inputs: [{ id: 'input', label: 'Input' }],
+        outputs: [{ id: 'output', label: 'Output' }],
+    };
+}
 
 // Layout constants for auto-created nodes
 const AUTO_NODE_X_START = 80;
@@ -98,8 +114,7 @@ export function useWorkflowState(lang: 'en' | 'zh'): UseWorkflowStateReturn {
     const handleLoadTemplate = useCallback((tpl: TemplateDef) => {
         const newNodes: Node[] = [];
         tpl.nodes.forEach((nd, idx) => {
-            const info = NODE_TYPES[nd.type];
-            if (!info) return;
+            const info = NODE_TYPES[nd.type] || fallbackNodeInfo(nd.type);
             const id = genId();
             const count = tpl.nodes.slice(0, idx).filter(n => n.type === nd.type).length;
             const label = (lang === 'zh' ? info.label_zh : info.label_en) + (count ? ` #${count + 1}` : '');
@@ -114,9 +129,8 @@ export function useWorkflowState(lang: 'en' | 'zh'): UseWorkflowStateReturn {
             const fromNode = newNodes[fromIdx];
             const toNode = newNodes[toIdx];
             if (!fromNode || !toNode) return;
-            const fromInfo = NODE_TYPES[tpl.nodes[fromIdx].type];
-            const toInfo = NODE_TYPES[tpl.nodes[toIdx].type];
-            if (!fromInfo || !toInfo) return;
+            const fromInfo = NODE_TYPES[tpl.nodes[fromIdx].type] || fallbackNodeInfo(tpl.nodes[fromIdx].type);
+            const toInfo = NODE_TYPES[tpl.nodes[toIdx].type] || fallbackNodeInfo(tpl.nodes[toIdx].type);
             newEdges.push({
                 id: `e_${fromNode.id}_${toNode.id}`,
                 source: fromNode.id, target: toNode.id,
@@ -161,8 +175,7 @@ export function useWorkflowState(lang: 'en' | 'zh'): UseWorkflowStateReturn {
 
         subtasks.forEach(st => {
             const agentType = st.agent || 'builder';
-            const info = NODE_TYPES[agentType];
-            if (!info) return;
+            const info = NODE_TYPES[agentType] || fallbackNodeInfo(agentType);
             const nodeId = genId();
             newNodeMap[st.id] = nodeId;
             const depth = depthMap[st.id] ?? 0;
@@ -188,8 +201,8 @@ export function useWorkflowState(lang: 'en' | 'zh'): UseWorkflowStateReturn {
                 const targetId = newNodeMap[st.id];
                 if (sourceId && targetId) {
                     const srcSt = subtasks.find(s => s.id === depId);
-                    const srcInfo = NODE_TYPES[srcSt?.agent || 'builder'];
-                    const tgtInfo = NODE_TYPES[st.agent || 'builder'];
+                    const srcInfo = NODE_TYPES[srcSt?.agent || 'builder'] || fallbackNodeInfo(srcSt?.agent || 'builder');
+                    const tgtInfo = NODE_TYPES[st.agent || 'builder'] || fallbackNodeInfo(st.agent || 'builder');
                     newEdges.push({
                         id: `e_auto_${sourceId}_${targetId}`,
                         source: sourceId, target: targetId,

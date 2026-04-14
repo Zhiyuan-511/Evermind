@@ -5,6 +5,7 @@ from plugins.base import (
     get_default_plugins_for_node,
     get_image_generation_config,
     is_builder_browser_enabled,
+    is_imagegen_browser_enabled,
     is_qa_browser_use_enabled,
     is_image_generation_available,
     is_polisher_browser_enabled,
@@ -44,8 +45,8 @@ class TestBuilderBrowserDefaults(unittest.TestCase):
             "EVERMIND_QA_ENABLE_COMPUTER_USE": "0",
         }):
             defaults = get_default_plugins_for_node("tester")
-            # Tester keeps browser-based QA, but should not request OS-level desktop screenshots by default.
-            self.assertEqual(defaults, ["file_ops", "browser"])
+            # V4.3.1: All pipeline nodes get shell; tester keeps browser-based QA.
+            self.assertEqual(defaults, ["file_ops", "shell", "browser"])
 
     def test_reviewer_defaults_skip_desktop_screenshot_plugin(self):
         with patch.dict("os.environ", {
@@ -53,20 +54,27 @@ class TestBuilderBrowserDefaults(unittest.TestCase):
             "EVERMIND_QA_ENABLE_COMPUTER_USE": "0",
         }):
             defaults = get_default_plugins_for_node("reviewer")
-            self.assertEqual(defaults, ["file_ops", "browser"])
+            self.assertEqual(defaults, ["file_ops", "shell", "browser"])
+
+    def test_reviewer_defaults_strip_browser_when_playwright_runtime_is_unavailable(self):
+        defaults = get_default_plugins_for_node(
+            "reviewer",
+            config={"playwright_available": False},
+        )
+        self.assertEqual(defaults, ["file_ops", "shell"])
 
     def test_polisher_defaults_include_browser_and_file_ops(self):
         defaults = get_default_plugins_for_node("polisher")
-        self.assertEqual(defaults, ["file_ops"])
+        self.assertEqual(defaults, ["file_ops", "shell"])
 
     def test_polisher_browser_enabled_from_env(self):
         with patch.dict("os.environ", {"EVERMIND_POLISHER_ENABLE_BROWSER": "1"}):
             defaults = get_default_plugins_for_node("polisher")
-            self.assertEqual(defaults, ["file_ops", "browser"])
+            self.assertEqual(defaults, ["file_ops", "shell", "browser"])
 
     def test_polisher_browser_enabled_from_runtime_config(self):
         defaults = get_default_plugins_for_node("polisher", config={"polisher_enable_browser": True})
-        self.assertEqual(defaults, ["file_ops", "browser"])
+        self.assertEqual(defaults, ["file_ops", "shell", "browser"])
         self.assertTrue(is_polisher_browser_enabled({"polisher_enable_browser": True}))
 
     def test_polisher_runtime_plugin_resolution_strips_stale_browser(self):
@@ -85,9 +93,10 @@ class TestBuilderBrowserDefaults(unittest.TestCase):
         )
         self.assertEqual(resolved, ["file_ops"])
 
-    def test_scribe_defaults_do_not_enable_file_writes(self):
+    def test_scribe_defaults_include_file_ops_and_shell(self):
+        # V4.3.1: All pipeline nodes get file_ops + shell for agentic capability.
         defaults = get_default_plugins_for_node("scribe")
-        self.assertEqual(defaults, [])
+        self.assertEqual(defaults, ["file_ops", "shell"])
 
     def test_qa_computer_use_disabled_by_default(self):
         with patch.dict("os.environ", {"EVERMIND_QA_ENABLE_COMPUTER_USE": "0"}, clear=False):
@@ -114,6 +123,26 @@ class TestBuilderBrowserDefaults(unittest.TestCase):
         )
         self.assertIn("browser_use", defaults)
 
+    def test_qa_browser_use_enabled_from_config_without_key_is_stripped(self):
+        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}, clear=False):
+            defaults = get_default_plugins_for_node(
+                "reviewer",
+                config={"qa_enable_browser_use": True},
+            )
+            self.assertNotIn("browser_use", defaults)
+
+    def test_qa_browser_use_is_stripped_when_runtime_is_unavailable(self):
+        defaults = get_default_plugins_for_node(
+            "reviewer",
+            config={
+                "qa_enable_browser_use": True,
+                "openai_api_key": "sk-config",
+                "playwright_available": False,
+                "browser_use_runtime_available": False,
+            },
+        )
+        self.assertEqual(defaults, ["file_ops", "shell"])
+
     def test_qa_browser_use_runtime_plugin_resolution_strips_when_disabled(self):
         resolved = resolve_enabled_plugins_for_node(
             "reviewer",
@@ -135,10 +164,38 @@ class TestBuilderBrowserDefaults(unittest.TestCase):
         )
         self.assertIn("computer_use", defaults)
 
-    def test_imagegen_defaults_include_comfyui_and_file_ops(self):
+    def test_imagegen_defaults_switch_to_browser_when_backend_is_unavailable(self):
         defaults = get_default_plugins_for_node("imagegen")
-        self.assertIn("comfyui", defaults)
-        self.assertIn("file_ops", defaults)
+        self.assertEqual(defaults, ["file_ops", "source_fetch", "browser"])
+        self.assertTrue(is_imagegen_browser_enabled({}))
+
+    def test_imagegen_defaults_include_comfyui_when_backend_is_available(self):
+        defaults = get_default_plugins_for_node(
+            "imagegen",
+            config={
+                "image_generation": {
+                    "comfyui_url": "http://127.0.0.1:8188",
+                    "workflow_template": "/tmp/workflow.json",
+                }
+            },
+        )
+        self.assertEqual(defaults, ["file_ops", "comfyui"])
+
+    def test_imagegen_runtime_plugin_resolution_strips_dead_comfyui_and_restores_browser(self):
+        resolved = resolve_enabled_plugins_for_node(
+            "imagegen",
+            explicit_plugins=["file_ops", "comfyui"],
+            config={"image_generation": {}},
+        )
+        self.assertEqual(resolved, ["file_ops", "source_fetch", "browser"])
+
+    def test_imagegen_runtime_plugin_resolution_strips_stale_source_fetch_when_browser_fallback_disabled(self):
+        resolved = resolve_enabled_plugins_for_node(
+            "imagegen",
+            explicit_plugins=["file_ops", "source_fetch", "browser"],
+            config={"imagegen_enable_browser": False},
+        )
+        self.assertEqual(resolved, ["file_ops"])
 
     def test_spritesheet_defaults_do_not_enable_file_ops(self):
         self.assertEqual(get_default_plugins_for_node("spritesheet"), [])

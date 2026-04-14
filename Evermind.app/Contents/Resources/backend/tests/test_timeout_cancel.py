@@ -354,10 +354,45 @@ class TestTimeoutConstants:
         })
         assert limit == 42
 
+    def test_run_timeout_budget_uses_extended_builder_budget(self, monkeypatch):
+        monkeypatch.setenv("EVERMIND_BUILDER_DIRECT_MULTIFILE_MAX_TIMEOUT_SEC", "1800")
+        monkeypatch.setenv("EVERMIND_WATCHDOG_TIMEOUT_GRACE_SEC", "90")
+        assert server._run_timeout_budget_seconds_for_node("builder1") == 2490
+        assert server._run_timeout_budget_seconds_for_node("merger") == 2490
+
+    def test_estimate_run_timeout_expands_parallel_game_builder_merger_flow(self, monkeypatch):
+        monkeypatch.setenv("EVERMIND_BUILDER_DIRECT_MULTIFILE_MAX_TIMEOUT_SEC", "1800")
+        monkeypatch.setenv("EVERMIND_WATCHDOG_TIMEOUT_GRACE_SEC", "90")
+        nodes = [
+            {"key": "planner", "depends_on": []},
+            {"key": "analyst", "depends_on": ["planner"]},
+            {"key": "imagegen", "depends_on": ["planner"]},
+            {"key": "spritesheet", "depends_on": ["imagegen"]},
+            {"key": "assetimport", "depends_on": ["spritesheet"]},
+            {"key": "builder1", "depends_on": ["analyst", "assetimport"]},
+            {"key": "builder2", "depends_on": ["analyst", "assetimport"]},
+            {"key": "merger", "depends_on": ["builder1", "builder2"]},
+        ]
+        timeout = server._estimate_run_timeout_seconds(nodes)
+        expected = (
+            server._run_timeout_budget_seconds_for_node("planner")
+            + max(
+                server._run_timeout_budget_seconds_for_node("analyst"),
+                server._run_timeout_budget_seconds_for_node("imagegen")
+                + server._run_timeout_budget_seconds_for_node("spritesheet")
+                + server._run_timeout_budget_seconds_for_node("assetimport"),
+            )
+            + server._run_timeout_budget_seconds_for_node("builder1")
+            + server._run_timeout_budget_seconds_for_node("merger")
+            + 600
+        )
+        assert timeout == expected
+        assert timeout > server.DEFAULT_RUN_TIMEOUT_S
+
     def test_asset_timeout_hints_are_role_aware(self):
-        assert server._node_timeout_hint_seconds("imagegen") == 240
-        assert server._node_timeout_hint_seconds("spritesheet") == 180
-        assert server._node_timeout_hint_seconds("assetimport") == 150
+        assert server._node_timeout_hint_seconds("imagegen") == 300
+        assert server._node_timeout_hint_seconds("spritesheet") == 210
+        assert server._node_timeout_hint_seconds("assetimport") == 240
 
 
 class TestStaleNodesEndpoint:

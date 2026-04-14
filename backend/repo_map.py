@@ -125,6 +125,25 @@ GREENFIELD_OUTPUT_RE = re.compile(
     r"real html page under|save final html via file_ops write)",
     re.IGNORECASE,
 )
+GREENFIELD_BUILDER_CREATION_RE = re.compile(
+    r"("
+    r"(?:build|create|make|generate|develop)\b.*?(?:html5\s+game|game|website|site|landing(?:\s+page)?|homepage|dashboard|tool|app)"
+    r"|(?:做一个|做个|创建一个|创建|生成一个|开发一个).{0,80}(?:网页游戏|游戏|网站|官网|页面|应用|工具|仪表盘)"
+    r")",
+    re.IGNORECASE | re.DOTALL,
+)
+
+_GENERIC_PREVIEW_FILE_HINTS = {
+    "index.html",
+    "about.html",
+    "contact.html",
+    "pricing.html",
+    "styles.css",
+    "style.css",
+    "app.js",
+    "main.js",
+    "script.js",
+}
 
 
 def _safe_rel(path: Path, root: Path) -> str:
@@ -245,12 +264,51 @@ def is_repo_edit_task(prompt_source: str, workspace: str) -> bool:
         return False
     has_edit_intent = bool(EDIT_INTENT_RE.search(prompt))
     has_repo_hint = bool(REPO_HINT_RE.search(prompt))
-    has_file_hint = bool(FILE_HINT_RE.search(prompt))
+    has_file_hint = bool(_has_explicit_repo_file_hint(prompt))
     has_failure_hint = bool(re.search(r"(报错|错误|bug|error|traceback|stack trace|failing test|build failed|lint failed)", prompt, re.IGNORECASE))
     return bool(
-        (has_edit_intent and (has_repo_hint or has_file_hint or has_failure_hint))
+        (has_edit_intent and (has_repo_hint or has_file_hint))
         or (has_repo_hint and has_failure_hint)
     )
+
+
+def _has_explicit_repo_file_hint(prompt_source: str) -> bool:
+    prompt = str(prompt_source or "")
+    for raw_hint in FILE_HINT_RE.findall(prompt):
+        hint = str(raw_hint or "").strip().lower().rstrip(".,:;!?)]}\"'")
+        if not hint:
+            continue
+        if (
+            hint.startswith("/tmp/evermind_output")
+            or hint.startswith("tmp/evermind_output")
+            or "/tmp/evermind_output/" in hint
+            or "tmp/evermind_output/" in hint
+        ):
+            continue
+        basename = Path(hint).name.lower()
+        suffix = Path(hint).suffix.lower()
+        if hint in _GENERIC_PREVIEW_FILE_HINTS or basename in _GENERIC_PREVIEW_FILE_HINTS:
+            continue
+        if "/" in hint:
+            if basename in {name.lower() for name in MANIFEST_NAMES}:
+                return True
+            if suffix:
+                return True
+            continue
+        if suffix in {".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".kt", ".swift", ".rb", ".php", ".json", ".yml", ".yaml", ".toml", ".md"}:
+            return True
+    return False
+
+
+def _looks_like_greenfield_builder_task(prompt_source: str) -> bool:
+    prompt = str(prompt_source or "").strip()
+    if not prompt:
+        return False
+    if EXPLICIT_REPO_CONTEXT_RE.search(prompt) or _has_explicit_repo_file_hint(prompt):
+        return False
+    if GREENFIELD_OUTPUT_RE.search(prompt):
+        return True
+    return bool(GREENFIELD_BUILDER_CREATION_RE.search(prompt))
 
 
 def _load_package_scripts(path: Path) -> List[str]:
@@ -396,8 +454,7 @@ def build_repo_context(node_type: str, prompt_source: str, config: Optional[Dict
     prompt = str(prompt_source or "").strip()
     if (
         str(node_type or "").strip().lower() == "builder"
-        and GREENFIELD_OUTPUT_RE.search(prompt)
-        and not EXPLICIT_REPO_CONTEXT_RE.search(prompt)
+        and _looks_like_greenfield_builder_task(prompt)
     ):
         return None
     workspace = ""

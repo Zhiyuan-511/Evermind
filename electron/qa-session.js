@@ -7,12 +7,19 @@ const { spawnSync } = require('child_process');
 const DEFAULT_WIDTH = 1280;
 const DEFAULT_HEIGHT = 720;
 const DEFAULT_SETTLE_MS = 1200;
-const DEFAULT_TIMEOUT_MS = 18000;
-const DEFAULT_KEEP_OPEN_MS = 8000;
+const DEFAULT_TIMEOUT_MS = 28000;
+const DEFAULT_KEEP_OPEN_MS = 12000;
 const SHOWCASE_DELAY_MS = 800;
 const TIMELAPSE_INTERVAL_MS = 500;
 const RRWEB_CDN_URL = 'https://cdn.jsdelivr.net/npm/rrweb@2.0.0-alpha.17/dist/rrweb.umd.cjs.js';
-const DEFAULT_KEY_SEQUENCE = ['ArrowUp', 'ArrowRight', 'Space', 'ArrowLeft', 'ArrowDown'];
+const DEFAULT_KEY_SEQUENCE = ['w', 'd', 'Space', 'a', 's', 'ArrowUp', 'ArrowRight', 'ArrowLeft', 'ArrowDown'];
+const DEFAULT_DRAG_DISTANCE_X = 140;
+const DEFAULT_DRAG_DISTANCE_Y = -32;
+const DEFAULT_DRAG_STEPS = 7;
+const DEFAULT_FIRE_HOLD_MS = 320;
+const START_CONTROL_KEYWORDS = /(start|play|begin|launch|retry|restart|continue|tap to start|new game|开始|游玩|启动|进入|继续|重试|再来一次)/i;
+const START_CONTROL_REGEX_SOURCE = START_CONTROL_KEYWORDS.source;
+const START_CONTROL_REGEX_FLAGS = START_CONTROL_KEYWORDS.flags;
 
 function delay(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -30,6 +37,10 @@ function hashBuffer(buffer) {
 function ensureDir(targetDir) {
     fs.mkdirSync(targetDir, { recursive: true });
     return targetDir;
+}
+
+function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
 }
 
 function writeJson(targetPath, payload) {
@@ -290,41 +301,44 @@ async function resolveInteractionTarget(webContents) {
                     const style = window.getComputedStyle(element);
                     return rect.width > 8 && rect.height > 8 && style.visibility !== 'hidden' && style.display !== 'none';
                 };
-                const keywords = /(start|play|begin|launch|retry|restart|continue|tap to start|new game|开始|游玩|启动|进入|继续|重试|再来一次)/i;
-                const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], [data-testid], [aria-label], canvas'));
-                for (const element of candidates) {
-                    if (!visible(element)) continue;
-                    const text = [element.innerText, element.textContent, element.getAttribute('aria-label'), element.getAttribute('data-testid')]
-                        .filter(Boolean)
-                        .join(' ')
-                        .trim();
-                    if (!(keywords.test(text) || element.tagName.toLowerCase() === 'canvas')) continue;
+                const keywords = new RegExp(
+                    ${JSON.stringify(START_CONTROL_REGEX_SOURCE)},
+                    ${JSON.stringify(START_CONTROL_REGEX_FLAGS)},
+                );
+                const textFor = (element) => [element.innerText, element.textContent, element.getAttribute('aria-label'), element.getAttribute('data-testid')]
+                    .filter(Boolean)
+                    .join(' ')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+                const buildTarget = (element, kindOverride = '') => {
                     const rect = element.getBoundingClientRect();
                     const selector = element.id ? ('#' + element.id) : '';
+                    const tagName = element.tagName.toLowerCase();
                     return {
                         ok: true,
-                        kind: element.tagName.toLowerCase() === 'canvas' ? 'canvas' : 'element',
-                        tagName: element.tagName.toLowerCase(),
-                        label: text || element.tagName.toLowerCase(),
+                        kind: kindOverride || (tagName === 'canvas' ? 'canvas' : 'element'),
+                        tagName,
+                        label: textFor(element) || tagName,
                         selector,
                         x: Math.round(rect.left + rect.width / 2),
                         y: Math.round(rect.top + rect.height / 2),
                     };
+                };
+                const controlCandidates = Array.from(document.querySelectorAll('button, a, [role="button"], [data-testid], [aria-label]'))
+                    .filter((element) => visible(element));
+                const keywordControl = controlCandidates.find((element) => keywords.test(textFor(element)));
+                if (keywordControl) {
+                    return buildTarget(keywordControl, 'start_control');
+                }
+                const genericControl = controlCandidates[0];
+                if (genericControl) {
+                    return buildTarget(genericControl, 'element');
                 }
                 const canvas = Array.from(document.querySelectorAll('canvas'))
                     .filter((element) => visible(element))
                     .sort((a, b) => (b.getBoundingClientRect().width * b.getBoundingClientRect().height) - (a.getBoundingClientRect().width * a.getBoundingClientRect().height))[0];
                 if (canvas) {
-                    const rect = canvas.getBoundingClientRect();
-                    return {
-                        ok: true,
-                        kind: 'canvas',
-                        tagName: 'canvas',
-                        label: 'canvas',
-                        selector: '',
-                        x: Math.round(rect.left + rect.width / 2),
-                        y: Math.round(rect.top + rect.height / 2),
-                    };
+                    return buildTarget(canvas, 'canvas');
                 }
                 return {
                     ok: true,
@@ -350,50 +364,144 @@ async function resolveInteractionTarget(webContents) {
     }
 }
 
+async function resolveGameplaySurface(webContents) {
+    try {
+        return await webContents.executeJavaScript(`
+            (() => {
+                const visible = (element) => {
+                    if (!element) return false;
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 8 && rect.height > 8 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const canvas = Array.from(document.querySelectorAll('canvas'))
+                    .filter((element) => visible(element))
+                    .sort((a, b) => (b.getBoundingClientRect().width * b.getBoundingClientRect().height) - (a.getBoundingClientRect().width * a.getBoundingClientRect().height))[0];
+                if (!canvas) return null;
+                const rect = canvas.getBoundingClientRect();
+                return {
+                    ok: true,
+                    kind: 'canvas',
+                    tagName: 'canvas',
+                    label: 'canvas gameplay surface',
+                    selector: canvas.id ? ('#' + canvas.id) : '',
+                    x: Math.round(rect.left + rect.width / 2),
+                    y: Math.round(rect.top + rect.height / 2),
+                };
+            })();
+        `, true);
+    } catch {
+        return null;
+    }
+}
+
 async function dispatchClick(webContents, target) {
     const x = Number(target?.x || 0);
     const y = Number(target?.y || 0);
     const selector = String(target?.selector || '');
+    const targetKind = String(target?.kind || '').trim().toLowerCase();
+    const domClickScript = `
+        (() => {
+            const target = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : 'null'}
+                || document.elementFromPoint(${x}, ${y})
+                || document.body;
+            if (!target) return false;
+            const rect = target.getBoundingClientRect();
+            const clientX = ${x};
+            const clientY = ${y};
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                target.dispatchEvent(new MouseEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                    clientX,
+                    clientY,
+                    button: 0,
+                    view: window,
+                }));
+            }
+            if (typeof target.click === 'function') target.click();
+            if (typeof target.focus === 'function') target.focus();
+            return {
+                ok: true,
+                tagName: String(target.tagName || '').toLowerCase(),
+                width: Math.round(rect.width || 0),
+                height: Math.round(rect.height || 0),
+            };
+        })();
+    `;
+    let nativeOk = false;
     try {
         webContents.sendInputEvent({ type: 'mouseMove', x, y });
         webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
         webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
-        return { ok: true, mode: 'native' };
+        nativeOk = true;
     } catch {
+        nativeOk = false;
+    }
+    if (!nativeOk || targetKind === 'start_control') {
         try {
-            await webContents.executeJavaScript(`
-                (() => {
-                    const target = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : 'null'}
-                        || document.elementFromPoint(${x}, ${y})
-                        || document.body;
-                    if (!target) return false;
-                    const rect = target.getBoundingClientRect();
-                    const clientX = ${x};
-                    const clientY = ${y};
-                    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
-                        target.dispatchEvent(new MouseEvent(type, {
-                            bubbles: true,
-                            cancelable: true,
-                            composed: true,
-                            clientX,
-                            clientY,
-                            button: 0,
-                            view: window,
-                        }));
-                    }
-                    if (typeof target.click === 'function') target.click();
-                    return true;
-                })();
-            `, true);
-            return { ok: true, mode: 'dom' };
+            const domResult = await webContents.executeJavaScript(domClickScript, true);
+            if (nativeOk) {
+                return { ok: true, mode: 'native+dom', dom_target: domResult || {} };
+            }
+            return {
+                ok: Boolean(domResult && domResult.ok !== false),
+                mode: 'dom',
+                dom_target: domResult || {},
+            };
         } catch (error) {
+            if (nativeOk) {
+                return { ok: true, mode: 'native' };
+            }
             return { ok: false, mode: 'failed', error: String(error?.message || error || 'click failed') };
         }
     }
+    return { ok: true, mode: 'native' };
+}
+
+function normalizeKeyEntry(entry) {
+    if (entry && typeof entry === 'object') {
+        const rawKey = String(entry.key || entry.keyCode || '').trim();
+        const key = rawKey === 'Space' ? ' ' : rawKey;
+        const code = String(entry.code || '').trim();
+        const nativeKeyCode = String(entry.nativeKeyCode || entry.keyCode || '').trim();
+        const holdMs = Math.max(20, Number(entry.holdMs || entry.hold_ms || 70));
+        return {
+            key: key || ' ',
+            code: code || inferCodeFromKey(key || nativeKeyCode || ' '),
+            nativeKeyCode: nativeKeyCode || inferNativeKeyCode(key || rawKey || ' '),
+            holdMs,
+        };
+    }
+    const rawKey = String(entry || '').trim() || ' ';
+    const key = rawKey === 'Space' ? ' ' : rawKey;
+    return {
+        key,
+        code: inferCodeFromKey(key),
+        nativeKeyCode: inferNativeKeyCode(key),
+        holdMs: 70,
+    };
+}
+
+function inferCodeFromKey(key) {
+    const normalized = String(key || '').trim();
+    if (normalized === ' ') return 'Space';
+    if (/^Arrow/.test(normalized)) return normalized;
+    if (/^[a-zA-Z]$/.test(normalized)) return `Key${normalized.toUpperCase()}`;
+    return normalized || 'Space';
+}
+
+function inferNativeKeyCode(key) {
+    const normalized = String(key || '').trim();
+    if (normalized === ' ') return 'Space';
+    if (/^Arrow/.test(normalized)) return normalized;
+    if (/^[a-zA-Z]$/.test(normalized)) return normalized.toUpperCase();
+    return normalized || 'Space';
 }
 
 async function dispatchKeySequence(webContents, keys) {
-    const normalizedKeys = Array.isArray(keys) && keys.length > 0 ? keys.map((key) => String(key || '').trim()).filter(Boolean) : DEFAULT_KEY_SEQUENCE;
+    const normalizedKeys = Array.isArray(keys) && keys.length > 0 ? keys.map(normalizeKeyEntry) : DEFAULT_KEY_SEQUENCE.map(normalizeKeyEntry);
     let sent = 0;
     try {
         await webContents.executeJavaScript('window.focus(); document.body && document.body.focus && document.body.focus(); true;', true);
@@ -401,19 +509,24 @@ async function dispatchKeySequence(webContents, keys) {
         // Ignore focus failures.
     }
 
-    for (const key of normalizedKeys) {
+    for (const entry of normalizedKeys) {
+        const key = String(entry.key || '').trim() || ' ';
+        const code = String(entry.code || inferCodeFromKey(key)).trim();
+        const nativeKeyCode = String(entry.nativeKeyCode || inferNativeKeyCode(key)).trim();
+        const holdMs = Math.max(20, Number(entry.holdMs || 70));
         let sentThisKey = false;
         try {
-            webContents.sendInputEvent({ type: 'keyDown', keyCode: key });
-            await delay(70);
-            webContents.sendInputEvent({ type: 'keyUp', keyCode: key });
+            webContents.sendInputEvent({ type: 'keyDown', keyCode: nativeKeyCode });
+            await delay(holdMs);
+            webContents.sendInputEvent({ type: 'keyUp', keyCode: nativeKeyCode });
             sentThisKey = true;
         } catch {
             try {
                 await webContents.executeJavaScript(`
                     (() => {
                         const key = ${JSON.stringify(key)};
-                        const eventInit = { key, code: key, bubbles: true, cancelable: true };
+                        const code = ${JSON.stringify(code)};
+                        const eventInit = { key, code, bubbles: true, cancelable: true };
                         for (const type of ['keydown', 'keyup']) {
                             const evt = new KeyboardEvent(type, eventInit);
                             window.dispatchEvent(evt);
@@ -435,7 +548,314 @@ async function dispatchKeySequence(webContents, keys) {
         }
         await delay(110);
     }
-    return { ok: sent > 0, sent, keys: normalizedKeys };
+    return {
+        ok: sent > 0,
+        sent,
+        keys: normalizedKeys.map((entry) => String(entry.code || entry.key || '').trim()).filter(Boolean),
+    };
+}
+
+async function dispatchMouseDrag(webContents, target, options = {}) {
+    const startX = Number(target?.x || 320);
+    const startY = Number(target?.y || 240);
+    const deltaX = Number(options.deltaX || DEFAULT_DRAG_DISTANCE_X);
+    const deltaY = Number(options.deltaY || DEFAULT_DRAG_DISTANCE_Y);
+    const steps = Math.max(3, Number(options.steps || DEFAULT_DRAG_STEPS));
+    const endX = clamp(Math.round(startX + deltaX), 24, 2200);
+    const endY = clamp(Math.round(startY + deltaY), 24, 1400);
+    const selector = String(target?.selector || '');
+    let nativeOk = false;
+    try {
+        webContents.sendInputEvent({ type: 'mouseMove', x: startX, y: startY });
+        webContents.sendInputEvent({ type: 'mouseDown', x: startX, y: startY, button: 'left', clickCount: 1 });
+        for (let index = 1; index <= steps; index += 1) {
+            const progress = index / steps;
+            const x = Math.round(startX + ((endX - startX) * progress));
+            const y = Math.round(startY + ((endY - startY) * progress));
+            webContents.sendInputEvent({ type: 'mouseMove', x, y, button: 'left', buttons: ['left'] });
+            await delay(18);
+        }
+        webContents.sendInputEvent({ type: 'mouseUp', x: endX, y: endY, button: 'left', clickCount: 1 });
+        nativeOk = true;
+    } catch {
+        nativeOk = false;
+    }
+
+    const domScript = `
+        (() => {
+            const selector = ${JSON.stringify(selector)};
+            const startX = ${startX};
+            const startY = ${startY};
+            const endX = ${endX};
+            const endY = ${endY};
+            const steps = ${steps};
+            const target = (selector && document.querySelector(selector))
+                || document.elementFromPoint(startX, startY)
+                || document.body;
+            if (!target) return { ok: false };
+            const emit = (type, x, y, buttons = 1) => {
+                const receiver = document.elementFromPoint(x, y) || target;
+                if (!receiver) return;
+                receiver.dispatchEvent(new MouseEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                    clientX: x,
+                    clientY: y,
+                    button: 0,
+                    buttons,
+                    view: window,
+                }));
+            };
+            emit('pointerdown', startX, startY, 1);
+            emit('mousedown', startX, startY, 1);
+            for (let index = 1; index <= steps; index += 1) {
+                const progress = index / steps;
+                const x = Math.round(startX + ((endX - startX) * progress));
+                const y = Math.round(startY + ((endY - startY) * progress));
+                emit('pointermove', x, y, 1);
+                emit('mousemove', x, y, 1);
+            }
+            emit('pointerup', endX, endY, 0);
+            emit('mouseup', endX, endY, 0);
+            return { ok: true };
+        })();
+    `;
+    if (!nativeOk || String(target?.kind || '').trim().toLowerCase() === 'canvas') {
+        try {
+            const domResult = await webContents.executeJavaScript(domScript, true);
+            return {
+                ok: Boolean(nativeOk || (domResult && domResult.ok)),
+                mode: nativeOk ? 'native+dom' : 'dom',
+                startX,
+                startY,
+                endX,
+                endY,
+                dragDistance: Math.round(Math.hypot(endX - startX, endY - startY)),
+            };
+        } catch (error) {
+            if (nativeOk) {
+                return {
+                    ok: true,
+                    mode: 'native',
+                    startX,
+                    startY,
+                    endX,
+                    endY,
+                    dragDistance: Math.round(Math.hypot(endX - startX, endY - startY)),
+                };
+            }
+            return { ok: false, mode: 'failed', error: String(error?.message || error || 'drag failed') };
+        }
+    }
+    return {
+        ok: true,
+        mode: 'native',
+        startX,
+        startY,
+        endX,
+        endY,
+        dragDistance: Math.round(Math.hypot(endX - startX, endY - startY)),
+    };
+}
+
+async function dispatchMouseHold(webContents, target, holdMs = DEFAULT_FIRE_HOLD_MS) {
+    const x = Number(target?.x || 320);
+    const y = Number(target?.y || 240);
+    const selector = String(target?.selector || '');
+    let nativeOk = false;
+    try {
+        webContents.sendInputEvent({ type: 'mouseMove', x, y });
+        webContents.sendInputEvent({ type: 'mouseDown', x, y, button: 'left', clickCount: 1 });
+        await delay(Math.max(120, Number(holdMs || DEFAULT_FIRE_HOLD_MS)));
+        webContents.sendInputEvent({ type: 'mouseUp', x, y, button: 'left', clickCount: 1 });
+        nativeOk = true;
+    } catch {
+        nativeOk = false;
+    }
+    const domScript = `
+        (() => {
+            const target = ${selector ? `document.querySelector(${JSON.stringify(selector)})` : 'null'}
+                || document.elementFromPoint(${x}, ${y})
+                || document.body;
+            if (!target) return { ok: false };
+            const emit = (type, buttons = 1) => {
+                target.dispatchEvent(new MouseEvent(type, {
+                    bubbles: true,
+                    cancelable: true,
+                    composed: true,
+                    clientX: ${x},
+                    clientY: ${y},
+                    button: 0,
+                    buttons,
+                    view: window,
+                }));
+            };
+            emit('pointerdown', 1);
+            emit('mousedown', 1);
+            emit('pointerup', 0);
+            emit('mouseup', 0);
+            return { ok: true };
+        })();
+    `;
+    if (!nativeOk || String(target?.kind || '').trim().toLowerCase() === 'canvas') {
+        try {
+            const domResult = await webContents.executeJavaScript(domScript, true);
+            return { ok: Boolean(nativeOk || (domResult && domResult.ok)), mode: nativeOk ? 'native+dom' : 'dom', holdMs: Math.max(120, Number(holdMs || DEFAULT_FIRE_HOLD_MS)) };
+        } catch (error) {
+            if (nativeOk) {
+                return { ok: true, mode: 'native', holdMs: Math.max(120, Number(holdMs || DEFAULT_FIRE_HOLD_MS)) };
+            }
+            return { ok: false, mode: 'failed', error: String(error?.message || error || 'hold fire failed') };
+        }
+    }
+    return { ok: true, mode: 'native', holdMs: Math.max(120, Number(holdMs || DEFAULT_FIRE_HOLD_MS)) };
+}
+
+async function readGameplaySignals(webContents) {
+    try {
+        return await webContents.executeJavaScript(`
+            (() => {
+                const visible = (element) => {
+                    if (!element) return false;
+                    const rect = element.getBoundingClientRect();
+                    const style = window.getComputedStyle(element);
+                    return rect.width > 8 && rect.height > 8 && style.visibility !== 'hidden' && style.display !== 'none';
+                };
+                const textFor = (element) => [element.innerText, element.textContent, element.getAttribute('aria-label'), element.getAttribute('title')]
+                    .filter(Boolean)
+                    .join(' ')
+                    .replace(/\\s+/g, ' ')
+                    .trim();
+                const startKeywords = new RegExp(
+                    ${JSON.stringify(START_CONTROL_REGEX_SOURCE)},
+                    ${JSON.stringify(START_CONTROL_REGEX_FLAGS)},
+                );
+                const controls = Array.from(document.querySelectorAll('button, a, [role="button"], [data-testid], [aria-label]'))
+                    .filter((element) => visible(element));
+                const startControls = controls
+                    .map((element) => ({ element, text: textFor(element) }))
+                    .filter((entry) => startKeywords.test(entry.text));
+                const overlayCandidates = Array.from(document.querySelectorAll('.overlay, .modal, dialog, [role="dialog"], [aria-modal="true"]'))
+                    .filter((element) => visible(element));
+                const scoreAnchors = Array.from(document.querySelectorAll('[id], [class]'))
+                    .filter((element) => visible(element))
+                    .filter((element) => /score|level|lives|life|health|combo|stage|hud|target/i.test(String(element.id || '') + ' ' + String(element.className || '')))
+                    .slice(0, 16);
+                const scoreText = scoreAnchors.map((element) => textFor(element)).filter(Boolean).slice(0, 8);
+                return {
+                    visibleStartCount: startControls.length,
+                    visibleStartLabels: startControls.map((entry) => entry.text).filter(Boolean).slice(0, 6),
+                    overlayVisible: overlayCandidates.length > 0,
+                    overlayTexts: overlayCandidates.map((element) => textFor(element)).filter(Boolean).slice(0, 4),
+                    scoreText,
+                    scoreDigest: scoreText.join(' | ').slice(0, 400),
+                    focusedTag: String(document.activeElement?.tagName || '').toLowerCase(),
+                    focusedLabel: textFor(document.activeElement || document.body).slice(0, 120),
+                    canvasCount: document.querySelectorAll('canvas').length,
+                    bodyTextLength: (document.body?.innerText || '').trim().length,
+                };
+            })();
+        `, true);
+    } catch {
+        return {
+            visibleStartCount: 0,
+            visibleStartLabels: [],
+            overlayVisible: false,
+            overlayTexts: [],
+            scoreText: [],
+            scoreDigest: '',
+            focusedTag: '',
+            focusedLabel: '',
+            canvasCount: 0,
+            bodyTextLength: 0,
+        };
+    }
+}
+
+function hasMeaningfulGameplayTransition(beforeSignals = {}, afterSignals = {}) {
+    const beforeStartCount = Number(beforeSignals.visibleStartCount || 0);
+    const afterStartCount = Number(afterSignals.visibleStartCount || 0);
+    const beforeOverlayVisible = Boolean(beforeSignals.overlayVisible);
+    const afterOverlayVisible = Boolean(afterSignals.overlayVisible);
+    const beforeScoreDigest = String(beforeSignals.scoreDigest || '').trim();
+    const afterScoreDigest = String(afterSignals.scoreDigest || '').trim();
+    const beforeBodyLen = Number(beforeSignals.bodyTextLength || 0);
+    const afterBodyLen = Number(afterSignals.bodyTextLength || 0);
+    if (beforeStartCount > 0 && afterStartCount < beforeStartCount) {
+        return true;
+    }
+    if (beforeOverlayVisible && !afterOverlayVisible) {
+        return true;
+    }
+    if (beforeScoreDigest && afterScoreDigest && beforeScoreDigest !== afterScoreDigest) {
+        return true;
+    }
+    // Score HUD appeared from nothing — strong gameplay start signal
+    if (!beforeScoreDigest && afterScoreDigest && afterScoreDigest.length > 4) {
+        return true;
+    }
+    if (beforeStartCount > 0 && afterStartCount === 0 && String(afterSignals.focusedTag || '').toLowerCase() === 'canvas') {
+        return true;
+    }
+    // Significant body text increase indicates UI state change (e.g. HUD elements rendered)
+    if (beforeBodyLen > 0 && afterBodyLen > beforeBodyLen * 1.5 && (afterBodyLen - beforeBodyLen) >= 40) {
+        return true;
+    }
+    return false;
+}
+
+function isBenignConsoleMessage(message = '') {
+    const text = String(message || '').trim().toLowerCase();
+    if (!text) return false;
+    const benignMarkers = [
+        'deprecated with r150+',
+        'please use es modules or alternatives',
+        'build/three.js',
+        'build/three.min.js',
+        '[evermind-qa]',
+        'favicon.ico',
+        'source map',
+        'sourcemap',
+        'download the react devtools',
+        'permissions policy violation',
+    ];
+    return benignMarkers.some((marker) => text.includes(marker));
+}
+
+function isFatalConsoleMessage(message = '') {
+    const text = String(message || '').trim().toLowerCase();
+    if (!text) return false;
+    const fatalMarkers = [
+        'uncaught ',
+        'typeerror',
+        'referenceerror',
+        'syntaxerror',
+        'rangeerror',
+        'cannot read properties',
+        'is not defined',
+        'failed to load module',
+        'webgl context lost',
+    ];
+    return fatalMarkers.some((marker) => text.includes(marker));
+}
+
+function hasRuntimeFailures(result = {}) {
+    const appConsoleErrors = Array.isArray(result.consoleErrors)
+        ? result.consoleErrors.filter((entry) => {
+            if (!entry || entry.qaInfra) return false;
+            if (entry.blocking === false) return false;
+            if (entry.blocking === true) return true;
+            if (isBenignConsoleMessage(entry.message || '')) return false;
+            const level = Number(entry.level || 3);
+            return level >= 3 || isFatalConsoleMessage(entry.message || '');
+        })
+        : [];
+    return Boolean(
+        appConsoleErrors.length > 0
+        || (Array.isArray(result.pageErrors) && result.pageErrors.length > 0)
+        || (Array.isArray(result.failedRequests) && result.failedRequests.length > 0)
+    );
 }
 
 async function captureFrame(webContents, sessionDir, index, label) {
@@ -607,11 +1027,18 @@ async function runQaSession(config = {}, getParentWindow) {
 
         webContents.on('console-message', (_event, level, message, line, sourceId) => {
             if (level >= 2) {
+                const msg = String(message || '');
+                const isQaInfraMessage = msg.startsWith('[evermind-qa]');
+                const blockingConsoleMessage = !isQaInfraMessage
+                    && !isBenignConsoleMessage(msg)
+                    && (Number(level || 0) >= 3 || isFatalConsoleMessage(msg));
                 result.consoleErrors.push({
                     level,
-                    message: String(message || ''),
+                    message: msg,
                     line: Number(line || 0),
                     source: String(sourceId || ''),
+                    qaInfra: isQaInfraMessage,
+                    blocking: blockingConsoleMessage,
                 });
             }
         });
@@ -646,7 +1073,10 @@ async function runQaSession(config = {}, getParentWindow) {
         timelapseCapture = startTimelapseCapture(webContents, sessionDir);
         await delay(settleMs);
 
-        const initialFrame = await captureFrame(webContents, sessionDir, 0, 'loaded');
+        let frameIndex = 0;
+        const initialFrame = await captureFrame(webContents, sessionDir, frameIndex, 'loaded');
+        frameIndex += 1;
+        const initialSignals = await readGameplaySignals(webContents);
         result.frames.push(initialFrame);
         result.actions.push({
             action: 'snapshot',
@@ -666,13 +1096,17 @@ async function runQaSession(config = {}, getParentWindow) {
         const target = await resolveInteractionTarget(webContents);
         const clickResult = await dispatchClick(webContents, target);
         await delay(settleMs);
-        const clickedFrame = await captureFrame(webContents, sessionDir, 1, 'after-click');
+        const clickedFrame = await captureFrame(webContents, sessionDir, frameIndex, 'after-click');
+        frameIndex += 1;
+        const afterClickSignals = await readGameplaySignals(webContents);
         result.frames.push(clickedFrame);
         result.actions.push({
             action: 'click',
             ok: Boolean(clickResult.ok),
             url: previewUrl,
             target: String(target?.label || target?.tagName || 'interactive target'),
+            x: Number(target?.x || 0),
+            y: Number(target?.y || 0),
             state_hash: clickedFrame.stateHash,
             previous_state_hash: initialFrame.stateHash,
             state_changed: clickedFrame.stateHash !== initialFrame.stateHash,
@@ -684,9 +1118,85 @@ async function runQaSession(config = {}, getParentWindow) {
         });
         await delay(SHOWCASE_DELAY_MS);
 
+        const gameplaySurface = await resolveGameplaySurface(webContents);
+        if (gameplaySurface && String(target?.kind || '') !== 'canvas') {
+            await dispatchClick(webContents, gameplaySurface);
+            await delay(180);
+        }
+        let referenceTarget = gameplaySurface || target;
+        let previousFrame = clickedFrame;
+        let afterDragSignals = afterClickSignals;
+        let afterFireSignals = afterDragSignals;
+        let dragResult = { ok: false, skipped: true };
+        let fireResult = { ok: false, skipped: true };
+
+        if (referenceTarget) {
+            dragResult = await dispatchMouseDrag(webContents, referenceTarget);
+            await delay(Math.max(180, Math.round(settleMs * 0.6)));
+            const dragFrame = await captureFrame(webContents, sessionDir, frameIndex, 'after-drag');
+            frameIndex += 1;
+            afterDragSignals = await readGameplaySignals(webContents);
+            result.frames.push(dragFrame);
+            result.actions.push({
+                action: 'drag_camera',
+                ok: Boolean(dragResult.ok),
+                url: previewUrl,
+                target: String(referenceTarget?.label || referenceTarget?.tagName || 'gameplay surface'),
+                x: Number(referenceTarget?.x || 0),
+                y: Number(referenceTarget?.y || 0),
+                drag_distance: Number(dragResult.dragDistance || 0),
+                end_x: Number(dragResult.endX || 0),
+                end_y: Number(dragResult.endY || 0),
+                state_hash: dragFrame.stateHash,
+                previous_state_hash: previousFrame.stateHash,
+                state_changed: dragFrame.stateHash !== previousFrame.stateHash,
+                capture_path: dragFrame.path,
+                console_error_count: result.consoleErrors.length,
+                page_error_count: 0,
+                failed_request_count: result.failedRequests.length,
+                observation: dragResult.ok
+                    ? `Dragged gameplay camera surface by ${Number(dragResult.dragDistance || 0)}px`
+                    : String(dragResult.error || 'Camera drag failed'),
+            });
+            previousFrame = dragFrame;
+            await delay(SHOWCASE_DELAY_MS);
+        }
+
+        if (gameplaySurface || referenceTarget) {
+            fireResult = await dispatchMouseHold(webContents, gameplaySurface || referenceTarget, DEFAULT_FIRE_HOLD_MS);
+            await delay(Math.max(180, Math.round(settleMs * 0.6)));
+            const fireFrame = await captureFrame(webContents, sessionDir, frameIndex, 'after-fire');
+            frameIndex += 1;
+            afterFireSignals = await readGameplaySignals(webContents);
+            result.frames.push(fireFrame);
+            result.actions.push({
+                action: 'hold_fire',
+                ok: Boolean(fireResult.ok),
+                url: previewUrl,
+                target: String((gameplaySurface || referenceTarget)?.label || (gameplaySurface || referenceTarget)?.tagName || 'gameplay surface'),
+                x: Number((gameplaySurface || referenceTarget)?.x || 0),
+                y: Number((gameplaySurface || referenceTarget)?.y || 0),
+                hold_ms: Number(fireResult.holdMs || DEFAULT_FIRE_HOLD_MS),
+                state_hash: fireFrame.stateHash,
+                previous_state_hash: previousFrame.stateHash,
+                state_changed: fireFrame.stateHash !== previousFrame.stateHash,
+                capture_path: fireFrame.path,
+                console_error_count: result.consoleErrors.length,
+                page_error_count: 0,
+                failed_request_count: result.failedRequests.length,
+                observation: fireResult.ok
+                    ? `Held fire / pointer input for ${Number(fireResult.holdMs || DEFAULT_FIRE_HOLD_MS)}ms`
+                    : String(fireResult.error || 'Fire hold failed'),
+            });
+            previousFrame = fireFrame;
+            await delay(SHOWCASE_DELAY_MS);
+        }
+
         const keyResult = await dispatchKeySequence(webContents, keySequence);
         await delay(settleMs);
-        const gameplayFrame = await captureFrame(webContents, sessionDir, 2, 'after-keys');
+        const gameplayFrame = await captureFrame(webContents, sessionDir, frameIndex, 'after-keys');
+        frameIndex += 1;
+        const afterKeysSignals = await readGameplaySignals(webContents);
         result.frames.push(gameplayFrame);
         result.actions.push({
             action: 'press_sequence',
@@ -694,8 +1204,8 @@ async function runQaSession(config = {}, getParentWindow) {
             url: previewUrl,
             keys_count: Number(keyResult.sent || 0),
             state_hash: gameplayFrame.stateHash,
-            previous_state_hash: clickedFrame.stateHash,
-            state_changed: gameplayFrame.stateHash !== clickedFrame.stateHash,
+            previous_state_hash: previousFrame.stateHash,
+            state_changed: gameplayFrame.stateHash !== previousFrame.stateHash,
             capture_path: gameplayFrame.path,
             console_error_count: result.consoleErrors.length,
             page_error_count: 0,
@@ -704,7 +1214,9 @@ async function runQaSession(config = {}, getParentWindow) {
         });
         await delay(SHOWCASE_DELAY_MS);
 
-        const finalFrame = await captureFrame(webContents, sessionDir, 3, 'final');
+        const finalFrame = await captureFrame(webContents, sessionDir, frameIndex, 'final');
+        frameIndex += 1;
+        const finalSignals = await readGameplaySignals(webContents);
         result.frames.push(finalFrame);
         result.actions.push({
             action: 'snapshot',
@@ -719,6 +1231,68 @@ async function runQaSession(config = {}, getParentWindow) {
             failed_request_count: result.failedRequests.length,
             observation: 'Final gameplay frame captured',
         });
+
+        const runtimeHealthy = !hasRuntimeFailures(result);
+        const distinctStateHashes = Array.from(new Set(
+            result.actions
+                .map((item) => String(item.state_hash || '').trim())
+                .filter(Boolean),
+        ));
+        const stateChangeCount = result.actions.filter((item) => Boolean(item.state_changed)).length;
+        const pointerInteractionOk = Boolean(clickResult.ok || dragResult.ok || fireResult.ok);
+        const menuTransition = (
+            hasMeaningfulGameplayTransition(initialSignals, afterClickSignals)
+            || hasMeaningfulGameplayTransition(initialSignals, afterDragSignals)
+            || hasMeaningfulGameplayTransition(initialSignals, afterFireSignals)
+            || hasMeaningfulGameplayTransition(initialSignals, afterKeysSignals)
+            || hasMeaningfulGameplayTransition(initialSignals, finalSignals)
+        );
+        const keyDrivenTransition = (
+            hasMeaningfulGameplayTransition(afterClickSignals, afterDragSignals)
+            || hasMeaningfulGameplayTransition(afterDragSignals, afterFireSignals)
+            || hasMeaningfulGameplayTransition(afterClickSignals, afterFireSignals)
+            || hasMeaningfulGameplayTransition(afterFireSignals, afterKeysSignals)
+            || hasMeaningfulGameplayTransition(afterClickSignals, afterKeysSignals)
+            || hasMeaningfulGameplayTransition(afterClickSignals, finalSignals)
+            || hasMeaningfulGameplayTransition(afterKeysSignals, finalSignals)
+        );
+        const gameplayStarted = (
+            runtimeHealthy
+            && pointerInteractionOk
+            && (Boolean(keyResult.ok) || Boolean(dragResult.ok) || Boolean(fireResult.ok))
+            && (
+                Number(keyResult.sent || 0) >= 3
+                || Boolean(dragResult.ok)
+                || Boolean(fireResult.ok)
+            )
+            && (
+                menuTransition
+                || stateChangeCount >= 2
+                || distinctStateHashes.length >= 3
+            )
+            && (
+                keyDrivenTransition
+                || stateChangeCount >= 3
+                || (
+                    Boolean(keyResult.ok)
+                    && Boolean((gameplayFrame.stateHash || '').trim())
+                    && String(gameplayFrame.stateHash || '').trim() !== String(initialFrame.stateHash || '').trim()
+                )
+            )
+        );
+        result.gameplaySignals = {
+            initial: initialSignals,
+            afterClick: afterClickSignals,
+            afterDrag: afterDragSignals,
+            afterFire: afterFireSignals,
+            afterKeys: afterKeysSignals,
+            final: finalSignals,
+        };
+        result.gameplayStarted = Boolean(gameplayStarted);
+        result.interactionTarget = {
+            primary: target || null,
+            surface: gameplaySurface || null,
+        };
 
         const runtimeSnapshot = await readRuntimeSnapshot(webContents);
         const pageErrors = []
@@ -764,16 +1338,12 @@ async function runQaSession(config = {}, getParentWindow) {
             result.videoPath = videoResult.path;
         }
 
-        const distinctStateHashes = Array.from(new Set(
-            result.actions
-                .map((item) => String(item.state_hash || '').trim())
-                .filter(Boolean),
-        ));
         result.ok = Boolean(
-            clickResult.ok
-            && keyResult.ok
-            && Number(keyResult.sent || 0) >= 3
+            pointerInteractionOk
+            && (Boolean(keyResult.ok) || Boolean(dragResult.ok) || Boolean(fireResult.ok))
             && distinctStateHashes.length >= 2
+            && runtimeHealthy
+            && gameplayStarted
         );
         result.status = result.ok ? 'completed' : 'incomplete';
         result.summary = [
@@ -781,6 +1351,7 @@ async function runQaSession(config = {}, getParentWindow) {
             `frames=${result.frames.length}`,
             `keys=${Number(keyResult.sent || 0)}`,
             `states=${distinctStateHashes.length}`,
+            `gameplay_started=${result.gameplayStarted ? 1 : 0}`,
             `console_errors=${result.consoleErrors.length}`,
             `page_errors=${result.pageErrors.length}`,
             `failed_requests=${result.failedRequests.length}`,

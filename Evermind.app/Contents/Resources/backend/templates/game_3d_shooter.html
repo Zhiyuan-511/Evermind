@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{GAME_TITLE}}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#111}
+canvas{display:block;width:100%;height:100%}
+#hud{position:fixed;top:0;left:0;width:100%;padding:12px 20px;display:flex;justify-content:space-between;pointer-events:none;z-index:10;color:#fff;font:bold 16px/1 monospace;text-shadow:0 1px 4px rgba(0,0,0,.8)}
+#hud .hp-bar{width:200px;height:14px;background:rgba(255,255,255,.15);border-radius:7px;overflow:hidden}
+#hud .hp-fill{height:100%;background:linear-gradient(90deg,#0f0,#0c0);transition:width .3s}
+#crosshair{position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:24px;height:24px;pointer-events:none;z-index:11}
+#crosshair::before,#crosshair::after{content:'';position:absolute;background:#0f0}
+#crosshair::before{width:2px;height:100%;left:50%;transform:translateX(-50%)}
+#crosshair::after{width:100%;height:2px;top:50%;transform:translateY(-50%)}
+#menu{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,.85);z-index:20;color:#fff;font-family:sans-serif}
+#menu h1{font-size:48px;margin-bottom:24px}
+#menu button{padding:14px 36px;font-size:20px;background:#0a0;color:#fff;border:none;border-radius:8px;cursor:pointer}
+#menu.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div><span id="score">Score: 0</span></div>
+  <div class="hp-bar"><div class="hp-fill" id="hpFill" style="width:100%"></div></div>
+  <div><span id="ammo">{{WEAPON_NAME}} 30/90</span></div>
+</div>
+<div id="crosshair"></div>
+<div id="menu"><h1>{{GAME_TITLE}}</h1><p style="margin-bottom:24px;opacity:.7">{{GAME_SUBTITLE}}</p><button onclick="startGame()">START</button></div>
+<script src="./_evermind_runtime/three/three.min.js"></script>
+<script>
+// ═══ GAME STATE MACHINE ═══
+const STATE = { MENU: 0, PLAYING: 1, PAUSED: 2, GAME_OVER: 3 };
+let gameState = STATE.MENU;
+let score = 0, hp = 100, ammo = { mag: 30, reserve: 90 };
+const clock = new THREE.Clock();
+
+// ═══ THREE.JS SETUP ═══
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x111122);
+scene.fog = new THREE.Fog(0x111122, 20, 80);
+const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 200);
+camera.position.set(0, 1.6, 0);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+// ═══ LIGHTING ═══
+scene.add(new THREE.AmbientLight(0x334455, 0.6));
+const sun = new THREE.DirectionalLight(0xffeedd, 1.2);
+sun.position.set(10, 20, 10);
+sun.castShadow = true;
+scene.add(sun);
+
+// ═══ GROUND ═══
+const ground = new THREE.Mesh(
+  new THREE.PlaneGeometry(100, 100),
+  new THREE.MeshStandardMaterial({ color: 0x223322, roughness: 0.9 })
+);
+ground.rotation.x = -Math.PI / 2;
+ground.receiveShadow = true;
+scene.add(ground);
+
+// ═══ ENEMIES ═══
+const enemies = [];
+function spawnEnemy() {
+  const geo = new THREE.BoxGeometry(1, 2, 1);
+  const mat = new THREE.MeshStandardMaterial({ color: 0xff2244, emissive: 0x330000 });
+  const enemy = new THREE.Mesh(geo, mat);
+  const angle = Math.random() * Math.PI * 2;
+  const dist = 15 + Math.random() * 25;
+  enemy.position.set(Math.cos(angle)*dist, 1, Math.sin(angle)*dist);
+  enemy.castShadow = true;
+  enemy.userData = { hp: 3, speed: 1 + Math.random() };
+  scene.add(enemy);
+  enemies.push(enemy);
+}
+
+// ═══ FPS CONTROLS ═══
+let yaw = 0, pitch = 0;
+const keys = {};
+document.addEventListener('keydown', e => { keys[e.code] = true; });
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+document.addEventListener('mousemove', e => {
+  if (gameState !== STATE.PLAYING || !document.pointerLockElement) return;
+  yaw   -= e.movementX * 0.002;
+  pitch -= e.movementY * 0.002;
+  pitch  = Math.max(-Math.PI/2.2, Math.min(Math.PI/2.2, pitch));
+});
+
+// ═══ SHOOTING ═══
+const raycaster = new THREE.Raycaster();
+document.addEventListener('mousedown', () => {
+  if (gameState !== STATE.PLAYING) return;
+  if (ammo.mag <= 0) return;
+  ammo.mag--;
+  raycaster.setFromCamera({ x: 0, y: 0 }, camera);
+  const hits = raycaster.intersectObjects(enemies);
+  if (hits.length > 0) {
+    const enemy = hits[0].object;
+    enemy.userData.hp--;
+    if (enemy.userData.hp <= 0) {
+      scene.remove(enemy);
+      enemies.splice(enemies.indexOf(enemy), 1);
+      score += 100;
+      spawnEnemy();
+    }
+  }
+  updateHUD();
+});
+
+// ═══ RELOAD ═══
+document.addEventListener('keydown', e => {
+  if (e.code === 'KeyR' && gameState === STATE.PLAYING) {
+    const refill = Math.min(30 - ammo.mag, ammo.reserve);
+    ammo.mag += refill;
+    ammo.reserve -= refill;
+    updateHUD();
+  }
+});
+
+// ═══ HUD UPDATE ═══
+function updateHUD() {
+  document.getElementById('score').textContent = 'Score: ' + score;
+  document.getElementById('hpFill').style.width = Math.max(0, hp) + '%';
+  document.getElementById('ammo').textContent = `{{WEAPON_NAME}} ${ammo.mag}/${ammo.reserve}`;
+}
+
+// ═══ GAME LOOP ═══
+function update(dt) {
+  if (gameState !== STATE.PLAYING) return;
+  // Camera rotation
+  camera.rotation.order = 'YXZ';
+  camera.rotation.y = yaw;
+  camera.rotation.x = pitch;
+  // Movement
+  const speed = 6 * dt;
+  const dir = new THREE.Vector3();
+  if (keys['KeyW']) dir.z -= 1;
+  if (keys['KeyS']) dir.z += 1;
+  if (keys['KeyA']) dir.x -= 1;
+  if (keys['KeyD']) dir.x += 1;
+  dir.normalize().applyEuler(new THREE.Euler(0, yaw, 0));
+  camera.position.add(dir.multiplyScalar(speed));
+  camera.position.y = 1.6;
+  // Enemy AI
+  for (const enemy of enemies) {
+    const toPlayer = camera.position.clone().sub(enemy.position).normalize();
+    enemy.position.add(toPlayer.multiplyScalar(enemy.userData.speed * dt));
+    enemy.position.y = 1;
+    if (enemy.position.distanceTo(camera.position) < 1.5) {
+      hp -= 10 * dt;
+      updateHUD();
+      if (hp <= 0) { gameState = STATE.GAME_OVER; document.getElementById('menu').classList.remove('hidden'); document.getElementById('menu').querySelector('h1').textContent = 'GAME OVER'; document.exitPointerLock(); }
+    }
+  }
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  update(dt);
+  renderer.render(scene, camera);
+}
+
+// ═══ START / RESIZE ═══
+function startGame() {
+  gameState = STATE.PLAYING;
+  score = 0; hp = 100; ammo = { mag: 30, reserve: 90 };
+  enemies.forEach(e => scene.remove(e)); enemies.length = 0;
+  for (let i = 0; i < 5; i++) spawnEnemy();
+  document.getElementById('menu').classList.add('hidden');
+  document.getElementById('menu').querySelector('h1').textContent = '{{GAME_TITLE}}';
+  renderer.domElement.requestPointerLock();
+  updateHUD();
+}
+window.addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+animate();
+</script>
+</body>
+</html>

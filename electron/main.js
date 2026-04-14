@@ -68,6 +68,8 @@ function computeDesktopBuildId() {
         path.join(BACKEND_DIR, 'server.py'),
         path.join(BACKEND_DIR, 'orchestrator.py'),
         path.join(BACKEND_DIR, 'ai_bridge.py'),
+        path.join(BACKEND_DIR, 'preview_validation.py'),
+        path.join(BACKEND_DIR, 'release_doctor.py'),
         path.join(BACKEND_DIR, 'workflow_templates.py'),
         path.join(FRONTEND_STANDALONE, 'server.js'),
         path.join(FRONTEND_STANDALONE, '.next', 'BUILD_ID'),
@@ -122,6 +124,34 @@ console.error = (...args) => {
     originalConsole.error(...args);
 };
 
+function classifyBackendLogLevel(rawLine, fallback = 'log') {
+    const line = String(rawLine || '').trim();
+    if (!line) return fallback;
+    if (/traceback|exception|critical:|fatal:/i.test(line)) return 'error';
+    if (/\bERROR:|\bERROR\b/i.test(line)) return 'error';
+    if (/\bWARNING:|\bWARN(?:ING)?\b/i.test(line)) return 'warn';
+    if (/\bINFO:|\bDEBUG:\b/i.test(line)) return 'log';
+    return fallback;
+}
+
+function relayChildStream(prefix, chunk, fallbackLevel = 'log', classifier = null) {
+    const text = String(chunk || '');
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    for (const line of lines) {
+        const level = typeof classifier === 'function'
+            ? classifier(line, fallbackLevel)
+            : fallbackLevel;
+        const payload = `[${prefix}] ${line}`;
+        if (level === 'error') {
+            console.error(payload);
+        } else if (level === 'warn') {
+            console.warn(payload);
+        } else {
+            console.log(payload);
+        }
+    }
+}
+
 // ── State ──
 let mainWindow = null;
 let splashWindow = null;
@@ -170,6 +200,20 @@ ipcMain.handle('evermind:reveal-in-finder', async (_event, targetPath) => {
         return false;
     } catch (error) {
         console.warn('[Electron] reveal-in-finder failed:', error);
+        return false;
+    }
+});
+
+ipcMain.handle('evermind:open-path', async (_event, targetPath) => {
+    const resolvedPath = typeof targetPath === 'string' ? targetPath.trim() : '';
+    if (!resolvedPath) return false;
+    try {
+        const openTarget = fs.existsSync(resolvedPath) ? resolvedPath : path.dirname(resolvedPath);
+        if (!openTarget || !fs.existsSync(openTarget)) return false;
+        const result = await shell.openPath(openTarget);
+        return result === '';
+    } catch (error) {
+        console.warn('[Electron] open-path failed:', error);
         return false;
     }
 });
@@ -777,18 +821,24 @@ function startBackend(pythonCmd) {
             '/tmp',
         ].join(','),
         SHELL_TIMEOUT: '30',
-        EVERMIND_ORCH_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '210',
-        EVERMIND_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '90',
-        EVERMIND_BUILDER_MULTI_PAGE_FIRST_WRITE_SEC: '105',
-        EVERMIND_BUILDER_RETRY_FIRST_WRITE_SEC: '75',
-        EVERMIND_BUILDER_STREAM_STALL_SEC: '120',
-        EVERMIND_BUILDER_MULTI_PAGE_STREAM_STALL_SEC: '90',
-        EVERMIND_BUILDER_RETRY_STREAM_STALL_SEC: '60',
-        EVERMIND_BUILDER_FORCE_TEXT_STREAK: '2',
-        EVERMIND_BUILDER_MULTI_PAGE_FORCE_TEXT_STREAK: '2',
+        EVERMIND_ORCH_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '360',
+        EVERMIND_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '150',
+        EVERMIND_BUILDER_3D_FIRST_WRITE_SEC: '300',
+        EVERMIND_BUILDER_MULTI_PAGE_FIRST_WRITE_SEC: '180',
+        EVERMIND_BUILDER_RETRY_FIRST_WRITE_SEC: '180',
+        EVERMIND_BUILDER_REPAIR_WRITE_TIMEOUT_SEC: '150',
+        EVERMIND_BUILDER_STREAM_STALL_SEC: '300',
+        EVERMIND_BUILDER_MULTI_PAGE_STREAM_STALL_SEC: '180',
+        EVERMIND_BUILDER_RETRY_STREAM_STALL_SEC: '150',
+        EVERMIND_BUILDER_FORCE_TEXT_STREAK: '5',
+        EVERMIND_BUILDER_GAME_FORCE_TEXT_STREAK: '6',
+        EVERMIND_BUILDER_MULTI_PAGE_FORCE_TEXT_STREAK: '3',
         EVERMIND_BUILDER_RETRY_FORCE_TEXT_STREAK: '2',
-        EVERMIND_BUILDER_MAX_TOOL_ITERS: '8',
-        EVERMIND_BUILDER_POST_WRITE_IDLE_TIMEOUT_SEC: '60',
+        EVERMIND_BUILDER_GAME_RETRY_FORCE_TEXT_STREAK: '4',
+        EVERMIND_BUILDER_MAX_TOOL_ITERS: '12',
+        EVERMIND_BUILDER_POST_WRITE_IDLE_TIMEOUT_SEC: '120',
+        EVERMIND_BUILDER_DIRECT_TEXT_NO_OUTPUT_TIMEOUT_SEC: '240',
+        EVERMIND_BUILDER_DIRECT_TEXT_MAX_STREAM_TIMEOUT_SEC: '420',
         EVERMIND_PROGRESS_HEARTBEAT_SEC: '10',
         // Ensure Python can find user-installed packages
         PYTHONPATH: BACKEND_DIR,
@@ -808,8 +858,8 @@ function startBackend(pythonCmd) {
     const backendPid = backendProcess.pid;
     rememberManagedService('backend', backendPid, 'spawned');
 
-    backendProcess.stdout.on('data', (d) => console.log(`[Backend] ${d.toString().trim()}`));
-    backendProcess.stderr.on('data', (d) => console.error(`[Backend] ${d.toString().trim()}`));
+    backendProcess.stdout.on('data', (d) => relayChildStream('Backend', d, 'log', classifyBackendLogLevel));
+    backendProcess.stderr.on('data', (d) => relayChildStream('Backend', d, 'warn', classifyBackendLogLevel));
     backendProcess.on('error', (err) => {
         console.error(`[Backend] Failed to start: ${err.message}`);
     });

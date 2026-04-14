@@ -1,7 +1,8 @@
 'use client';
 
-import { useMemo, useEffect, useState, type CSSProperties } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import type { ChatMessage } from '@/lib/types';
+import { normalizeRuntimeModeForDisplay, runtimeLabelForDisplay } from '@/lib/runtimeDisplay';
 
 interface TaskSummaryStripProps {
     running: boolean;
@@ -52,31 +53,31 @@ export default function TaskSummaryStrip({
 }: TaskSummaryStripProps) {
     const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
 
-    const latestGoal = useMemo(() => {
-        for (let i = messages.length - 1; i >= 0; i -= 1) {
-            if (messages[i]?.role === 'user' && messages[i]?.content?.trim()) {
-                return messages[i].content.trim();
-            }
+    let latestGoal = '';
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        if (messages[i]?.role === 'user' && messages[i]?.content?.trim()) {
+            latestGoal = messages[i].content.trim();
+            break;
         }
-        return '';
-    }, [messages]);
+    }
 
-    const fallbackNodeLabel = useMemo(() => {
-        for (let i = messages.length - 1; i >= 0; i -= 1) {
-            const msg = messages[i];
-            if (msg?.sender === 'console' || msg?.role === 'user') continue;
-            const sender = String(msg?.sender || '').trim();
-            if (sender && sender !== 'System') return sender;
+    let fallbackNodeLabel = '';
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const msg = messages[i];
+        if (msg?.sender === 'console' || msg?.role === 'user') continue;
+        const sender = String(msg?.sender || '').trim();
+        if (sender && sender !== 'System') {
+            fallbackNodeLabel = sender;
+            break;
         }
-        return '';
-    }, [messages]);
+    }
 
-    // Live elapsed timer tick — must be before any early returns (Rules of Hooks)
+    // V4.3 PERF: Reduced from 1s to 5s to cut React re-renders
     const [, setTick] = useState(0);
     const shouldRender = running || !!taskTitle;
     useEffect(() => {
         if (!shouldRender) return;
-        const timer = setInterval(() => setTick(t => t + 1), 1000);
+        const timer = setInterval(() => setTick(t => t + 1), 5000);
         return () => clearInterval(timer);
     }, [shouldRender]);
 
@@ -87,7 +88,8 @@ export default function TaskSummaryStrip({
     const runStatus = STATUS_DOTS[effectiveStatus] || STATUS_DOTS.executing;
     const startTime = startedAt || 0;
     const normalizedStart = startTime < 10_000_000_000 ? startTime * 1000 : startTime;
-    const runtimeLabel = runtimeMode === 'openclaw' ? 'OPENCLAW' : runtimeMode === 'local' ? 'LOCAL' : String(runtimeMode || '').toUpperCase();
+    const normalizedRuntimeMode = normalizeRuntimeModeForDisplay(runtimeMode);
+    const runtimeLabel = runtimeLabelForDisplay(runtimeMode);
 
     const containerStyle: CSSProperties = {
         display: 'flex',
@@ -160,15 +162,15 @@ export default function TaskSummaryStrip({
             )}
 
             {/* Runtime badge */}
-            {runtimeMode && runtimeLabel && (
+            {normalizedRuntimeMode && runtimeLabel && (
                 <span style={{
                     fontSize: 8,
                     fontWeight: 700,
                     padding: '1px 5px',
                     borderRadius: 3,
-                    background: runtimeMode === 'openclaw' ? 'rgba(168, 85, 247, 0.12)' : 'rgba(79, 143, 255, 0.08)',
-                    color: runtimeMode === 'openclaw' ? '#a855f7' : 'var(--text3)',
-                    border: `1px solid ${runtimeMode === 'openclaw' ? 'rgba(168, 85, 247, 0.2)' : 'rgba(79, 143, 255, 0.12)'}`,
+                    background: normalizedRuntimeMode === 'openclaw' ? 'rgba(168, 85, 247, 0.12)' : 'rgba(79, 143, 255, 0.08)',
+                    color: normalizedRuntimeMode === 'openclaw' ? '#a855f7' : 'var(--text3)',
+                    border: `1px solid ${normalizedRuntimeMode === 'openclaw' ? 'rgba(168, 85, 247, 0.2)' : 'rgba(79, 143, 255, 0.12)'}`,
                     textTransform: 'uppercase',
                     letterSpacing: '0.05em',
                 }}>

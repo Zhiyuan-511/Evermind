@@ -22,6 +22,30 @@ def _load_template(name: str) -> str:
         pass
     return ""
 
+
+def load_reference_template(name: str) -> str:
+    """Load an HTML reference template for analyst/builder injection."""
+    path = _TEMPLATE_DIR / name
+    try:
+        if path.exists() and path.suffix in (".html", ".htm"):
+            content = path.read_text(encoding="utf-8").strip()
+            if len(content) > 12000:
+                return content[:12000] + "\n<!-- truncated -->"
+            return content
+    except Exception:
+        pass
+    return ""
+
+
+# Reference template registry: task_type → template filename
+TEMPLATE_REGISTRY: Dict[str, str] = {
+    "game_3d": "game_3d_shooter.html",
+    "game_2d": "game_2d_platformer.html",
+    "presentation": "presentation_reveal.html",
+    "website": "website_landing.html",
+    "dashboard": "dashboard_analytics.html",
+}
+
 # ─────────────────────────────────────────────────────────────────
 # Task Types
 # ─────────────────────────────────────────────────────────────────
@@ -109,9 +133,68 @@ _GAME_2D_SPRITE_OVERRIDE_RE = re.compile(
 )
 
 _GAME_3D_ASSET_PIPELINE_RE = re.compile(
-    r"(3d asset|3d model|3d character|3d enemy|model pack|weapon model|character model|enemy model|"
-    r"建模|模型|角色模型|怪物模型|武器模型|材质|贴图|纹理|rig|rigging|动画片段|animation clip|"
-    r"low[- ]?poly|low poly|voxel asset|体素素材|prop pack|environment pack)",
+    r"(3d asset(?: pack)?|3d model(?: pack)?|3d character model|3d enemy model|3d weapon model|"
+    r"3d concept(?: art)?(?: pack| sheet| turnaround)?|concept(?:ual)? asset(?: pack)?|concept sheet|turnaround sheet|"
+    r"model pack|weapon model|character model|enemy model|boss model|texture pack|material pack|"
+    r"environment pack|prop pack|gltf\b|glb\b|fbx\b|obj\b|rigging|animation clip|voxel asset|"
+    r"角色模型|怪物模型|武器模型|boss模型|场景模型|环境模型|模型包|贴图|纹理|材质包|动作包|动画片段|体素素材|"
+    r"概念资产包|概念包|概念图包|概念设定包|概念图|设定图|三视图|转面图|角色设定|怪物设定|武器设定|场景设定)",
+    re.IGNORECASE,
+)
+_GAME_3D_MODELING_HINT_RE = re.compile(
+    r"(建模|模型|精美建模|高模|低模|modeling|modeled|modelled|3d art|character art|enemy art|weapon art|"
+    r"texture(?: pack)?|material(?: pack)?|concept(?: art| sheet| pack)?|turnaround|orthographic|"
+    r"贴图|纹理|材质|概念图|设定图|三视图|转面图|角色设定|怪物设定|武器设定|场景设定|rigging|animation clip|动作包|动画片段)",
+    re.IGNORECASE,
+)
+_GAME_3D_ASSET_SCALE_HINT_RE = re.compile(
+    r"(角色|怪物|monster|enemy|boss|武器|枪械|weapon|gun|载具|vehicle|地图|大地图|map|关卡|level|"
+    r"场景|环境|environment|biome|npc|道具|prop|armor|盔甲|skin|皮肤)",
+    re.IGNORECASE,
+)
+_GAME_COMMERCIAL_SCALE_RE = re.compile(
+    r"(商业级|商业用途|commercial(?:[- ]grade|[- ]quality)?|production[- ]ready|ship[- ]ready|"
+    r"高质量|高规格|高保真|精美)",
+    re.IGNORECASE,
+)
+_GAME_ASSET_PIPELINE_NEGATION_RE = re.compile(
+    r"(不要(?:额外)?(?:素材|素材包|模型|模型包|贴图|纹理|图片|image(?:gen)?|asset pack)|"
+    r"不用(?:额外)?(?:素材|模型|贴图|纹理|图片)|不需要(?:素材|素材包|模型|贴图|纹理|图片)|"
+    r"先用(?:占位|placeholder|临时)(?:几何体|模型|素材|贴图)?|"
+    r"占位(?:几何体|模型|素材|贴图)|程序化(?:材质|几何体|geometry|mesh)|"
+    r"不要额外(?:图片节点|image node)|只要(?:单页|单文件|index\.html)|只做\s*index\.html)",
+    re.IGNORECASE,
+)
+_GAME_ENGINE_AVOID_RE = re.compile(
+    r"(不用引擎|不要引擎|无引擎|原生 canvas|纯 canvas|vanilla canvas|no engine|without engine|engine[- ]?free|simple game|简单小游戏|轻量小游戏)",
+    re.IGNORECASE,
+)
+_GAME_EXPLICIT_SINGLE_FILE_RE = re.compile(
+    r"(单页(?:即可|就行|就够|版本)?|单页面|single[- ]page|single page|one[- ]page|one page|"
+    r"单文件(?:html)?|single html|one html|self-contained index\.html|standalone index\.html|"
+    r"只需(?:要)?\s*index\.html|只做\s*index\.html|index\.html\s*(?:即可|就行|就够))",
+    re.IGNORECASE,
+)
+_GAME_SIMPLE_ENGINELESS_RE = re.compile(
+    r"(snake|贪吃蛇|tetris|俄罗斯方块|2048|sudoku|数独|minesweeper|扫雷|pong|breakout|打砖块|memory|记忆翻牌|wordle|拼字游戏|one[- ]?screen)",
+    re.IGNORECASE,
+)
+_GAME_2D_ENGINE_HINT_RE = re.compile(
+    r"(platformer|平台跳跃|metroidvania|roguelike|肉鸽|bullet hell|弹幕|tower defense|塔防|top[- ]?down|俯视|"
+    r"side[- ]?scroll|横版|shmup|shoot'?em up|boss fight|关卡制|tilemap|physics puzzle|物理益智|camera follow|phaser)",
+    re.IGNORECASE,
+)
+_GAME_3D_ENGINE_HINT_RE = re.compile(
+    r"(3d|three\.?js|webgl|webgpu|fps|first[- ]?person|third[- ]?person|racing|driving|flight|space sim|"
+    r"shader|voxel|open world|sandbox|survival|建模|模型|第一人称|第三人称|赛车|飞行|太空|着色器|体素|开放世界|沙盒|生存)",
+    re.IGNORECASE,
+)
+_GAME_EXISTING_PROJECT_RE = re.compile(
+    r"(fix|debug|patch|repair|edit|modify|refactor|continue|iterate|optimi[sz]e|update).*(repo|repository|codebase|project|app|site|game|artifact|build|file|index\.html|app\.js|game\.js|styles?\.css)|"
+    r"(existing|current|provided)\s+(repo|repository|codebase|project|app|site|game|artifact|build|file)|"
+    r"(修复|调试|补丁|编辑|修改|改一下|基于现有|继续基于|继续优化).*(仓库|代码|项目|游戏|页面|文件)|"
+    r"(现有|当前|已有)(仓库|代码|项目|游戏|页面|文件)|"
+    r"(仓库里|代码里|项目里|文件里)",
     re.IGNORECASE,
 )
 
@@ -211,9 +294,18 @@ def _topic_image_block(goal: str) -> str:
     if topic == "china_travel":
         lines.extend([
             "   2. LOCATION-SPECIFIC TRAVEL RULE:\n",
-            "      For landmark / destination / history pages, use ONLY user-provided or analyst-verified image URLs.\n",
-            "      Do NOT invent remote photo URLs for a city or landmark just because they look plausible.\n",
-            "      If exact place imagery is not confidently verified, ship a premium non-photo composition with location captioning instead of a wrong photo.\n",
+            "      For homepage / city / nature / attraction routes, prefer user-provided or analyst-verified URLs first.\n",
+            "      When the page topic clearly matches one of the curated categories below, you MAY use the corresponding curated photo URLs directly.\n",
+        ])
+        for category, ids in library.items():
+            formatted_ids = ", ".join(
+                f"https://images.unsplash.com/{pid}?w=800&q=80" for pid in ids[:3]
+            )
+            lines.append(f"      {category.upper()}: {formatted_ids}\n")
+        lines.extend([
+            "      Do NOT invent a remote photo URL for a specific city or landmark just because it looks plausible.\n",
+            "      If the route is about a precise place that is not confidently covered by the curated set or analyst/user-provided sources,\n",
+            "      ship a premium non-photo composition with location captioning instead of a wrong photo.\n",
         ])
     else:
         lines.append("   2. CURATED PHOTOS: When real photos are needed, use ONLY these topic-matched references or analyst-provided URLs:\n")
@@ -231,6 +323,8 @@ def _topic_image_block(goal: str) -> str:
         "   Important images should include loading='lazy' or loading='eager' intentionally, decoding='async', and referrerpolicy='no-referrer' for remote hosts.\n",
         "   Card media should default to aspect-ratio:16/9; portrait/editorial slots should explicitly declare a different ratio.\n",
         "   NEVER use empty SVG placeholder boxes or 'image-placeholder' divs as final visuals.\n",
+        "   5. PAGE VISUAL COVERAGE: every requested page needs one above-the-fold visual anchor plus one supporting visual/composition block.\n",
+        "      Premium website routes must not collapse into text-only pages or empty image slots.\n",
     ])
 
     return "".join(lines)
@@ -348,6 +442,30 @@ def wants_generated_assets(goal: str) -> bool:
     return bool(game_asset_pipeline_mode(goal))
 
 
+def _implicit_3d_asset_pipeline_intent(text: str, *, is_3d_or_procedural: bool, is_2d_override: bool) -> bool:
+    """Infer when a 3D game brief materially benefits from the asset pipeline.
+
+    This keeps generic 3D gameplay requests on the normal builder path, while
+    restoring asset nodes for heavier commercial/modeling briefs that mention
+    multiple asset domains (characters, monsters, weapons, maps, environments).
+    """
+    if not is_3d_or_procedural or is_2d_override:
+        return False
+    modeling_hint = bool(_GAME_3D_MODELING_HINT_RE.search(text))
+    commercial_scale = bool(_GAME_COMMERCIAL_SCALE_RE.search(text))
+    asset_scale_hits = {
+        str(match.group(0) or "").strip().lower()
+        for match in _GAME_3D_ASSET_SCALE_HINT_RE.finditer(text)
+        if str(match.group(0) or "").strip()
+    }
+    asset_scale_count = len(asset_scale_hits)
+    if modeling_hint and (commercial_scale or asset_scale_count >= 2):
+        return True
+    if commercial_scale and asset_scale_count >= 3:
+        return True
+    return False
+
+
 def game_asset_pipeline_mode(goal: str) -> str:
     """Return the asset-pipeline mode: '', 'image', '2d', or '3d'."""
     text = str(goal or "")
@@ -356,20 +474,406 @@ def game_asset_pipeline_mode(goal: str) -> str:
     profile = classify(text)
     if profile.task_type != "game":
         return "image" if _NON_GAME_GENERATED_ASSET_RE.search(text) else ""
+    if _GAME_ASSET_PIPELINE_NEGATION_RE.search(text):
+        return ""
 
     has_2d_asset_request = bool(_GAME_EXPLICIT_ASSET_PIPELINE_RE.search(text))
     has_3d_asset_request = bool(_GAME_3D_ASSET_PIPELINE_RE.search(text))
     is_3d_or_procedural = bool(_GAME_PROCEDURAL_OR_3D_RE.search(text))
     is_2d_override = bool(_GAME_2D_SPRITE_OVERRIDE_RE.search(text))
+    implicit_3d_asset_intent = _implicit_3d_asset_pipeline_intent(
+        text,
+        is_3d_or_procedural=is_3d_or_procedural,
+        is_2d_override=is_2d_override,
+    )
 
     if has_2d_asset_request and (not is_3d_or_procedural or is_2d_override):
         return "2d"
-    if has_3d_asset_request:
+    if has_3d_asset_request or implicit_3d_asset_intent:
         return "3d"
     if has_2d_asset_request:
         return "2d"
 
     return ""
+
+
+def game_runtime_mode(goal: str) -> str:
+    text = str(goal or "")
+    if not text:
+        return ""
+    if classify(text).task_type != "game":
+        return ""
+    if _GAME_ENGINE_AVOID_RE.search(text):
+        return "none"
+    if _GAME_3D_ENGINE_HINT_RE.search(text):
+        return "3d_engine"
+    if _GAME_SIMPLE_ENGINELESS_RE.search(text) and not _GAME_2D_ENGINE_HINT_RE.search(text):
+        return "none"
+    if _GAME_2D_ENGINE_HINT_RE.search(text):
+        return "2d_engine"
+    return "none"
+
+
+def game_runtime_contract(goal: str) -> str:
+    mode = game_runtime_mode(goal)
+    if not mode:
+        return ""
+    if mode == "3d_engine":
+        mode_summary = "Use a bundled 3D engine path."
+        mode_details = (
+            "- You MUST use Three.js for this brief. Canvas2D / getContext('2d') is STRICTLY FORBIDDEN. Do NOT attempt fake-3D with Canvas2D.\n"
+            "- Ship the runtime locally from the output directory: <script src='./_evermind_runtime/three/three.min.js'></script>\n"
+            "  or import * as THREE from './_evermind_runtime/three/three.module.js'. Never depend on a remote CDN as the only execution path.\n"
+        )
+    elif mode == "2d_engine":
+        mode_summary = "Use a bundled 2D engine path only if it materially helps gameplay."
+        mode_details = (
+            "- Prefer Phaser for camera-heavy 2D games, tilemaps, platformers, bullet hell, or physics-rich arcade gameplay.\n"
+            "- Ship the runtime locally from the output directory, e.g. <script src='./_evermind_runtime/phaser/phaser.min.js'></script>.\n"
+            "- If you add richer audio with Howler, load it locally from ./_evermind_runtime/howler/howler.min.js instead of a remote CDN.\n"
+        )
+    else:
+        mode_summary = "Stay engine-free."
+        mode_details = (
+            "- Use Canvas 2D / DOM / Web Audio directly. Do NOT add Phaser, Three.js, or other engines unless the brief explicitly escalates scope.\n"
+            "- Keep the export self-contained and robust in preview/offline static serving.\n"
+        )
+    combat_fairness_details = (
+        "- For shooter / TPS combat, startGame/resetGame must give the player a fair opening window: either keep enemy spawn radius safely beyond first attack range or gate enemy damage with a short spawn grace / invulnerability timer.\n"
+        "- When enemy spawns are randomized around the player, validate safety with true radial distance (Math.hypot / distanceTo), not only separate Math.abs(x) / Math.abs(z) checks.\n"
+        if goal_requires_combat_start_fairness(goal)
+        else ""
+    )
+    runtime_perf_details = (
+        "- Runtime stability baseline: clamp renderer pixel ratio (for example `renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))`) so the shipped game does not overload HiDPI laptops.\n"
+        "- Clamp recovered frame delta after tab/background stalls (for example `const dt = Math.min(clock.getDelta(), 0.05)`) so physics, camera, and projectiles do not jump or freeze after focus returns.\n"
+        "- Pause or heavily throttle non-essential updates when `document.hidden` changes, and resume cleanly on focus/visibility restore.\n"
+        "- Never let menu-time or pre-start loops call `renderer.render(...)` before renderer/scene/camera exist; either boot the loop after init/start or null-guard the render path until runtime state is ready.\n"
+        "- Pool or recycle bullets, tracers, hit sparks, shell casings, and other high-churn combat entities; do NOT let projectile / FX arrays grow without bounds.\n"
+        "- Cap simultaneous expensive effects (shadow-casting lights, particles, decals, projectiles) and provide a reduced-quality path on weak/mobile/touch devices instead of hitching the whole game.\n"
+    )
+    return (
+        "GAME RUNTIME / ENGINE CONTRACT:\n"
+        f"- Runtime mode for this brief: {mode}.\n"
+        f"- {mode_summary}\n"
+        f"{mode_details}"
+        "- Initialize player/camera/weapon/ammo gameplay state before the first HUD update, render() call, or requestAnimationFrame loop.\n"
+        "- Any menu-time or pre-start render/HUD code must null-guard optional runtime state (player, camera, ammo, weapon, HUD refs) until startGame/resetGame finishes.\n"
+        f"{combat_fairness_details}"
+        f"{runtime_perf_details}"
+        "- The exported project must run from the generated output folder without the customer installing any engine separately.\n"
+    )
+
+
+def gameplay_foundation_contract(goal: str) -> str:
+    text = str(goal or "")
+    if not text:
+        return ""
+    try:
+        if classify(text).task_type != "game":
+            return ""
+    except Exception:
+        return ""
+
+    lines = [
+        "GAMEPLAY FOUNDATION CONTRACT:\n"
+        "- Keep every <script> parseable from the first save. Do NOT leave dangling braces, half-written functions, or prose placeholders inside JavaScript.\n"
+        "- JavaScript syntax guard: NEVER emit dotted object-literal member keys such as `position.y: 1.2`, `rotation.z: yaw`, or `weapon.mesh.position.x: 3` inside `{ ... }`.\n"
+        "- Build the parent object first, then mutate nested fields on following statements.\n"
+        "- Keep combat/runtime arrays bounded: recycle bullets/projectiles/impact FX instead of creating unbounded per-frame garbage.\n"
+    ]
+    if game_runtime_mode(text) == "3d_engine":
+        lines.extend([
+            "- Standard TPS handedness baseline: when yaw=0 and the camera sits behind the player, use `forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).normalize()` and `right = new THREE.Vector3(forward.z, 0, -forward.x).normalize()`.\n",
+            "- Keep the default orbit/follow camera behind the player instead of in front of the avatar. A safe baseline is `const offset = new THREE.Vector3(0, 0, -cameraDistance); offset.applyAxisAngle(new THREE.Vector3(1, 0, 0), pitch); offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);`.\n",
+            "- Anti-mirror movement baseline: W = +forward, S = -forward, A = -right, D = +right.\n",
+        ])
+        if goal_requires_drag_camera_controls(text) or goal_requires_combat_start_fairness(text):
+            lines.extend([
+                "- For the common orbit-offset TPS camera, keep drag/pointer look on this sign convention unless the brief explicitly asks otherwise:\n"
+                "  ```js\n"
+                "  const forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).normalize();\n"
+                "  const right = new THREE.Vector3(forward.z, 0, -forward.x).normalize();\n"
+                "  const offset = new THREE.Vector3(0, 0, -cameraDistance);\n"
+                "  offset.applyAxisAngle(new THREE.Vector3(1, 0, 0), pitch);\n"
+                "  offset.applyAxisAngle(new THREE.Vector3(0, 1, 0), yaw);\n"
+                "  if (keys.KeyW) move.add(forward);\n"
+                "  if (keys.KeyS) move.sub(forward);\n"
+                "  if (keys.KeyA) move.sub(right);\n"
+                "  if (keys.KeyD) move.add(right);\n"
+                "  yaw += deltaX * sensitivity;\n"
+                "  pitch -= deltaY * sensitivity;\n"
+                "  pitch = THREE.MathUtils.clamp(pitch, -0.75, 1.05);\n"
+                "  ```\n",
+                "- Screen-space acceptance: drag right yaws right, drag left yaws left, and drag-up pitches the camera upward by default.\n",
+            ])
+    return "".join(lines)
+
+
+def gameplay_foundation_summary(goal: str) -> str:
+    text = str(goal or "")
+    if not text:
+        return ""
+    try:
+        if classify(text).task_type != "game":
+            return ""
+    except Exception:
+        return ""
+
+    summary = (
+        "FOUNDATION CONTRACT: keep every gameplay script parseable and never emit dotted object-literal member writes like `position.y: 1.2`; assign nested fields only after the parent object exists. "
+    )
+    summary += (
+        "Clamp frame delta after long background stalls and recycle bullets / high-churn FX so the shipped game stays responsive instead of freezing after a few combat bursts. "
+    )
+    if game_runtime_mode(text) == "3d_engine":
+        summary += (
+            "Use standard TPS handedness with `forward = new THREE.Vector3(Math.sin(yaw), 0, Math.cos(yaw)).normalize()` and `right = new THREE.Vector3(forward.z, 0, -forward.x).normalize()`, keep the default orbit camera behind the player with a negative-Z follow offset, then map W/S to +/-forward and A/D to -/+right. Never swap the strafe signs or the mouse orbit signs. "
+        )
+        if goal_requires_drag_camera_controls(text) or goal_requires_combat_start_fairness(text):
+            summary += (
+                "For orbit drag look, use `yaw += deltaX * sensitivity` and `pitch -= deltaY * sensitivity`, then clamp pitch so drag-up pitches up by default. "
+            )
+        if goal_requires_projectile_readability(text):
+            summary += (
+                "For shooter/TPS slices, keep a visible centered crosshair/reticle in gameplay, spawn shots from a muzzle or forward aim anchor, and show a readable tracer/projectile core plus muzzle/impact feedback. "
+            )
+    return summary
+
+
+def goal_needs_premium_3d_model_contract(goal: str) -> bool:
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    if game_runtime_mode(text) != "3d_engine":
+        return False
+    if premium_3d_builder_patch_preferred(text):
+        return True
+    return (
+        game_asset_pipeline_mode(text) == "3d"
+        or bool(_GAME_COMMERCIAL_SCALE_RE.search(text))
+    )
+
+
+def goal_requires_stage_progression_flow(goal: str) -> bool:
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    if goal_needs_premium_3d_model_contract(text):
+        return True
+    return bool(re.search(
+        r"(关卡|阶段|波次|通过页面|通关|结算|胜利|victory|mission complete|level complete|"
+        r"stage clear|pass page|boss phase|任务完成)",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def goal_requires_drag_camera_controls(goal: str) -> bool:
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    return bool(re.search(
+        r"(长按.*(?:屏幕|鼠标|右键).*(?:拉动|拖动|滑动|转动|旋转).*(?:视角|镜头)|"
+        r"(?:鼠标|屏幕|右键).{0,10}长按.{0,20}(?:拉动|拖动|滑动|转动|旋转).{0,12}(?:视角|镜头)|"
+        r"(?:按住|长按).{0,12}(?:鼠标|屏幕|右键).{0,24}(?:拖动|拉动|滑动).{0,12}(?:视角|镜头)|"
+        r"拉动转动视角|拖动.*视角|旋转.*视角|mouse drag|drag(?:ging)? .*camera|"
+        r"hold .*mouse.*drag|rotate view|mouse[- ]look|pointer[- ]drag)",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def goal_requires_combat_start_fairness(goal: str) -> bool:
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    if game_runtime_mode(text) != "3d_engine":
+        return False
+    if goal_needs_premium_3d_model_contract(text):
+        return True
+    return bool(re.search(
+        r"(射击|shooter|\bfps\b|\btps\b|third[- ]?person|first[- ]?person|枪|枪械|武器|子弹|bullet|projectile|"
+        r"enemy|monster|怪物|战斗|combat)",
+        text,
+        re.IGNORECASE,
+    ))
+
+
+def goal_requires_projectile_readability(goal: str) -> bool:
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    if re.search(
+        r"(射击|shooter|\bfps\b|\btps\b|枪|枪械|武器|火器|bullet|projectile|tracer|ammo|"
+        r"子弹|弹道|弹痕|曳光|准心|十字准星|reticle|crosshair|aim|瞄准|开火|fire mode|burst|semi[- ]?auto|auto fire)",
+        text,
+        re.IGNORECASE,
+    ):
+        return True
+    has_perspective = bool(re.search(
+        r"(third[- ]?person|first[- ]?person|第三人称|第一人称|\btps\b|\bfps\b)",
+        text,
+        re.IGNORECASE,
+    ))
+    has_combat_payload = bool(re.search(
+        r"(weapon|gun|enemy|monster|combat|battle|attack|枪械|武器|怪物|敌人|战斗|攻击)",
+        text,
+        re.IGNORECASE,
+    ))
+    if has_perspective and has_combat_payload:
+        return True
+    return False
+
+
+def game_3d_modeling_block(goal: str) -> str:
+    if game_runtime_mode(goal) != "3d_engine":
+        return ""
+    if goal_needs_premium_3d_model_contract(goal):
+        return (
+            "     Use THREE.Mesh / THREE.Group with authored-looking geometry; do NOT treat primitive meshes as the final shipped look.\n"
+            "     Premium 3D hero asset rule: the visible player, main enemy, and primary weapon must each include at least one silhouette-defining non-primitive geometry family such as THREE.Shape/ExtrudeGeometry,\n"
+            "     LatheGeometry, TubeGeometry, PolyhedronGeometry, custom BufferGeometry, or imported asset scene nodes.\n"
+            "     Those non-primitive geometries must appear in the player/enemy/weapon construction paths themselves; using them only on arena props, helper FX, or unrelated scenery does NOT satisfy the contract.\n"
+            "     A single token non-primitive detail on an otherwise Box/Sphere/Cylinder/Capsule-dominated hero silhouette still reads as placeholder-grade; the main torso/core/receiver mass must also be authored.\n"
+            "     Primitive-only Box/Cone/Cylinder/Sphere/Torus/Capsule stacks still fail quality even when grouped; keep those shapes for tiny pickups, debris, or hidden collision helpers only.\n"
+        )
+    return (
+        "     Use THREE.Mesh / THREE.Group with geometry that matches the role of each object.\n"
+        "     Primitive Box/Sphere/Cylinder/Cone/Capsule meshes are acceptable for greybox props, small pickups, hidden collision helpers, or rapid prototypes, but they are NOT a blanket requirement for every visible object.\n"
+        "     When the brief asks for stronger presentation, upgrade the visible player, enemy, and hero weapon into authored multi-part groups instead of lone primitive silhouettes.\n"
+    )
+
+
+def game_explicit_single_file_delivery(goal: str) -> bool:
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    if wants_multi_page(text):
+        return False
+    return bool(_GAME_EXPLICIT_SINGLE_FILE_RE.search(text))
+
+
+def game_existing_project_request(goal: str) -> bool:
+    """Return whether the brief is about patching an existing game/codebase."""
+    text = str(goal or "")
+    if not text:
+        return False
+    lower = text.lower()
+    if _GAME_EXISTING_PROJECT_RE.search(text):
+        return True
+    path_markers = (
+        "src/",
+        "app/",
+        "backend/",
+        "frontend/",
+        "public/",
+        "components/",
+        "pages/",
+        "scripts/",
+    )
+    return any(marker in lower for marker in path_markers)
+
+
+def game_direct_text_delivery_mode(goal: str) -> bool:
+    """Return whether direct single-file builder delivery is safe for this game brief."""
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    if wants_multi_page(text):
+        return False
+    if game_existing_project_request(text):
+        return False
+    runtime_mode = game_runtime_mode(text)
+    asset_mode = game_asset_pipeline_mode(text)
+    if runtime_mode == "3d_engine" and (
+        asset_mode == "3d" or bool(_GAME_COMMERCIAL_SCALE_RE.search(text))
+    ):
+        return False
+    return True
+
+
+def premium_3d_builder_patch_preferred(goal: str) -> bool:
+    """Return whether a large premium 3D builder brief should prefer file-based repair over direct text."""
+    text = str(goal or "")
+    if not text:
+        return False
+    try:
+        if classify(text).task_type != "game":
+            return False
+    except Exception:
+        return False
+    if wants_multi_page(text):
+        return False
+    if game_existing_project_request(text):
+        return False
+    if game_runtime_mode(text) != "3d_engine":
+        return False
+    asset_mode = game_asset_pipeline_mode(text)
+    if asset_mode == "3d" or bool(_GAME_COMMERCIAL_SCALE_RE.search(text)):
+        return True
+    premium_visual_markers = bool(re.search(
+        r"(精美建模|高质量建模|商业级|commercial(?:[- ]grade|[- ]quality)?|production[- ]ready|premium|"
+        r"高质量|精致|人物.*精致|怪物.*精致|建模必须|hero asset|authored model)",
+        text,
+        re.IGNORECASE,
+    ))
+    large_combat_scope = bool(re.search(
+        r"(射击|shooter|\bfps\b|\btps\b|third[- ]?person|第三人称|怪物|monster|枪|枪械|weapon|"
+        r"大地图|open world|arena|关卡|stage|wave|boss|level|敌人|enemy)",
+        text,
+        re.IGNORECASE,
+    ))
+    return premium_visual_markers and large_combat_scope
+
+
+def premium_3d_builder_direct_text_first_pass(goal: str) -> bool:
+    """Allow greenfield premium 3D single-page games to ship via direct text first."""
+    text = str(goal or "")
+    if not text:
+        return False
+    if not premium_3d_builder_patch_preferred(text):
+        return False
+    if wants_multi_page(text):
+        return False
+    if game_existing_project_request(text):
+        return False
+    return True
 
 
 def motion_contract(goal: str) -> str:
@@ -491,6 +995,11 @@ _COMMON_RULES = (
     "NEVER use emoji characters as UI icons, bullet decorations, status markers, or illustrations inside generated pages. "
     "Use inline SVG, CSS shapes, or typography instead. "
     "Before finishing, self-check for blank sections, placeholder copy, broken interactions, and weak visual polish.\n"
+    "OUTPUT EFFICIENCY: Keep planning or reasoning text between file_ops calls to ≤40 words. "
+    "Focus your token budget on actual code output, not narration.\n"
+    "REPORT OUTCOMES FAITHFULLY: If your file_ops write was rejected by a quality gate, "
+    "report the rejection honestly and fix the specific issues. Do NOT claim you wrote a "
+    "complete page when the write was blocked. Never characterize incomplete or broken work as done.\n"
 )
 
 
@@ -506,6 +1015,8 @@ PROFILES: Dict[str, TaskProfile] = {
             "   Define a multi-surface palette, not a single flat background.\n"
             "   Every page needs at least: base background, elevated surface/cards, and one accent surface or atmospheric glow.\n"
             "   Avoid pure black-only or pure white-only pages unless the brief explicitly demands brutal minimalism.\n"
+            "   The root page canvas must NOT default to pure #000/#111 or pure #fff without tinted secondary surfaces and accent color.\n"
+            "   Use 2-4 coordinated tones across body, cards, nav, footer, and CTA states so the site never reads as a flat monochrome slab.\n"
             "   Define ALL colors as CSS variables.\n"
             "B. Typography: use a deliberate local/system stack that fits the task. No remote font CDN is required by default.\n"
             "   Prefer premium serif + sans pairings for editorial/travel/luxury pages; use stronger CJK-friendly stacks for Chinese output.\n"
@@ -543,6 +1054,8 @@ PROFILES: Dict[str, TaskProfile] = {
             "feature/showcase cards must include reliable media or designed compositions; "
             "testimonials only need avatar images when testimonials are truly part of the design. "
             "Do not force extra photos into the page just to satisfy a quota.\n"
+            "PAGE VISUAL COVERAGE: every requested page must include one meaningful above-the-fold visual anchor and one supporting media/composition block. "
+            "Premium website routes must not ship as text-only pages.\n"
         ),
         quality=(
             "Must look like a premium landing page by a pro designer. Not a student project. "
@@ -554,7 +1067,8 @@ PROFILES: Dict[str, TaskProfile] = {
             "(6) Smooth but restrained motion on important sections, "
             "(7) Mobile-responsive layout with no overflow or nav wrapping failure, "
             "(8) No broken links between pages or oversized awkward images, "
-            "(9) External libraries are loaded only when prescribed and actually used."
+            "(9) External libraries are loaded only when prescribed and actually used, "
+            "(10) Every premium page keeps a clear visual anchor above the fold instead of collapsing into text-only content."
         ),
         analyst_hint=(
             "Visit 2-3 high-quality reference sites related to the goal. "
@@ -579,7 +1093,22 @@ PROFILES: Dict[str, TaskProfile] = {
         role="You are a senior game developer specializing in browser-based HTML5 games.",
         design_system=(
             "GAME DESIGN SYSTEM:\n"
-            "A. Use <canvas> for rendering (2D context) OR pure CSS/DOM for simple games\n"
+            "{{GAME_RUNTIME_BLOCK}}"
+            "A. RENDERING ENGINE SELECTION (determined by the runtime contract above):\n"
+            "   ★ If runtime mode is 3d_engine: You MUST use Three.js. Canvas2D getContext('2d') is FORBIDDEN.\n"
+            "     Load Three.js locally: <script src='./_evermind_runtime/three/three.min.js'></script>\n"
+            "     MANDATORY minimum scaffolding for 3D games:\n"
+            "       const scene = new THREE.Scene();\n"
+            "       const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);\n"
+            "       const renderer = new THREE.WebGLRenderer({antialias: true});\n"
+            "       renderer.setSize(window.innerWidth, window.innerHeight);\n"
+            "       document.body.appendChild(renderer.domElement);\n"
+            "       function animate() { requestAnimationFrame(animate); renderer.render(scene, camera); }\n"
+            "       animate();\n"
+            "{{GAME_3D_MODELING_BLOCK}}"
+            "     Use THREE.DirectionalLight + THREE.AmbientLight for lighting.\n"
+            "     NEVER use getContext('2d') or Canvas2D drawing calls when the runtime mode is 3d_engine.\n"
+            "   ★ If runtime mode is none or 2d_engine: Use <canvas> for rendering (2D context) OR pure CSS/DOM.\n"
             "B. Implement a proper game loop: requestAnimationFrame with delta time\n"
             "C. State machine: MENU → PLAYING → PAUSED → GAME_OVER\n"
             "D. Keyboard/touch input handling with event listeners on document (NOT canvas)\n"
@@ -587,29 +1116,21 @@ PROFILES: Dict[str, TaskProfile] = {
             "F. Collision detection (AABB or distance-based)\n"
             "G. Particle effects for impacts/explosions/scoring\n"
             "H. Sound: use Web Audio API oscillator for retro SFX (no external files)\n"
-            "   OR use howler.js CDN for richer audio: <script src='https://cdn.jsdelivr.net/npm/howler@2.2.4/dist/howler.min.js'></script>\n"
+            "   OR use local Howler for richer audio: <script src='./_evermind_runtime/howler/howler.min.js'></script>\n"
             "I. Color palette: use a cohesive game palette (e.g. pico-8 inspired)\n"
             "J. Pixel-perfect rendering: image-rendering: pixelated for retro; smooth for modern\n"
-            "K. Start screen with title + clickable 'Start Game' button (MUST use onclick handler)\n"
-            "   IMPORTANT: Start button MUST work via mouse click, not only keyboard!\n"
+            "K. Start screen with title + clickable 'Start Game' button\n"
+            "   IMPORTANT: Start button MUST work via mouse click, not only keyboard.\n"
+            "   Bind the click in script or explicitly expose the handler before the UI references it.\n"
             "   The game may run inside an iframe where keyboard focus requires a click first.\n"
             "L. Game over screen with score + high score (localStorage) + restart button (clickable)\n"
             "M. Keyboard listeners MUST be on document.addEventListener('keydown', ...) not on canvas\n"
             "N. Auto-focus: when game starts, call canvas.focus() and add tabindex='0' to canvas\n"
             "O. If custom art is required but no external asset generator is attached, create high-quality SVG or pixel placeholders\n"
             "   with a clear asset manifest so imagegen / spritesheet nodes can replace them later without re-architecting the game\n"
-            "P. RECOMMENDED ENGINE CDNs — choose based on game type:\n"
-            "   2D games (platformer, shooter, puzzle):\n"
-            "     <script src='https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js'></script>\n"
-            "     Phaser provides built-in physics (Arcade/Matter), sprite animation, tilemaps, and audio.\n"
-            "   3D games (FPS, racing, RPG):\n"
-            "     <script src='https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.min.js'></script>\n"
-            "     <script src='https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.cjs.min.js'></script>\n"
-            "     Three.js + cannon-es for 3D rendering with realistic physics.\n"
-            "   Free game assets (CC0, no attribution needed):\n"
+            "P. Free game assets (CC0, no attribution needed):\n"
             "     Kenney.nl assets: https://kenney.nl/assets (2D sprites, 3D models, UI, audio)\n"
             "     Use direct PNG/SVG URLs: https://kenney.nl/media/pages/assets/...\n"
-            "   For simple games (snake, tetris, minesweeper), vanilla Canvas 2D API is fine — no engine CDN needed.\n"
         ),
         blueprint=(
             "STRUCTURE:\n"
@@ -900,20 +1421,43 @@ def builder_system_prompt(goal: str) -> str:
         )
     if profile.task_type == "game":
         first_write_contract += (
-            "- For games, the first saved HTML must already render a playable shell: start screen, gameplay viewport/canvas or arena, HUD, and at least one visible gameplay entity or stage element.\n"
+            "- For games, the first saved HTML must already render a playable shell: start screen, gameplay viewport/canvas or arena, HUD, keyboard/pointer input bindings, a requestAnimationFrame loop, and at least one visible gameplay entity or stage element.\n"
+            "- Include a detectable fail/win/restart path in the saved game shell instead of deferring end-state handling to a later pass.\n"
             "- Keep game UI CSS lightweight on the first pass; prioritize working gameplay shell and visible body content over large decorative style systems.\n"
         )
+        if goal_requires_combat_start_fairness(goal):
+            first_write_contract += (
+                "- For shooter / TPS combat, the first saved shell must already prevent spawn-kill openings: keep enemy spawn safety based on true radial distance and/or add a short spawn grace / invulnerability window so QA can move, aim, and fire before unavoidable damage.\n"
+                "- If you ship drag-camera or pointer-lock look on a TPS / shooter brief, default to standard non-inverted vertical look: dragging or mousing upward pitches the camera upward unless the brief explicitly asks for inverted look.\n"
+            )
+        if goal_requires_stage_progression_flow(goal):
+            first_write_contract += (
+                "- When the brief asks for stages/clear/pass flow or is a premium 3D combat brief, the first saved shell must already include finite wave/stage progression plus a visible mission-complete / victory / pass screen. Endless survival only is rejected.\n"
+            )
+        if goal_requires_drag_camera_controls(goal):
+            first_write_contract += (
+                "- When the brief asks for drag-to-rotate camera control, the first saved shell must already wire real mouse/pointer drag or pointer-lock look that visibly rotates the gameplay camera.\n"
+                "- Control sign contract: dragging right must yaw the camera right, dragging left must yaw left, and forward movement must follow the camera-facing forward vector rather than feeling mirrored.\n"
+            )
 
     # §P1-FIX: Replace the {{TOPIC_IMAGE_BLOCK}} placeholder with topic-aware imagery
     design_system_with_images = profile.design_system.replace(
         "{{TOPIC_IMAGE_BLOCK}}", _topic_image_block(goal)
     )
+    design_system_with_runtime = design_system_with_images.replace(
+        "{{GAME_RUNTIME_BLOCK}}", game_runtime_contract(goal)
+    )
+    design_system_with_runtime = design_system_with_runtime.replace(
+        "{{GAME_3D_MODELING_BLOCK}}", game_3d_modeling_block(goal)
+    )
+    foundation_block = gameplay_foundation_contract(goal)
 
     return (
         f"{profile.role}\n"
         f"{_COMMON_RULES}"
         f"{css_block}"
-        f"{design_system_with_images}"
+        f"{design_system_with_runtime}"
+        f"{foundation_block}"
         f"{profile.blueprint}"
         f"{first_write_contract}"
         f"{multi_page_block}"
@@ -976,6 +1520,95 @@ def builder_task_description(goal: str) -> str:
         compact_first_save_line += (
             "For games, the first save must already show a visible start screen, gameplay viewport/canvas or arena, HUD, "
             "and at least one enemy/objective/stage element inside <body>; do not spend the whole first pass on CSS alone. "
+            "Initialize gameplay state before the first HUD/render tick, and null-guard menu-time player/camera/ammo reads until start/reset completes. "
+        )
+    game_runtime_line = ""
+    if profile.task_type == "game":
+        mode = game_runtime_mode(goal)
+        if mode == "3d_engine":
+            game_runtime_line = (
+                "ENGINE CONTRACT: this brief merits a bundled local 3D runtime. Use local Three.js under "
+                "./_evermind_runtime/three/three.min.js or ./_evermind_runtime/three/three.module.js; never rely on a remote CDN as the only runtime path. "
+            )
+        elif mode == "2d_engine":
+            game_runtime_line = (
+                "ENGINE CONTRACT: this brief may use a bundled local 2D engine when it materially improves gameplay. "
+                "If you use Phaser or Howler, load them from ./_evermind_runtime/... local files, not a remote CDN. "
+            )
+        else:
+            game_runtime_line = (
+                "ENGINE CONTRACT: keep this game engine-free unless the brief explicitly escalates scope. "
+                "Prefer Canvas 2D / DOM / Web Audio over unnecessary frameworks. "
+            )
+    premium_3d_model_contract = ""
+    if profile.task_type == "game" and goal_needs_premium_3d_model_contract(goal):
+        premium_3d_model_contract = (
+            "PREMIUM 3D MODEL CONTRACT: the visible player, main enemy, and primary weapon must read as authored hero assets, not placeholder geometry. "
+            "Each core model must include at least one silhouette-defining non-primitive geometry family such as THREE.Shape/ExtrudeGeometry, "
+            "LatheGeometry, TubeGeometry, PolyhedronGeometry, custom BufferGeometry, or imported asset scene nodes. "
+            "Those non-primitive geometry calls must appear in the player/enemy/weapon construction paths themselves; scenery-only usage does not satisfy the contract. "
+            "One stray non-primitive detail on an otherwise sphere/box/cylinder-dominated silhouette still fails; the main torso/core/receiver mass must also be authored. "
+            "Primitive-only Box/Cone/Cylinder/Sphere/Torus/Capsule stacks still fail quality even when grouped. "
+            "Use multiple MeshStandardMaterial zones with tuned roughness / metalness / emissive accents for those hero assets. "
+        )
+    stage_progression_contract = ""
+    if profile.task_type == "game" and goal_requires_stage_progression_flow(goal):
+        stage_progression_contract = (
+            "PROGRESSION CONTRACT: implement finite stage/wave progression and a visible victory / mission-complete / pass screen in the shipped first pass; endless survival only is rejected. "
+            "Use explicit progression state such as currentStage/stage/wave/currentWave/maxStages plus concrete advancement logic like nextWave()/nextStage()/stage++/wave++, so the progression is both real and reviewable. "
+        )
+    drag_camera_contract = ""
+    if profile.task_type == "game" and goal_requires_drag_camera_controls(goal):
+        drag_camera_contract = (
+            "CAMERA CONTROL CONTRACT: during gameplay, mouse/pointer drag or an active pointer-lock look path must visibly rotate the third-person camera; a static follow camera is not enough. "
+            "Dragging right must yaw the camera right around the player, dragging left must yaw left, dragging up must pitch the camera upward by default, and forward movement must follow the camera-facing forward vector rather than feeling mirrored. "
+        )
+    combat_fairness_contract = ""
+    if profile.task_type == "game" and goal_requires_combat_start_fairness(goal):
+        combat_fairness_contract = (
+            "COMBAT FAIRNESS CONTRACT: after Start/Restart, the player must get a fair opening window to move, aim, and fire before unavoidable damage lands. "
+            "Keep initial enemy spawn distance comfortably beyond first attack range and/or gate incoming damage with a short spawn grace / invulnerability timer. "
+            "If spawn positions are randomized around the player, use true radial distance checks instead of only per-axis Math.abs(x)/Math.abs(z) exclusions. "
+            "If you include drag-camera or pointer-lock look, dragging or mousing upward must pitch upward by default unless the brief explicitly requests inverted look. "
+        )
+    gameplay_foundation_line = gameplay_foundation_summary(goal) if profile.task_type == "game" else ""
+    runtime_perf_contract = ""
+    if profile.task_type == "game":
+        runtime_perf_contract = (
+            "RUNTIME PERFORMANCE CONTRACT: cap renderer pixel ratio, clamp large frame deltas after tab/background stalls, pause or throttle non-essential work on visibilitychange, and pool bullets/projectiles/impact FX so the shipped game does not hitch or freeze during combat. "
+        )
+    shooter_hud_contract = ""
+    if profile.task_type == "game" and goal_requires_projectile_readability(goal):
+        shooter_hud_contract = (
+            "AIM/HUD CONTRACT: keep a visible centered crosshair/reticle during gameplay, keep ammo/weapon state readable in the HUD, and align shot direction to the same aim vector represented by the reticle. "
+        )
+
+    if profile.task_type == "game":
+        return (
+            f"{scope_line}"
+            f"{delivery_line}"
+            f"{language_line}"
+            "Follow the gameplay, UI, and runtime rules from your system prompt. "
+            "Treat any upstream planner/analyst notes, loaded skills, reviewer blockers, and acceptance criteria as hard requirements, not optional inspiration. "
+            "Do not use emoji glyphs in the generated product; use SVG/CSS alternatives instead. "
+            "Make the result materially complete: real menus, real gameplay, real HUD/state feedback, and visible polish. "
+            "VISUAL CONTRACT: avoid a flat pure-black/pure-white shell; use layered surfaces, readable depth, and one coherent accent system so menus/HUD/world framing feel intentionally designed. "
+            f"{gameplay_foundation_line}"
+            f"{runtime_perf_contract}"
+            f"{premium_3d_model_contract}"
+            f"{stage_progression_contract}"
+            f"{drag_camera_contract}"
+            f"{combat_fairness_contract}"
+            f"{shooter_hud_contract}"
+            f"{compact_first_save_line}"
+            "FIRST PLAYABLE SLICE CONTRACT: visible start screen/menu -> initialized scene/camera/renderer -> look controls -> movement -> fire/action loop -> at least one enemy/objective/stage element -> HUD/status updates -> fail/win/restart path. "
+            "For shooter/TPS briefs, prioritize playable combat and readable camera feel before extra decorative set dressing. "
+            f"{game_runtime_line}"
+            "Keep styling preview-safe: use inline <style>/<script> plus bundled local runtime files when needed; do not depend on Tailwind CDN or a remote engine CDN as the primary execution path. "
+            "For game or asset-heavy tasks, preserve a clean asset manifest / placeholder structure so dedicated asset nodes can upgrade art without rewriting the core logic. "
+            "RESOURCE INTEGRITY: do NOT reference local files that do not exist in the output directory. Use bundled local runtime files that really ship with the export, inline SVG/CSS, or a clear replacement manifest instead of invented paths. "
+            "DELIVERY CONTRACT: output one complete playable file from <!DOCTYPE html> to </html>; do not output only a patch fragment, CSS shell, or JS tail. "
+            "After saving, briefly describe exactly what you built and what quality checks you satisfied."
         )
 
     return (
@@ -986,14 +1619,21 @@ def builder_task_description(goal: str) -> str:
         "Treat any upstream planner/analyst notes, loaded skills, reviewer blockers, and acceptance criteria as hard requirements, not optional inspiration. "
         "Do not use emoji glyphs in the generated product; use SVG/CSS alternatives instead. "
         "Make the result materially complete: real sections, real content, real interactions, and visible polish. "
+        "PALETTE CONTRACT: do NOT default the site to a flat pure-black (#000/#111) or pure-white (#fff) canvas. "
+        "Use at least three coordinated surfaces/tones plus an accent/glow so backgrounds, cards, nav, and footer feel intentionally designed. "
+        "PAGE VISUAL CONTRACT: every requested page must include at least one meaningful above-the-fold visual anchor and one supporting media/composition block; "
+        "do not leave image slots empty or reduce routes to text-only sections. "
+        "NAV CONTRACT: if the site has many pages, shorten labels, tighten spacing, or collapse responsively before allowing desktop nav to wrap awkwardly. "
         f"{compact_first_save_line}"
+        f"{game_runtime_line}"
         f"{motion_line}"
         "If the brief requests multiple pages/routes, do NOT fake it as one long landing page; every required page must exist and be reachable from navigation. "
         "Keep styling preview-safe: include an inline <style> block or write a local stylesheet file; do not depend on Tailwind CDN or other remote CSS runtimes as the main styling path. "
         "IMAGE SIZING: All <img> must have max-width:100%;height:auto. Hero images use object-fit:cover inside a fixed-height container (60vh). Unsplash URLs: heroes ?w=1600&h=900&fit=crop, cards ?w=800&h=500&fit=crop. Never use ?w=1920 or bare uncontained images. "
         "IMAGE TRUTH RULE: For landmark/location-specific imagery, use only user-provided or analyst-verified URLs. If you cannot verify an exact image, build a premium CSS/SVG composition instead of using a wrong photo. "
         "For game or asset-heavy tasks, preserve a clean asset manifest / placeholder structure so dedicated asset nodes can upgrade art without rewriting the core logic. "
-        "RESOURCE INTEGRITY: Do NOT reference local files (images, fonts, JS) that do not exist in the output directory; use CDN URLs, inline SVG, or CSS compositions instead of invented local paths like 'hero-bg.jpg' or 'logo.png'. "
+        "RESOURCE INTEGRITY: Do NOT reference local files (images, fonts, JS) that do not exist in the output directory. "
+        "Use bundled local runtime files only when they really ship with the export; otherwise use verified remote URLs, inline SVG, or CSS compositions instead of invented fake paths like 'hero-bg.jpg' or 'logo.png'. "
         "SVG SIZING: All inline <svg> elements MUST have explicit width and height attributes (e.g. width='48' height='48'). A viewBox alone is NOT enough — SVG without width/height expands to fill its container and creates oversized shapes. For decorative icons use 24-48px, for feature icons use 48-64px, for hero artwork use responsive CSS (max-width:200px). NEVER leave an SVG without width and height. "
         "After saving, briefly describe exactly what you built and what quality checks you satisfied."
     )
@@ -1003,6 +1643,7 @@ def analyst_description(goal: str) -> str:
     """Generate analyst task description based on task type."""
     profile = classify(goal)
     game_research_rule = ""
+    game_control_contract_rule = ""
     language = requested_output_language(goal)
     language_rule = ""
     if language == "en":
@@ -1021,7 +1662,23 @@ def analyst_description(goal: str) -> str:
             "- Do NOT browse playable web games as your primary workflow\n"
             "- Do NOT get stuck interacting with game portals or gameplay embeds\n"
             "- Prefer GitHub repos, source code, technical articles, tutorials, devlogs, postmortems, and engine/docs pages\n"
+            "- Prefer source_fetch first on GitHub/blob/raw files and docs pages so you can hand downstream nodes exact repo/file anchors\n"
+            "- source_fetch is Crawl4AI-backed when available: use it first for repo/docs harvesting before falling back to browser-only inspection\n"
             "- If you inspect a reference page, extract mechanics/UI/asset insights quickly and move on\n\n"
+        )
+        game_control_contract_rule = (
+            "GAME CONTROL / CAMERA CONTRACT:\n"
+            "- You MUST define the control frame in both world space and screen space so downstream builder cannot mirror controls\n"
+            "- Explicitly state what W/A/S/D (or arrows), click/tap, mouse drag, touch drag, and camera yaw/pitch do\n"
+            "- Include anti-mirror acceptance checks: with the camera behind the player, W moves away from camera, S moves toward camera, A moves screen-left, D moves screen-right\n"
+            "- For orbit/follow camera rigs, call out a behind-player baseline explicitly (for example `offset = new THREE.Vector3(0, 0, -cameraDistance)` before pitch/yaw rotation) so builder does not accidentally place the camera in front of the avatar\n"
+            "- For drag-look camera goals, dragging right must turn the view right and push a centered landmark toward the left side of the screen; dragging left must do the opposite\n"
+            "- State whether pitch is inverted or not; default is NOT inverted unless the brief says otherwise\n"
+            "- Include startup survivability checks: after pressing Start the player must have time to move, aim, and fire before unavoidable damage; define either a spawn grace window or a minimum enemy spawn radius that exceeds attack range\n"
+            "- If the game randomizes enemy spawn positions around the player, require true radial distance checks instead of only per-axis Math.abs(x)/Math.abs(z) exclusions\n"
+            "- Include runtime stability checks: cap renderer pixel ratio, clamp post-background delta time, pause/throttle on visibilitychange, and require bounded projectile/FX pools instead of unbounded arrays\n"
+            "- For premium 3D hero assets, forbid sphere/box/cylinder-dominated player, enemy, or weapon silhouettes with only one token non-primitive accent\n"
+            "- Include a permissive asset sourcing plan: licensed libraries first, authored procedural geometry / CSS-SVG fallback second\n\n"
         )
     # §P1-FIX: Inject topic-aware image curation directive for analyst
     topic = _detect_image_topic(goal)
@@ -1046,6 +1703,9 @@ def analyst_description(goal: str) -> str:
         "- For implementation-heavy tasks, include at least 1 GitHub/source-code reference when possible\n"
         "- Include at least 1 tutorial / official doc / technical writeup when possible\n"
         "- Use live product/brand websites only as supporting visual evidence, not the whole report\n\n"
+        "SOURCE_FETCH OPERATING RULE:\n"
+        "- source_fetch supports query search plus direct url/urls batch fetch; use query to discover, then fetch the exact repo/file/doc URLs you want downstream nodes to implement from\n"
+        "- When multiple builders exist, explicitly allocate different fetched sources to different builder handoffs instead of dumping one undifferentiated source list\n\n"
         "CRITICAL ROLE: You are not only researching. You are the EXECUTION ORCHESTRATOR — "
         "writing optimized downstream execution briefs, skill activation plans, and acceptance criteria "
         "for the other agents. Your report will be injected directly into builder/reviewer/tester/debugger prompts.\n\n"
@@ -1054,11 +1714,12 @@ def analyst_description(goal: str) -> str:
         "- separate hard constraints from optional inspiration\n"
         "- convert vague taste words into executable instructions\n"
         "- define what success looks like so reviewer/tester can enforce it\n"
-        "- specify which CDN libraries each builder should load (GSAP, AOS, anime.js, etc.) and how to use them\n"
+        "- specify which runtime libraries each builder should load and whether they must be bundled locally (for games) or may stay remote (for websites/docs) and how to use them\n"
         "- specify exactly which pages/routes to create and what navigation structure connects them\n\n"
         "OPERATING MODEL:\n"
         "- Treat this as a lightweight SOP package for the downstream nodes, not a loose inspiration memo\n"
         "- Explicitly define deliverables, completion criteria, integration order, and likely risks\n"
+        "- Treat any upstream planner skeleton or node brief as a hard contract unless it directly conflicts with the user's latest request\n"
         "- Assign specific responsibilities to each builder (if multiple) with clear scope boundaries\n\n"
         "SKILL ACTIVATION MANDATE:\n"
         "- You MUST include a <skill_activation_plan> section specifying which skills each node should activate\n"
@@ -1075,6 +1736,7 @@ def analyst_description(goal: str) -> str:
         "- NAVIGATION COMPLETENESS: If requesting N pages, specify all N page filenames and ensure index.html navigation links to ALL of them. Missing nav links is a blocking failure.\n\n"
         f"{language_rule}"
         f"{game_research_rule}"
+        f"{game_control_contract_rule}"
         "Output MUST use the exact XML tags below so downstream nodes can parse them:\n"
         "<reference_sites>\n"
         "- each visited URL + what it is useful for\n"
@@ -1084,7 +1746,7 @@ def analyst_description(goal: str) -> str:
         "- typography direction\n"
         "- layout rhythm\n"
         "- motion principles\n"
-        "- CDN libraries to load and their purpose\n"
+        "- runtime libraries to load (local path or CDN) and their purpose\n"
         "</design_direction>\n"
         "<non_negotiables>\n"
         "- concrete quality bar and hard constraints\n"
@@ -1105,20 +1767,90 @@ def analyst_description(goal: str) -> str:
         "<risk_register>\n"
         "- likely failure points, hidden risks, and what the downstream nodes should watch carefully\n"
         "</risk_register>\n"
+        + (
+            # ── P0 FIX 2026-04-04: Task-type specific reference code & architecture tags ──
+            # Inspired by MetaGPT's Architect→Engineer pattern: analyst provides executable
+            # code blueprints so builders don't start from scratch.
+            "<reference_code_snippets>\n"
+            "MANDATORY for quality: provide working, copy-paste-ready code patterns (30-80 lines each) for:\n"
+            "- Game loop: requestAnimationFrame structure with init/update/render cycle\n"
+            "- State machine: all game states (MENU, PLAYING, PAUSED, GAME_OVER) with transitions\n"
+            "- Input system: keyboard/mouse/touch binding pattern for this specific game type\n"
+            "- Core mechanic: collision detection, scoring, or physics pattern matching the game genre\n"
+            "- HUD rendering: health bar, ammo counter, score display pattern\n"
+            "Code must compile standalone — no pseudocode, no 'implement here' placeholders.\n"
+            "</reference_code_snippets>\n"
+            "<game_mechanics_spec>\n"
+            "- State machine: list ALL states and their transition triggers\n"
+            "- Entity system: player, enemies, projectiles, collectibles — properties and update behaviors\n"
+            "- Scoring & progression: how score increments, level progression, difficulty curve formula\n"
+            "- Win/lose conditions: exact trigger conditions and restart/continue flow\n"
+            "- Control mapping: WASD/arrows, mouse aim, space=jump, click=shoot, etc.\n"
+            "- Combat fairness: startup safe window, enemy spawn distance rule, damage gating / invulnerability timing, and how the player avoids unavoidable spawn-kill openings\n"
+            "</game_mechanics_spec>\n"
+            "<control_frame_contract>\n"
+            "- Define world axes / camera frame / screen-space expectations so movement and drag camera controls are not mirrored\n"
+            "- State exact anti-mirror acceptance checks for W/A/S/D, drag right/left, drag up/down, and click/tap actions\n"
+            "- Specify whether movement is camera-relative or world-relative and what 'forward' means at match start\n"
+            "- Include startup safety expectations: first enemy contact timing, minimum spawn radius vs attack radius, and whether spawn grace / invulnerability is required\n"
+            "</control_frame_contract>\n"
+            "<asset_sourcing_plan>\n"
+            "- List permissive asset/model/reference libraries, source_fetch-first URLs or repo/file anchors, and why they are allowed\n"
+            "- Define fallback when images/models cannot be generated: authored procedural geometry, CSS/SVG compositions, or builder-side replacement hooks\n"
+            "- State license expectations and runtime asset keys / filenames that must remain stable downstream\n"
+            "</asset_sourcing_plan>\n"
+            if profile.task_type == "game" else
+            "<reference_code_snippets>\n"
+            "Provide working code patterns for:\n"
+            "- Reveal.js initialization with recommended config (theme, transition, plugins)\n"
+            "- Sample slide with layout pattern (title + 2-column content + speaker notes)\n"
+            "- Navigation and progress bar configuration\n"
+            "</reference_code_snippets>\n"
+            "<slide_deck_spec>\n"
+            "- Total slide count and narrative arc (intro → body → conclusion)\n"
+            "- Transition type per section (fade, slide, convex, zoom)\n"
+            "- Reveal.js plugins to load: RevealMarkdown, RevealHighlight, RevealNotes, etc.\n"
+            "- Speaker notes strategy\n"
+            "</slide_deck_spec>\n"
+            if profile.task_type == "presentation" else
+            "<reference_code_snippets>\n"
+            "Provide working code patterns (20-50 lines each) for:\n"
+            "- The most complex interactive component (form validation, carousel, modal, filter)\n"
+            "- Responsive layout: CSS Grid/Flexbox pattern for the main page structure\n"
+            "- Navigation: responsive nav with mobile hamburger menu pattern\n"
+            "</reference_code_snippets>\n"
+            "<component_tree>\n"
+            "- Page hierarchy and shared components (nav, footer, sidebar)\n"
+            "- Responsive breakpoints: mobile (<768px), tablet (768-1024px), desktop (>1024px)\n"
+            "- CSS custom properties / design tokens for consistent theming\n"
+            "</component_tree>\n"
+            if profile.task_type == "website" else
+            "<reference_code_snippets>\n"
+            "Provide working code patterns for:\n"
+            "- Primary chart initialization (Chart.js or D3) with responsive config\n"
+            "- Filter/state management pattern for dashboard interactivity\n"
+            "- KPI card component with trend indicator\n"
+            "</reference_code_snippets>\n"
+            if profile.task_type == "dashboard" else
+            ""
+        ) +
         "<builder_1_handoff>\n"
         "- scope, priorities, must-build sections, visual rules, implementation hints\n"
+        "- include 2-4 exact source URLs or repo/file anchors assigned to this builder and what each one is for\n"
         "- specific image URLs to use for each section\n"
-        "- CDN libraries to load with exact script tags\n"
+        "- runtime libraries to load with exact local paths or script tags\n"
         "</builder_1_handoff>\n"
         "<builder_2_handoff>\n"
         "- scope, priorities, must-build sections, visual rules, implementation hints\n"
+        "- include 2-4 exact source URLs or repo/file anchors assigned to this builder and what each one is for\n"
         "- if the final plan only uses one builder, mark this as N/A and put the full end-to-end build contract into builder_1_handoff\n"
         "</builder_2_handoff>\n"
+        "- If the runtime plan contains 3+ builders, also emit additional tags like <builder_3_handoff>, <builder_4_handoff>, etc. to match the downstream builder slots exactly.\n"
         "<reviewer_handoff>\n"
         "- what quality issues to be strict about\n"
         "- image relevance check: verify all images match the site topic\n"
         "- navigation completeness check: verify all requested pages are linked from nav\n"
-        "- skill compliance check: verify prescribed CDN libraries are loaded and used\n"
+        "- skill/runtime compliance check: verify prescribed local runtimes or libraries are loaded and used\n"
         "</reviewer_handoff>\n"
         "<tester_handoff>\n"
         "- what interactions and edge cases must be verified\n"

@@ -67,22 +67,23 @@ DEFAULT_SETTINGS = {
         "screenCapture": True,
         "maxTimeout": 30,
     },
-    "default_model": "kimi-coding",
+    "default_model": "gpt-5.4-mini",
     "node_model_preferences": {
-        "router": ["gpt-5.4", "kimi-coding"],
-        "planner": ["gpt-5.4", "kimi-coding"],
-        "analyst": ["kimi-coding", "gpt-5.4"],
-        "uidesign": ["kimi-coding", "gpt-5.4"],
-        "scribe": ["kimi-coding", "gpt-5.4"],
-        "builder": ["kimi-coding"],
-        "polisher": ["kimi-coding"],
-        "reviewer": ["kimi-coding"],
-        "tester": ["kimi-coding"],
-        "debugger": ["kimi-coding"],
-        "deployer": ["kimi-coding"],
-        "imagegen": ["kimi-coding"],
-        "spritesheet": ["kimi-coding"],
-        "assetimport": ["kimi-coding"],
+        "router": ["gpt-5.4-mini", "kimi-coding"],
+        "planner": ["gpt-5.4-mini", "kimi-coding"],
+        "analyst": ["gpt-5.4-mini", "kimi-coding"],
+        "uidesign": ["gpt-5.4-mini", "kimi-coding"],
+        "scribe": ["gpt-5.4-mini", "kimi-coding"],
+        "builder": ["gpt-5.4-mini", "kimi-coding"],
+        "polisher": ["gpt-5.4-mini", "kimi-coding"],
+        "reviewer": ["gpt-5.4-mini", "kimi-coding"],
+        "tester": ["gpt-5.4-mini", "kimi-coding"],
+        "debugger": ["gpt-5.4-mini", "kimi-coding"],
+        "deployer": ["gpt-5.4-mini", "kimi-coding"],
+        "imagegen": ["gpt-5.4-mini", "kimi-coding"],
+        "spritesheet": ["gpt-5.4-mini", "kimi-coding"],
+        "assetimport": ["gpt-5.4-mini", "kimi-coding"],
+        "merger": ["gpt-5.4-mini", "kimi-coding"],
     },
     "max_retries": 3,
     "tester_run_smoke": True,
@@ -95,10 +96,37 @@ DEFAULT_SETTINGS = {
     "builder": {
         "enable_browser_search": False,
     },
+    "analyst": {
+        "preferred_sites": [
+            "https://github.com",
+            "https://github.com/KhronosGroup/glTF-Sample-Assets",
+            "https://github.com/gdquest-demos/godot-4-3d-third-person-controller",
+            "https://github.com/donmccurdy/three-pathfinding",
+            "https://github.com/Mugen87/yuka",
+            "https://github.com/D4Vinci/Scrapling",
+            "https://threejs.org",
+            "https://docs.pmnd.rs",
+            "https://developer.mozilla.org",
+            "https://kenney.nl",
+            "https://quaternius.com",
+            "https://ambientcg.com",
+        ],
+        "crawl_intensity": "medium",
+        "use_scrapling_when_available": True,
+        "enable_query_search": True,
+    },
     "image_generation": {
         "comfyui_url": "",
         "workflow_template": "",
     },
+    "cli_mode": {
+        "enabled": False,
+        "preferred_cli": "",           # "" = auto-select per node type
+        "preferred_model": "",         # "" = use CLI's default model
+        "detected_clis": {},           # Populated by /api/cli/detect
+        "node_cli_overrides": {},      # {"builder": {"cli": "claude", "model": "sonnet"}, ...}
+    },
+    "ui_language": "zh",
 }
 
 _cached_cipher: Optional[Fernet] = None

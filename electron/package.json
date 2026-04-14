@@ -1,6 +1,6 @@
 {
     "name": "evermind-desktop",
-    "version": "2.0.0",
+    "version": "3.0.0",
     "description": "Evermind — AI Workflow Orchestrator Desktop App",
     "main": "main.js",
     "author": "Evermind Team",
@@ -10,7 +10,13 @@
         "build:frontend": "cd ../frontend && npm run build",
         "prepare:frontend-bundle": "node scripts/prepare_frontend_bundle.js",
         "sign:app": "node scripts/ad_hoc_sign_app.js",
+        "sync:local-app": "node scripts/sync_local_app_resources.js",
         "sync:desktop": "node scripts/sync_desktop_app.js",
+        "doctor:runtime": "python3 ../backend/scripts/release_doctor.py",
+        "doctor:runtime:json": "python3 ../backend/scripts/release_doctor.py --json",
+        "doctor:report": "python3 ../backend/scripts/release_doctor.py --full-json --write-report",
+        "hardening:test": "python3 -m pytest ../backend/tests/test_release_doctor.py ../backend/tests/test_packaged_backend_sync.py ../backend/tests/test_hot_reload.py ../backend/tests/test_task_classifier.py ../backend/tests/test_workflow_launch.py -q",
+        "hardening:check": "npm run hardening:test && npm run pack && npm run sync:local-app && npm run sync:desktop && python3 ../backend/scripts/release_doctor.py --strict",
         "pack": "npm run build:frontend && npm run prepare:frontend-bundle && electron-builder --dir && npm run sign:app",
         "pack:desktop": "npm run pack && npm run sync:desktop",
         "dist": "npm run build:frontend && npm run prepare:frontend-bundle && electron-builder && npm run sign:app",
@@ -62,6 +68,7 @@
                 "filter": [
                     "**/*.py",
                     "agent_skills/**",
+                    "runtime_vendor/**",
                     "requirements.txt",
                     ".env.example",
                     "plugins/**"

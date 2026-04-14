@@ -37,3 +37,16 @@ npm-debug.log*
 
 # Docker
 docker-compose.override.yml
+
+# Electron app binary artifacts (too large for GitHub)
+Evermind.app/Contents/Frameworks/
+Evermind.app/Contents/MacOS/
+Evermind.app/Contents/_CodeSignature/
+Evermind.app/Contents/Resources/app.asar
+Evermind.app/Contents/Resources/icon.icns
+Evermind.app/Contents/Info.plist
+Evermind.app/Contents/PkgInfo
+
+# Claude config
+.claude/
+CLAUDE.md

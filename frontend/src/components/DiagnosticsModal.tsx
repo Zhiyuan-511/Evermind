@@ -10,6 +10,54 @@ interface DiagnosticsModalProps {
     lang: 'en' | 'zh';
 }
 
+interface ReleaseIssue {
+    severity: string;
+    code: string;
+    message: string;
+    hint?: string;
+}
+
+interface ReleaseDoctor {
+    status: string;
+    ready: boolean;
+    summary?: {
+        fatal?: number;
+        warning?: number;
+        passed?: number;
+        total_checks?: number;
+    };
+    issues?: ReleaseIssue[];
+    models?: {
+        default_model?: string;
+        default_model_ready?: boolean;
+        gpt_5_4_ready?: boolean;
+        gpt_5_4_referenced?: boolean;
+        uncovered_nodes?: string[];
+    };
+    artifacts?: {
+        runtime_vendor?: {
+            ok?: boolean;
+        };
+        local_app_sync?: {
+            status?: string;
+        };
+        desktop_sync?: {
+            status?: string;
+        };
+        dist_frontend_bundle?: {
+            exists?: boolean;
+        };
+        desktop_frontend_bundle?: {
+            exists?: boolean;
+        };
+    };
+    config?: {
+        enabled_relay_count?: number;
+        image_generation_available?: boolean;
+        browser_use_enabled?: boolean;
+    };
+}
+
 interface DiagnosticsData {
     status: string;
     output_dir: string;
@@ -37,6 +85,7 @@ interface DiagnosticsData {
         browser_headful?: boolean | null;
         reviewer_tester_force_headful?: boolean | null;
     };
+    release?: ReleaseDoctor;
 }
 
 interface PreviewValidationResult {
@@ -82,6 +131,58 @@ function StatusPill({ ok, label }: { ok: boolean; label: string }) {
             {label}
         </span>
     );
+}
+
+function SignalPill({ tone, label }: { tone: 'ok' | 'warn' | 'fail' | 'info'; label: string }) {
+    const theme = {
+        ok: {
+            color: 'var(--green)',
+            border: 'rgba(34,197,94,0.35)',
+            background: 'rgba(34,197,94,0.08)',
+        },
+        warn: {
+            color: 'var(--orange)',
+            border: 'rgba(245,158,11,0.35)',
+            background: 'rgba(245,158,11,0.08)',
+        },
+        fail: {
+            color: 'var(--red)',
+            border: 'rgba(239,68,68,0.35)',
+            background: 'rgba(239,68,68,0.08)',
+        },
+        info: {
+            color: 'var(--text2)',
+            border: 'rgba(148,163,184,0.28)',
+            background: 'rgba(148,163,184,0.08)',
+        },
+    }[tone];
+
+    return (
+        <span
+            style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 8px',
+                borderRadius: 999,
+                fontSize: 10,
+                border: `1px solid ${theme.border}`,
+                color: theme.color,
+                background: theme.background,
+            }}
+        >
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: theme.color }} />
+            {label}
+        </span>
+    );
+}
+
+function toneFromStatus(status: string | undefined): 'ok' | 'warn' | 'fail' | 'info' {
+    const normalized = String(status || '').trim().toLowerCase();
+    if (normalized === 'ok' || normalized === 'pass') return 'ok';
+    if (normalized === 'warn' || normalized === 'warning' || normalized === 'missing') return 'warn';
+    if (normalized === 'fail' || normalized === 'fatal' || normalized === 'drift') return 'fail';
+    return 'info';
 }
 
 export default function DiagnosticsModal({ open, onClose, lang }: DiagnosticsModalProps) {
@@ -188,6 +289,97 @@ export default function DiagnosticsModal({ open, onClose, lang }: DiagnosticsMod
 
                     {data && (
                         <>
+                            {data.release && (
+                                <div className="glass" style={{ padding: 12, borderRadius: 10 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: 'var(--text1)' }}>
+                                        {t('Release Doctor', '发布体检')}
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                                        <SignalPill
+                                            tone={toneFromStatus(data.release.status)}
+                                            label={
+                                                data.release.status === 'ok'
+                                                    ? t('Release Ready', '可发布')
+                                                    : data.release.status === 'fail'
+                                                        ? t('Release Blocked', '阻塞发布')
+                                                        : t('Release Warning', '发布警告')
+                                            }
+                                        />
+                                        <SignalPill
+                                            tone={data.release.models?.default_model_ready ? 'ok' : 'fail'}
+                                            label={`${t('Default Model', '默认模型')}: ${data.release.models?.default_model || '-'}`}
+                                        />
+                                        <SignalPill
+                                            tone={
+                                                data.release.models?.gpt_5_4_ready || !data.release.models?.gpt_5_4_referenced
+                                                    ? 'ok'
+                                                    : 'warn'
+                                            }
+                                            label={t('GPT-5.4 Route', 'GPT-5.4 路由')}
+                                        />
+                                        <SignalPill
+                                            tone={data.release.config?.image_generation_available ? 'ok' : 'warn'}
+                                            label={t('Image Backend', '图片后端')}
+                                        />
+                                        <SignalPill
+                                            tone={data.release.artifacts?.runtime_vendor?.ok ? 'ok' : 'fail'}
+                                            label={t('Runtime Vendor', '运行时资源')}
+                                        />
+                                        <SignalPill
+                                            tone={toneFromStatus(data.release.artifacts?.local_app_sync?.status)}
+                                            label={t('Local App Sync', '本地 App 同步')}
+                                        />
+                                        <SignalPill
+                                            tone={toneFromStatus(data.release.artifacts?.desktop_sync?.status)}
+                                            label={t('Desktop Sync', '桌面 App 同步')}
+                                        />
+                                    </div>
+                                    <div style={{ marginTop: 10, fontSize: 10, color: 'var(--text3)' }}>
+                                        {t('Fatal', '致命问题')}: {data.release.summary?.fatal ?? 0}
+                                        {' · '}
+                                        {t('Warnings', '警告')}: {data.release.summary?.warning ?? 0}
+                                        {' · '}
+                                        {t('Passed', '通过')}: {data.release.summary?.passed ?? 0}/{data.release.summary?.total_checks ?? 0}
+                                        {' · '}
+                                        {t('Relays', '中转')}: {data.release.config?.enabled_relay_count ?? 0}
+                                    </div>
+                                    {!!data.release.models?.uncovered_nodes?.length && (
+                                        <div style={{ marginTop: 8, fontSize: 10, color: 'var(--orange)' }}>
+                                            {t('Nodes without viable model', '没有可用模型的节点')}:
+                                            {' '}
+                                            <code>{data.release.models.uncovered_nodes.join(', ')}</code>
+                                        </div>
+                                    )}
+                                    {!!data.release.issues?.length && (
+                                        <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
+                                            {data.release.issues.slice(0, 6).map((issue, index) => (
+                                                <div
+                                                    key={`${issue.code}-${index}`}
+                                                    style={{
+                                                        padding: '8px 10px',
+                                                        borderRadius: 8,
+                                                        border: `1px solid ${issue.severity === 'fatal' ? 'rgba(239,68,68,0.22)' : 'rgba(245,158,11,0.22)'}`,
+                                                        background: issue.severity === 'fatal' ? 'rgba(239,68,68,0.06)' : 'rgba(245,158,11,0.06)',
+                                                    }}
+                                                >
+                                                    <div style={{ fontSize: 11, fontWeight: 700, color: issue.severity === 'fatal' ? 'var(--red)' : 'var(--orange)' }}>
+                                                        {issue.code || (issue.severity === 'fatal' ? 'fatal' : 'warning')}
+                                                    </div>
+                                                    <div style={{ fontSize: 11, color: 'var(--text2)', marginTop: 4 }}>
+                                                        {issue.message}
+                                                    </div>
+                                                    {issue.hint && (
+                                                        <div style={{ fontSize: 10, color: 'var(--text3)', marginTop: 4 }}>
+                                                            {issue.hint}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
                             <div className="glass" style={{ padding: 12, borderRadius: 10 }}>
                                 <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: 'var(--text1)' }}>
                                     {t('Service Status', '服务状态')}

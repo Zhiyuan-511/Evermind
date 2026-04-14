@@ -5,6 +5,7 @@ import { Handle, Position, useReactFlow, type NodeProps } from '@xyflow/react';
 import { NODE_TYPES } from '@/lib/types';
 import type { CanvasNodeStatus } from '@/lib/types';
 import { buildReadableNodePreview } from '@/lib/nodeOutputHumanizer';
+import { normalizeRuntimeModeForDisplay } from '@/lib/runtimeDisplay';
 
 // ── V1 Status Config ──
 const STATUS_CONFIG: Record<CanvasNodeStatus, {
@@ -62,6 +63,19 @@ function formatDuration(startMs: number, endMs: number): string {
     return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
 }
 
+function formatLatency(ms: number): string {
+    if (!ms) return '';
+    if (ms >= 60000) return `${(ms / 60000).toFixed(1)}m`;
+    if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+    return `${Math.round(ms)}ms`;
+}
+
+function getLatencyColor(ms: number): string {
+    if (ms <= 10000) return '#40d67c';   // green: fast (<10s)
+    if (ms <= 30000) return '#f59e0b';   // amber: moderate (<30s)
+    return '#ff4f6a';                     // red: slow (>30s)
+}
+
 // Preset model list for per-node selection
 const AVAILABLE_MODELS = [
     { id: 'gpt-5.4', label: 'GPT-5.4', provider: 'OpenAI' },
@@ -98,6 +112,11 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const startedAt = data.startedAt as number || 0;
     const endedAt = data.endedAt as number || 0;
     const durationText = startedAt > 0 ? formatDuration(startedAt, endedAt) : '';
+    const codeLines = data.codeLines as number || 0;
+    const codeKb = data.codeKb as number || 0;
+    const codeLanguages = (data.codeLanguages as string[]) || [];
+    const modelLatencyMs = data.modelLatencyMs as number || 0;
+    const charsPerSec = data.charsPerSec as number || 0;
     const displayOutput = buildReadableNodePreview({
         lang: lang === 'zh' ? 'zh' : 'en',
         nodeType,
@@ -121,8 +140,9 @@ function AgentNode({ id, data, selected }: NodeProps) {
     // Get V1 status config
     const sc = getStatusConfig(rawStatus);
     const isRunning = rawStatus === 'running';
-    const hasMetrics = tokensUsed > 0 || cost > 0 || startedAt > 0;
-    const isOpenClaw = String(data.runtime || '').toLowerCase() === 'openclaw';
+    const hasMetrics = tokensUsed > 0 || cost > 0 || startedAt > 0 || modelLatencyMs > 0 || charsPerSec > 0;
+    const nodeRuntime = normalizeRuntimeModeForDisplay(String(data.runtime || ''));
+    const isOpenClaw = nodeRuntime === 'openclaw';
 
     // Model selector state
     const [modelOpen, setModelOpen] = useState(false);
@@ -151,11 +171,12 @@ function AgentNode({ id, data, selected }: NodeProps) {
     // Expandable output state
     const [outputExpanded, setOutputExpanded] = useState(false);
 
-    // Live timer for running nodes
+    // V4.3 PERF: Reduced from 1s to 5s — the 1s tick caused React re-render
+    // on every running node every second, a major CPU heat source.
     const [, setTick] = useState(0);
     useEffect(() => {
         if (!isRunning || !startedAt) return;
-        const timer = setInterval(() => setTick(t => t + 1), 1000);
+        const timer = setInterval(() => setTick(t => t + 1), 5000);
         return () => clearInterval(timer);
     }, [isRunning, startedAt]);
 
@@ -509,6 +530,50 @@ function AgentNode({ id, data, selected }: NodeProps) {
                                 display: 'inline-flex', alignItems: 'center', gap: 2,
                             }}>
                                 {lang === 'zh' ? '费用' : 'Cost'} {formatCost(cost)}
+                            </span>
+                        )}
+
+                        {/* Model Latency */}
+                        {modelLatencyMs > 0 && (
+                            <span style={{
+                                fontSize: 7, color: getLatencyColor(modelLatencyMs),
+                                display: 'inline-flex', alignItems: 'center', gap: 2,
+                                padding: '1px 4px', borderRadius: 3,
+                                background: `${getLatencyColor(modelLatencyMs)}10`,
+                                border: `1px solid ${getLatencyColor(modelLatencyMs)}20`,
+                            }}>
+                                {lang === 'zh' ? '延迟' : 'Latency'} {formatLatency(modelLatencyMs)}
+                            </span>
+                        )}
+
+                        {/* Speed (chars/sec) */}
+                        {charsPerSec > 0 && (
+                            <span style={{
+                                fontSize: 7, color: '#22d3ee',
+                                display: 'inline-flex', alignItems: 'center', gap: 2,
+                                padding: '1px 4px', borderRadius: 3,
+                                background: 'rgba(34,211,238,0.08)',
+                                border: '1px solid rgba(34,211,238,0.15)',
+                            }}>
+                                {lang === 'zh' ? '速率' : 'Speed'} {charsPerSec.toFixed(0)} c/s
+                            </span>
+                        )}
+
+                        {/* Code Lines */}
+                        {codeLines > 0 && (
+                            <span style={{
+                                fontSize: 7, color: '#a78bfa',
+                                display: 'inline-flex', alignItems: 'center', gap: 2,
+                                padding: '1px 4px', borderRadius: 3,
+                                background: 'rgba(167,139,250,0.08)',
+                                border: '1px solid rgba(167,139,250,0.15)',
+                            }}>
+                                📝 {codeLines.toLocaleString()} {lang === 'zh' ? '行' : 'lines'} / {codeKb}KB
+                                {codeLanguages.length > 0 && (
+                                    <span style={{ fontSize: 6, opacity: 0.75 }}>
+                                        ({codeLanguages.slice(0, 3).join('+')})
+                                    </span>
+                                )}
                             </span>
                         )}
 

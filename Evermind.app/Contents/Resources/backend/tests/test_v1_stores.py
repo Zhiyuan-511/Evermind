@@ -90,6 +90,12 @@ class TestRunStoreCRUD(_TempDirMixin, unittest.TestCase):
         run = self.store.create_run({"task_id": "t1", "trigger_source": "invalid"})
         self.assertEqual(run["trigger_source"], "ui")
 
+    def test_create_accepts_custom_run_goal_sources(self):
+        user_canvas = self.store.create_run({"task_id": "t1", "trigger_source": "user_canvas"})
+        optimize = self.store.create_run({"task_id": "t1", "trigger_source": "optimization_pass"})
+        self.assertEqual(user_canvas["trigger_source"], "user_canvas")
+        self.assertEqual(optimize["trigger_source"], "optimization_pass")
+
     def test_delete_run(self):
         run = self.store.create_run({"task_id": "t1"})
         self.assertTrue(self.store.delete_run(run["id"]))
@@ -356,6 +362,35 @@ class TestNodeExecutionStoreTransitions(_TempDirMixin, unittest.TestCase):
         self.store.transition_node(ne["id"], "blocked")
         result = self.store.transition_node(ne["id"], "running")
         self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["ended_at"], 0.0)
+
+    def test_queued_to_blocked_sets_terminal_fields(self):
+        ne = self.store.create_node_execution({"run_id": "r1", "node_key": "tester"})
+        result = self.store.transition_node(ne["id"], "blocked")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "blocked")
+        self.assertEqual(result["node_execution"]["progress"], 0)  # blocked = never executed
+        self.assertGreater(result["node_execution"]["ended_at"], 0)
+
+    def test_passed_can_be_requeued_for_reviewer_requeue(self):
+        ne = self.store.create_node_execution({"run_id": "r1", "node_key": "builder"})
+        self.store.transition_node(ne["id"], "running")
+        self.store.transition_node(ne["id"], "passed")
+        result = self.store.transition_node(ne["id"], "queued")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "queued")
+        self.assertEqual(result["node_execution"]["progress"], 0)
+        self.assertEqual(result["node_execution"]["started_at"], 0.0)
+        self.assertEqual(result["node_execution"]["ended_at"], 0.0)
+
+    def test_failed_can_soft_skip_to_skipped(self):
+        ne = self.store.create_node_execution({"run_id": "r1", "node_key": "polisher"})
+        self.store.transition_node(ne["id"], "running")
+        self.store.transition_node(ne["id"], "failed")
+        result = self.store.transition_node(ne["id"], "skipped")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["node_execution"]["status"], "skipped")
+        self.assertGreater(result["node_execution"]["ended_at"], 0)
 
     def test_queued_to_skipped(self):
         ne = self.store.create_node_execution({"run_id": "r1", "node_key": "deployer"})

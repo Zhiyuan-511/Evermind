@@ -206,11 +206,14 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
     // Poll while running
     useEffect(() => {
         if (ne.status !== 'running') return;
+        // V4.3 PERF: Relaxed from 3s to 8s, split artifact fetch to reduce requests
         const timer = window.setInterval(() => {
             void refreshNode(ne.id);
+        }, 8000);
+        const artTimer = window.setInterval(() => {
             void fetchArtifacts(ne.id);
-        }, 3000);
-        return () => window.clearInterval(timer);
+        }, 16000);
+        return () => { window.clearInterval(timer); window.clearInterval(artTimer); };
     }, [ne.id, ne.status, refreshNode, fetchArtifacts]);
 
     useEffect(() => {

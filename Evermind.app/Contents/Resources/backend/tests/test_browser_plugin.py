@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-from plugins.implementations import BrowserPlugin
+from plugins.implementations import BrowserPlugin, SourceFetchPlugin
 from plugins.base import PluginResult
 
 
@@ -97,9 +97,10 @@ class _FakePage:
 
 
 class _FakeRequest:
-    def __init__(self, url: str, error_text: str = "net::ERR_FAILED"):
+    def __init__(self, url: str, error_text: str = "net::ERR_FAILED", resource_type: str = "image"):
         self.url = url
         self.failure = type("Failure", (), {"error_text": error_text})()
+        self.resource_type = resource_type
 
 
 class _FakeEventPage(_FakePage):
@@ -112,18 +113,28 @@ class _FakeEventPage(_FakePage):
 
 
 class TestBrowserPluginRefResolution(unittest.IsolatedAsyncioTestCase):
+    async def test_resolve_headless_sticks_after_visible_browser_failure(self):
+        plugin = BrowserPlugin()
+
+        self.assertFalse(plugin._resolve_headless({"browser_headful": True}))
+
+        plugin._force_headless_session = True
+
+        self.assertTrue(plugin._resolve_headless({"browser_headful": True}))
+
     async def test_ignored_failed_request_hosts_skip_font_noise(self):
         plugin = BrowserPlugin()
         page = _FakeEventPage()
 
         plugin._bind_page_diagnostics(page)
-        page.handlers["requestfailed"](_FakeRequest("https://fonts.googleapis.com/css2?family=Inter"))
-        page.handlers["requestfailed"](_FakeRequest("https://fonts.gstatic.com/s/inter.woff2"))
-        page.handlers["requestfailed"](_FakeRequest("https://images.unsplash.com/photo-1"))
+        page.handlers["requestfailed"](_FakeRequest("https://fonts.googleapis.com/css2?family=Inter", resource_type="stylesheet"))
+        page.handlers["requestfailed"](_FakeRequest("https://fonts.gstatic.com/s/inter.woff2", resource_type="font"))
+        page.handlers["requestfailed"](_FakeRequest("https://images.unsplash.com/photo-1", resource_type="image"))
 
         summary = plugin._diagnostics_summary()
         self.assertEqual(summary["failed_request_count"], 1)
         self.assertEqual(summary["recent_failed_requests"][0]["url"], "https://images.unsplash.com/photo-1")
+        self.assertEqual(summary["recent_failed_requests"][0]["resource_type"], "image")
 
     async def test_resolve_locator_uses_snapshot_ref(self):
         plugin = BrowserPlugin()
@@ -220,6 +231,45 @@ class TestBrowserPluginRefResolution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["base_data"]["scroll_y"], 1200)
         self.assertTrue(kwargs["base_data"]["at_bottom"])
         self.assertFalse(kwargs["base_data"]["can_scroll_more"])
+
+
+class TestSourceFetchPlugin(unittest.IsolatedAsyncioTestCase):
+    async def test_github_blob_urls_are_rewritten_to_raw_when_prefer_code(self):
+        plugin = SourceFetchPlugin()
+        raw_url = plugin._normalize_source_url(
+            "https://github.com/example/repo/blob/main/src/game.js",
+            prefer_code=True,
+        )
+        self.assertEqual(raw_url, "https://raw.githubusercontent.com/example/repo/main/src/game.js")
+
+    async def test_execute_reports_requested_and_resolved_url_for_github_blob(self):
+        plugin = SourceFetchPlugin()
+        plugin._fetch_with_crawl4ai = AsyncMock(return_value=None)
+        plugin._fetch_with_urllib = AsyncMock(return_value={
+            "url": "https://raw.githubusercontent.com/example/repo/main/src/game.js",
+            "engine": "urllib",
+            "source_kind": "raw_text",
+            "title": "game.js",
+            "content": "export const ready = true;",
+            "code_blocks": ["export const ready = true;"],
+        })
+
+        result = await plugin.execute({
+            "url": "https://github.com/example/repo/blob/main/src/game.js",
+            "prefer_code": True,
+        })
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.data["requested_url"],
+            "https://github.com/example/repo/blob/main/src/game.js",
+        )
+        self.assertEqual(
+            result.data["resolved_url"],
+            "https://raw.githubusercontent.com/example/repo/main/src/game.js",
+        )
+        self.assertEqual(result.data["engine"], "urllib")
+        self.assertEqual(result.data["source_kind"], "raw_text")
 
     async def test_execute_record_scroll_returns_artifact_metadata(self):
         plugin = BrowserPlugin()

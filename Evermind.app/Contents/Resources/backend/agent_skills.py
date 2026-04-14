@@ -55,7 +55,7 @@ HTTP_HEADERS = {
 
 SKILL_MAP = {
     "builder": {
-        "*": ["commercial-ui-polish", "ui-polish-microstates"],
+        "*": ["commercial-ui-polish", "ui-polish-microstates", "think-act-verify", "structured-handoff", "error-recovery"],
         "website": [
             "commercial-ui-polish",
             "conversion-surface-architecture",
@@ -98,7 +98,7 @@ SKILL_MAP = {
     "imagegen": {
         "*": ["image-prompt-director", "visual-storyboard-shotlist", "comfyui-pipeline-brief"],
         "website": ["image-prompt-director", "svg-illustration-system"],
-        "game": ["image-prompt-director", "pixel-asset-pipeline", "visual-storyboard-shotlist"],
+        "game": ["image-prompt-director", "asset-pipeline-packaging", "visual-storyboard-shotlist"],
         "presentation": ["image-prompt-director", "visual-storyboard-shotlist"],
         "creative": ["image-prompt-director", "visual-storyboard-shotlist", "ltx-cinematic-video-blueprint"],
     },
@@ -111,7 +111,7 @@ SKILL_MAP = {
         "game": ["asset-pipeline-packaging", "pixel-asset-pipeline"],
     },
     "reviewer": {
-        "*": ["browser-observe-act-verify", "scroll-evidence-capture", "evidence-driven-qa", "design-system-consistency"],
+        "*": ["browser-observe-act-verify", "scroll-evidence-capture", "evidence-driven-qa", "design-system-consistency", "confidence-escalation", "decision-audit"],
         "website": [
             "browser-observe-act-verify",
             "scroll-evidence-capture",
@@ -127,7 +127,7 @@ SKILL_MAP = {
         "creative": ["browser-observe-act-verify", "scroll-evidence-capture", "evidence-driven-qa", "motion-choreography-system", "remotion-scene-composer"],
     },
     "tester": {
-        "*": ["browser-observe-act-verify", "scroll-evidence-capture", "evidence-driven-qa", "design-system-consistency"],
+        "*": ["browser-observe-act-verify", "scroll-evidence-capture", "evidence-driven-qa", "design-system-consistency", "confidence-escalation"],
         "website": [
             "browser-observe-act-verify",
             "scroll-evidence-capture",
@@ -143,7 +143,7 @@ SKILL_MAP = {
         "creative": ["browser-observe-act-verify", "scroll-evidence-capture", "evidence-driven-qa", "motion-choreography-system", "remotion-scene-composer"],
     },
     "analyst": {
-        "*": ["research-pattern-extraction", "source-first-research-loop"],
+        "*": ["research-pattern-extraction", "source-first-research-loop", "exhaustive-analysis", "decision-audit"],
         "website": [
             "research-pattern-extraction",
             "source-first-research-loop",
@@ -176,6 +176,18 @@ SKILL_MAP = {
         "dashboard": ["dashboard-signal-clarity", "ui-polish-microstates", "scroll-evidence-capture"],
         "presentation": ["slides-story-arc", "motion-choreography-system", "ui-polish-microstates", "scroll-evidence-capture"],
         "creative": ["motion-choreography-system", "svg-illustration-system", "ui-polish-microstates", "scroll-evidence-capture"],
+    },
+    "debugger": {
+        "*": ["think-act-verify", "error-recovery", "exhaustive-analysis", "decision-audit"],
+    },
+    "deployer": {
+        "*": ["structured-handoff"],
+    },
+    "merger": {
+        "*": ["think-act-verify", "structured-handoff", "error-recovery", "decision-audit"],
+    },
+    "planner": {
+        "*": ["exhaustive-analysis", "decision-audit", "confidence-escalation"],
     },
 }
 
@@ -290,6 +302,33 @@ GOAL_SKILL_RULES = [
         },
     },
     {
+        "pattern": re.compile(
+            r"(?=.*(?:游戏|game|shooter|射击|战斗|怪物|weapon|枪械))(?=.*(?:3d|建模|模型|modeling|rig|skeleton|third.?person|first.?person|tps|fps))",
+            re.IGNORECASE,
+        ),
+        "skills": {
+            "builder": ["godogen-visual-target-lock", "godogen-3d-asset-replacement"],
+            "imagegen": ["godogen-visual-target-lock", "godogen-3d-asset-replacement"],
+            "spritesheet": ["godogen-3d-asset-replacement"],
+            "assetimport": ["godogen-3d-asset-replacement"],
+            "analyst": ["godogen-visual-target-lock", "godogen-3d-asset-replacement"],
+        },
+    },
+    {
+        "pattern": re.compile(
+            r"(?=.*(?:第三人称|third.?person|\btps\b|camera.?relative|镜头|视角|yaw|pitch|拖动|drag|mouse|pointer))"
+            r"(?=.*(?:射击|shooter|枪|weapon|控制|controls?|输入|input|wasd))",
+            re.IGNORECASE,
+        ),
+        "skills": {
+            "builder": ["godogen-tps-control-sanity-lock"],
+            "reviewer": ["godogen-tps-control-sanity-lock"],
+            "tester": ["godogen-tps-control-sanity-lock"],
+            "analyst": ["godogen-tps-control-sanity-lock"],
+            "debugger": ["godogen-tps-control-sanity-lock"],
+        },
+    },
+    {
         "pattern": re.compile(r"(godot|可玩原型|playable game|vertical slice|玩法循环|关卡原型|boss 战|platformer|roguelike|top.?down shooter)", re.IGNORECASE),
         "skills": {
             "builder": ["godogen-playable-loop"],
@@ -350,12 +389,20 @@ SKILL_LIBRARY_HINTS: Dict[str, Dict[str, Any]] = {
         "summary": "要求 reviewer/tester 真正点击开始并试玩，而不是只看首屏截图。",
         "category": "qa",
         "tags": ["game", "qa", "browser"],
+        "source_name": "Playwright + browser gameplay QA patterns",
+        "source_url": "https://github.com/microsoft/playwright",
+        "license_note": "参考可重复浏览器自动化与交互验证纪律，整理为 Evermind 的游戏 QA 约束，不复制上游实现。",
+        "example_goal": "真正点击开始并试玩第三人称射击游戏，验证视角、开火、弹道与结算流程",
     },
     "pptx-export-bridge": {
         "title": "PPTX Export Bridge",
         "summary": "把演示内容组织成可导出 PPT/Pitch Deck 的结构，适合融资路演和产品发布。",
         "category": "presentation",
         "tags": ["ppt", "slides", "deck"],
+        "source_name": "PptxGenJS + reveal.js + Marp",
+        "source_url": "https://github.com/gitbrent/PptxGenJS",
+        "license_note": "借鉴程序化 PPT 导出、浏览器演示与 Markdown 幻灯片工作流，只输出 Evermind 的结构化 deck 约束，不搬运上游实现。",
+        "example_goal": "做一个可打印、可导出、可继续转成 PPTX 的融资路演 deck",
     },
     "comfyui-pipeline-brief": {
         "title": "ComfyUI Pipeline Brief",
@@ -368,6 +415,10 @@ SKILL_LIBRARY_HINTS: Dict[str, Dict[str, Any]] = {
         "summary": "在条件允许时，把复杂 QA 提升到更强的电脑操作模式，用于补强最后一道质量门。",
         "category": "qa",
         "tags": ["qa", "computer-use", "browser"],
+        "source_name": "OpenHands + Playwright escalation patterns",
+        "source_url": "https://github.com/All-Hands-AI/OpenHands",
+        "license_note": "参考更强桌面代理与浏览器执行协同方式，重写为 Evermind 的审查升级准则，不复制上游实现。",
+        "example_goal": "当普通浏览器证据不足时，升级到更强交互模式确认复杂桌面/画布行为",
     },
     "remotion-scene-composer": {
         "title": "Remotion Scene Composer",
@@ -391,13 +442,43 @@ SKILL_LIBRARY_HINTS: Dict[str, Dict[str, Any]] = {
     },
     "godogen-playable-loop": {
         "title": "Godogen Playable Loop",
-        "summary": "受 Godogen 启发，强制游戏任务先建立可玩的核心循环，再用截图/试玩反馈驱动修复。",
+        "summary": "受 Godogen 启发，要求游戏任务先交付可玩的核心循环，同时保留视觉目标、控制手感调优和截图/试玩修复闭环。",
         "category": "game",
         "tags": ["game", "vertical-slice", "qa", "loop"],
         "source_name": "Godogen",
         "source_url": "https://github.com/htdt/godogen",
         "license_note": "参考其 agentic game pipeline 思路，采用 Evermind 自己的任务拆解与 QA 闭环。",
         "example_goal": "做一个能立即上手玩的 2D 小游戏 vertical slice",
+    },
+    "godogen-tps-control-sanity-lock": {
+        "title": "Godogen TPS Control Sanity Lock",
+        "summary": "把第三人称/TPS 的 WASD、右向量和拖拽视角方向锁成统一契约，避免左右镜像和俯仰反向。",
+        "category": "game",
+        "tags": ["game", "tps", "controls", "camera", "qa"],
+        "source_name": "Godogen + ecctrl + GDQuest",
+        "source_url": "https://github.com/pmndrs/ecctrl",
+        "license_note": "参考 Godogen 的 playable/repair loop，以及 ecctrl、GDQuest 的第三人称控制约定，重写为 Evermind 内部控制契约技能。",
+        "example_goal": "让第三人称射击游戏稳定满足 A 左 D 右、右拖右转、上拖不反向的商业级操作手感",
+    },
+    "godogen-visual-target-lock": {
+        "title": "Godogen Visual Target Lock",
+        "summary": "把 3D 游戏的主角、敌人、武器、场景和 HUD 锁进同一套视觉目标，避免 builder 东拼西凑。",
+        "category": "game",
+        "tags": ["game", "3d", "art-direction", "style-lock"],
+        "source_name": "Godogen",
+        "source_url": "https://github.com/htdt/godogen",
+        "license_note": "参考其 visual target / art direction 锁定思路，重写为 Evermind 内部提示技能。",
+        "example_goal": "为第三人称 3D 射击游戏锁定人物、怪物、枪械、场景和 HUD 的统一视觉方向",
+    },
+    "godogen-3d-asset-replacement": {
+        "title": "Godogen 3D Asset Replacement",
+        "summary": "要求 3D 游戏把占位物、真实资产、替换清单和运行时绑定分离，后续换模不必重写玩法。",
+        "category": "game",
+        "tags": ["game", "3d", "assets", "replacement"],
+        "source_name": "Godogen",
+        "source_url": "https://github.com/htdt/godogen",
+        "license_note": "参考其 asset planner / asset gen / runtime replacement 流程，采用 Evermind 自己的 manifest 与替换规则。",
+        "example_goal": "让第三人称射击游戏先用可信占位物开玩，再平滑替换成正式人物、怪物和武器资产",
     },
     "premium-typography-system": {
         "title": "Premium Typography System",
@@ -644,6 +725,14 @@ def list_skill_catalog() -> List[Dict[str, Any]]:
 
 @lru_cache(maxsize=128)
 def _load_skill(name: str) -> str:
+    # v4.0: Load from local skills/ directory first (transplanted skill files)
+    _local_skill_dir = Path(__file__).parent / "skills"
+    _local_path = _local_skill_dir / f"{name}.md"
+    if _local_path.exists():
+        try:
+            return _local_path.read_text(encoding="utf-8")
+        except Exception:
+            pass
     skill_dir, _origin = _resolve_skill_dir(name)
     if not skill_dir:
         return ""
@@ -719,7 +808,19 @@ def resolve_skill_names_for_goal(node_type: str, goal: str) -> List[str]:
 
     # P1 FIX: Apply task-type exclusion to prevent cross-domain skill contamination.
     # e.g. website tasks should never load game-specific skills like gameplay-foundation.
-    excluded = SKILL_EXCLUSION_MAP.get(task_type, set())
+    excluded = set(SKILL_EXCLUSION_MAP.get(task_type, set()))
+    if task_type == "game":
+        runtime_mode = task_classifier.game_runtime_mode(goal_text)
+        asset_mode = task_classifier.game_asset_pipeline_mode(goal_text)
+        if runtime_mode == "3d_engine" or asset_mode == "3d":
+            # Premium 3D game briefs should still keep the playable-loop and
+            # QA discipline from Godogen, but must not inherit the pixel /
+            # low-fidelity asset defaults.
+            excluded.update({"pixel-asset-pipeline"})
+        if asset_mode == "3d":
+            # 3D asset-design packs should stay in modeling-brief mode unless a
+            # real image backend is explicitly being used elsewhere.
+            excluded.add("comfyui-pipeline-brief")
 
     selected: List[str] = []
     for name in (
@@ -766,12 +867,27 @@ def list_available_skill_names() -> List[str]:
     return [str(record.get("name") or "") for record in list_skill_catalog() if str(record.get("name") or "")]
 
 
-def build_skill_context(node_type: str, goal: str) -> str:
+def build_skill_context(node_type: str, goal: str, *, budget_chars: int = 9000) -> str:
+    """Build skill context for a node, respecting a character budget.
+
+    V4.3: Skills were adding 8,000-13,500 chars to system prompts with no cap,
+    inflating TTFT by 2-5x.  Now loads skills in priority order (first resolved
+    = highest priority) and stops when the budget is exhausted.  Default 9000
+    chars (~2250 tokens) keeps core + domain-specific skills while trimming
+    the long tail (e.g. godogen-visual-target-lock, godogen-3d-asset-replacement).
+    """
     parts: List[str] = []
+    total = 0
     for name in resolve_skill_names_for_goal(node_type, goal):
         body = _load_skill(name)
-        if body:
-            parts.append(f"[Skill: {name}]\n{body}")
+        if not body:
+            continue
+        entry = f"[Skill: {name}]\n{body}"
+        if total + len(entry) > budget_chars and parts:
+            # Already have at least one skill; stop to stay within budget.
+            break
+        parts.append(entry)
+        total += len(entry)
     return "\n\n".join(parts)
 
 

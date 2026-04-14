@@ -9,6 +9,24 @@ from unittest.mock import patch
 import server
 
 
+class TestNodeInputSummaryFormatting(unittest.TestCase):
+    def test_compose_node_input_summary_includes_goal_and_session_context(self):
+        summary = server._compose_node_input_summary(
+            "Write the multi-page site",
+            effective_goal="Build premium website",
+            session_context_note="Continue editing the same session project.",
+        )
+
+        self.assertEqual(
+            summary,
+            (
+                "Write the multi-page site\n\n"
+                "[RUN GOAL]\nBuild premium website\n\n"
+                "[SESSION CONTEXT]\nContinue editing the same session project."
+            ),
+        )
+
+
 class TestPreviewListEndpoint(unittest.TestCase):
     def test_preview_list_includes_root_artifacts(self):
         with tempfile.TemporaryDirectory() as td:

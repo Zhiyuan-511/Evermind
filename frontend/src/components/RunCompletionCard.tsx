@@ -27,6 +27,9 @@ interface RunCompletionCardProps {
         retries: number;
         filesCreated?: string[];
         workSummary?: string[];
+        codeLines?: number;
+        codeKb?: number;
+        codeLanguages?: string[];
     }>;
     previewUrl?: string;
     lang: 'en' | 'zh';
@@ -64,59 +67,111 @@ export default function RunCompletionCard({
 
     const modeLabel = DIFF_LABEL[difficulty]?.[lang] || difficulty;
     const dotColor = success ? '#22c55e' : '#ef4444';
+    const totalCodeLines = subtasks.reduce((sum, st) => sum + (st.codeLines || 0), 0);
+    const totalCodeKb = subtasks.reduce((sum, st) => sum + (st.codeKb || 0), 0);
+    const allLanguages = [...new Set(subtasks.flatMap(st => st.codeLanguages || []))];
+    const passRate = total > 0 ? Math.round((completed / total) * 100) : 0;
 
     return (
         <div style={{
-            borderRadius: 10,
+            borderRadius: 14,
             overflow: 'hidden',
             border: `1px solid ${success ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`,
-            background: success ? 'rgba(34,197,94,0.03)' : 'rgba(239,68,68,0.03)',
+            background: success
+                ? 'linear-gradient(135deg, rgba(34,197,94,0.05), rgba(0,0,0,0.2))'
+                : 'linear-gradient(135deg, rgba(239,68,68,0.05), rgba(0,0,0,0.2))',
         }}>
             {/* ── Header: Result ── */}
             <div style={{
                 display: 'flex', alignItems: 'center', gap: 8,
-                padding: '10px 12px',
+                padding: '12px 14px',
                 borderBottom: '1px solid rgba(255,255,255,0.06)',
+                background: 'rgba(0,0,0,0.1)',
             }}>
                 <span style={{
-                    width: 8, height: 8, borderRadius: '50%',
+                    width: 10, height: 10, borderRadius: '50%',
                     background: dotColor,
-                    boxShadow: `0 0 6px ${dotColor}`,
+                    boxShadow: `0 0 8px ${dotColor}80`,
                     flexShrink: 0,
                 }} />
-                <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text1)' }}>
+                <span style={{ fontSize: 13, fontWeight: 800, color: 'var(--text1)', letterSpacing: 0.2 }}>
                     {success ? t('Run Completed', '执行完成') : t('Run Failed', '执行失败')}
                 </span>
-                <span style={{
-                    fontSize: 9, fontWeight: 600,
-                    marginLeft: 'auto',
-                    padding: '2px 6px', borderRadius: 999,
-                    background: 'rgba(79,143,255,0.1)', color: 'var(--blue)',
-                }}>
-                    {modeLabel}
-                </span>
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                    <span style={{
+                        fontSize: 9, fontWeight: 700,
+                        padding: '3px 8px', borderRadius: 999,
+                        background: 'rgba(79,143,255,0.12)', color: '#60a5fa',
+                        border: '1px solid rgba(79,143,255,0.2)',
+                    }}>
+                        {modeLabel}
+                    </span>
+                    <span style={{
+                        fontSize: 9, fontWeight: 700,
+                        padding: '3px 8px', borderRadius: 999,
+                        background: success ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.12)',
+                        color: success ? '#4ade80' : '#f87171',
+                        border: `1px solid ${success ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`,
+                    }}>
+                        {passRate}%
+                    </span>
+                </div>
             </div>
 
             {/* ── Stats Grid ── */}
             <div style={{
-                display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
+                display: 'grid', gridTemplateColumns: totalCodeLines > 0 ? 'repeat(4, 1fr)' : 'repeat(3, 1fr)',
                 gap: 1, background: 'rgba(255,255,255,0.04)',
                 borderBottom: '1px solid rgba(255,255,255,0.06)',
             }}>
                 {[
-                    { label: t('Nodes', '节点'), value: `${completed}/${total}` },
-                    { label: t('Retries', '重试'), value: String(retries) },
-                    { label: t('Duration', '耗时'), value: formatDuration(durationSeconds, lang) },
+                    { label: t('Nodes', '节点'), value: `${completed}/${total}`, color: '#60a5fa' },
+                    { label: t('Retries', '重试'), value: String(retries), color: retries > 0 ? '#f59e0b' : '#6b7280' },
+                    { label: t('Duration', '耗时'), value: formatDuration(durationSeconds, lang), color: '#c084fc' },
+                    ...(totalCodeLines > 0 ? [{ label: t('Code', '代码'), value: `${totalCodeLines.toLocaleString()}L`, color: '#a78bfa' }] : []),
                 ].map(item => (
                     <div key={item.label} style={{
-                        textAlign: 'center', padding: '8px 4px',
+                        textAlign: 'center', padding: '10px 4px',
                         background: 'rgba(0,0,0,0.15)',
                     }}>
-                        <div style={{ fontSize: 8, color: 'var(--text3)', marginBottom: 2 }}>{item.label}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, color: 'var(--text1)' }}>{item.value}</div>
+                        <div style={{ fontSize: 9, color: 'var(--text3)', marginBottom: 3, fontWeight: 600 }}>{item.label}</div>
+                        <div style={{ fontSize: 13, fontWeight: 800, color: item.color }}>{item.value}</div>
                     </div>
                 ))}
             </div>
+
+            {/* ── Code Output Metrics (v3.5) ── */}
+            {totalCodeLines > 0 && (
+                <div style={{
+                    padding: '10px 14px',
+                    borderBottom: '1px solid rgba(255,255,255,0.06)',
+                    background: 'linear-gradient(135deg, rgba(167,139,250,0.06), transparent)',
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#a78bfa" strokeWidth="2">
+                            <polyline points="16 18 22 12 16 6" /><polyline points="8 6 2 12 8 18" />
+                        </svg>
+                        <span style={{ fontSize: 10, fontWeight: 700, color: '#a78bfa' }}>
+                            {t('Code Output', '代码产出')}
+                        </span>
+                        <span style={{ fontSize: 10, color: 'var(--text3)', marginLeft: 'auto' }}>
+                            {totalCodeKb > 0 ? `${Math.round(totalCodeKb)}KB` : ''}
+                        </span>
+                    </div>
+                    {allLanguages.length > 0 && (
+                        <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                            {allLanguages.map(langTag => (
+                                <span key={langTag} style={{
+                                    padding: '2px 7px', borderRadius: 999, fontSize: 9, fontWeight: 600,
+                                    background: 'rgba(167,139,250,0.1)',
+                                    color: '#c4b5fd',
+                                    border: '1px solid rgba(167,139,250,0.15)',
+                                }}>{langTag}</span>
+                            ))}
+                        </div>
+                    )}
+                </div>
+            )}
 
             {/* ── Work Summary ── */}
             {summaryItems.length > 0 && (
@@ -160,36 +215,68 @@ export default function RunCompletionCard({
                 </div>
             )}
 
-            {/* ── Validation Status ── */}
+            {/* ── Pipeline Status (v3.5 antigravity-style) ── */}
             <div style={{
-                padding: '8px 12px',
-                borderBottom: previewUrl ? '1px solid rgba(255,255,255,0.06)' : 'none',
+                padding: '10px 14px',
+                borderBottom: '1px solid rgba(255,255,255,0.06)',
             }}>
-                <div style={{ fontSize: 9, fontWeight: 600, color: 'var(--text3)', marginBottom: 4 }}>
-                    {t('Validation', '验证状态')}
+                <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text3)', marginBottom: 8, letterSpacing: 0.3 }}>
+                    {t('PIPELINE STATUS', '流水线状态')}
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
                     {subtasks.map(st => {
                         const isOk = isSuccessfulStatus(st.status);
+                        const statusColor = isOk ? '#22c55e' : '#ef4444';
+                        const agentColors: Record<string, string> = {
+                            planner: '#60a5fa', analyst: '#f59e0b', builder: '#a78bfa',
+                            merger: '#ec4899', reviewer: '#06b6d4', tester: '#22c55e',
+                            deployer: '#f97316', debugger: '#ef4444', scribe: '#8b5cf6',
+                            uidesign: '#fb7185', imagegen: '#eab308', polisher: '#c084fc',
+                        };
+                        const agentColor = agentColors[st.agent] || '#6b7280';
                         return (
                             <div key={st.id} style={{
-                                fontSize: 10, color: 'var(--text2)',
-                                display: 'flex', alignItems: 'center', gap: 6,
+                                display: 'flex', alignItems: 'center', gap: 8,
+                                padding: '5px 8px', borderRadius: 8,
+                                background: 'rgba(255,255,255,0.02)',
+                                border: '1px solid rgba(255,255,255,0.04)',
                             }}>
                                 <span style={{
-                                    width: 5, height: 5, borderRadius: '50%',
-                                    background: isOk ? '#22c55e' : '#ef4444',
+                                    width: 6, height: 6, borderRadius: '50%',
+                                    background: statusColor,
+                                    boxShadow: `0 0 4px ${statusColor}60`,
                                     flexShrink: 0,
                                 }} />
-                                <span style={{ fontWeight: 600 }}>
+                                <span style={{
+                                    fontSize: 10, fontWeight: 700,
+                                    color: agentColor, minWidth: 65,
+                                }}>
                                     {st.agent.charAt(0).toUpperCase() + st.agent.slice(1)}
                                 </span>
-                                <span style={{ color: isOk ? 'var(--green)' : 'var(--red)', fontSize: 9 }}>
-                                    {isOk ? t('passed', '通过') : t('failed', '失败')}
+                                <span style={{
+                                    fontSize: 8, fontWeight: 700,
+                                    padding: '1px 6px', borderRadius: 999,
+                                    background: isOk ? 'rgba(34,197,94,0.1)' : 'rgba(239,68,68,0.1)',
+                                    color: isOk ? '#4ade80' : '#f87171',
+                                    border: `1px solid ${isOk ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.2)'}`,
+                                }}>
+                                    {isOk ? t('PASS', '通过') : t('FAIL', '失败')}
                                 </span>
+                                {(st.codeLines || 0) > 0 && (
+                                    <span style={{
+                                        fontSize: 8, color: '#a78bfa', fontWeight: 600,
+                                        marginLeft: 'auto',
+                                    }}>
+                                        {(st.codeLines || 0).toLocaleString()}L
+                                    </span>
+                                )}
                                 {st.retries > 0 && (
-                                    <span style={{ fontSize: 8, color: 'var(--text3)' }}>
-                                        ({st.retries} {t('retries', '次重试')})
+                                    <span style={{
+                                        fontSize: 8, fontWeight: 600,
+                                        padding: '1px 5px', borderRadius: 999,
+                                        background: 'rgba(245,158,11,0.1)', color: '#fbbf24',
+                                    }}>
+                                        x{st.retries}
                                     </span>
                                 )}
                             </div>

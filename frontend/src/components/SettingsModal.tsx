@@ -30,15 +30,87 @@ interface ModelCatalogItem {
     provider: string;
 }
 
-type TabId = 'conn' | 'perm' | 'ui' | 'quality' | 'nodes';
+interface RelayCatalogItem {
+    id: string;
+    label: string;
+    provider: string;
+    api_style: string;
+    default_base_url?: string;
+    default_models?: string[];
+    description?: string;
+}
+
+interface RelayEndpointRecord {
+    id: string;
+    name: string;
+    base_url: string;
+    provider: string;
+    api_style: string;
+    models: string[];
+    enabled: boolean;
+    template_id?: string;
+    last_test?: {
+        success?: boolean;
+        connectivity_ok?: boolean;
+        streaming_ok?: boolean;
+        tool_calling_ok?: boolean;
+        builder_profile_ok?: boolean;
+        latency_ms?: number;
+        error?: string;
+    };
+}
+
+interface RelayDraft {
+    templateId: string;
+    name: string;
+    baseUrl: string;
+    apiKey: string;
+    models: string;
+}
+
+type AnalystCrawlIntensity = 'off' | 'low' | 'medium' | 'high';
+
+type TabId = 'conn' | 'perm' | 'ui' | 'quality' | 'nodes' | 'speed' | 'cli';
 
 const TABS: { id: TabId; label_en: string; label_zh: string }[] = [
     { id: 'conn', label_en: 'Connection', label_zh: '连接' },
     { id: 'perm', label_en: 'Permissions', label_zh: '权限' },
     { id: 'quality', label_en: 'Quality', label_zh: '验收策略' },
     { id: 'nodes', label_en: 'Node Models', label_zh: '节点模型' },
+    { id: 'speed', label_en: 'Speed Test', label_zh: '模型测速' },
+    { id: 'cli', label_en: 'CLI Mode', label_zh: 'CLI 模式' },
     { id: 'ui', label_en: 'Interface', label_zh: '界面' },
 ];
+
+interface CLIDetectResult {
+    available: boolean;
+    name: string;
+    display_name: string;
+    path?: string;
+    version?: string;
+    supports_json?: boolean;
+    supports_file_ops?: boolean;
+    supports_streaming?: boolean;
+    is_extra?: boolean;
+    error?: string;
+}
+
+interface CLITestResult {
+    success: boolean;
+    latency_s?: number;
+    output_preview?: string;
+    error?: string;
+}
+
+interface CLIModelOption {
+    id: string;
+    name: string;
+}
+
+interface CLINodeOverride {
+    cli: string;
+    model: string;
+}
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
 const NODE_MODEL_PRIORITY_SLOTS = [0, 1, 2] as const;
@@ -57,6 +129,7 @@ const NODE_MODEL_CONFIG_ROLES = [
     'imagegen',
     'spritesheet',
     'assetimport',
+    'merger',
 ] as const;
 const FALLBACK_MODEL_CATALOG: ModelCatalogItem[] = [
     { id: 'gpt-5.4', provider: 'openai' },
@@ -85,6 +158,13 @@ const PROVIDER_LABELS: Record<string, string> = {
     ollama: 'Ollama',
     relay: 'Relay',
 };
+const DEFAULT_RELAY_DRAFT: RelayDraft = {
+    templateId: 'openai_compat',
+    name: '',
+    baseUrl: '',
+    apiKey: '',
+    models: 'gpt-5.4',
+};
 
 // ── Security: mask API key for display ──
 function maskKey(key: string): string {
@@ -97,6 +177,10 @@ function maskKey(key: string): string {
 function sanitizeInput(value: string): string {
     // Strip any HTML tags, script injections, and trim whitespace
     return value.replace(/<[^>]*>/g, '').replace(/[<>"'&]/g, '').trim();
+}
+
+function sanitizeMultilineInput(value: string): string {
+    return value.replace(/<[^>]*>/g, '');
 }
 
 function normalizeNodeModelPreferences(value: unknown): Record<string, string[]> {
@@ -118,6 +202,24 @@ function normalizeNodeModelPreferences(value: unknown): Record<string, string[]>
         if (chain.length > 0) normalized[role] = chain;
     }
     return normalized;
+}
+
+function normalizeRelayModels(value: unknown): string[] {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .filter((item, index, arr) => arr.indexOf(item) === index)
+        .slice(0, 24);
+}
+
+function parseRelayModels(value: string): string[] {
+    return value
+        .split(/[\n,]/)
+        .map((item) => String(item || '').trim())
+        .filter(Boolean)
+        .filter((item, index, arr) => arr.indexOf(item) === index)
+        .slice(0, 24);
 }
 
 export default function SettingsModal({
@@ -143,18 +245,93 @@ export default function SettingsModal({
     const [comfyWorkflowTemplate, setComfyWorkflowTemplate] = useState('');
     const [imageBackendAvailable, setImageBackendAvailable] = useState(false);
     const [nodeModelPreferences, setNodeModelPreferences] = useState<Record<string, string[]>>({});
+    const [thinkingDepth, setThinkingDepth] = useState<'fast' | 'deep'>('deep');
     const [modelCatalog, setModelCatalog] = useState<ModelCatalogItem[]>([]);
+    const [analystPreferredSites, setAnalystPreferredSites] = useState('');
+    const [analystCrawlIntensity, setAnalystCrawlIntensity] = useState<AnalystCrawlIntensity>('medium');
+    const [analystUseScrapling, setAnalystUseScrapling] = useState(true);
+    const [analystEnableQuerySearch, setAnalystEnableQuerySearch] = useState(true);
+    const [relayCatalog, setRelayCatalog] = useState<RelayCatalogItem[]>([]);
+    const [relayEndpoints, setRelayEndpoints] = useState<RelayEndpointRecord[]>([]);
+    const [relayDraft, setRelayDraft] = useState<RelayDraft>(DEFAULT_RELAY_DRAFT);
+    const [relayStatus, setRelayStatus] = useState('');
+    const [relaySaving, setRelaySaving] = useState(false);
+    const [relayActionId, setRelayActionId] = useState('');
+    // Speed test state
+    const [speedTestRunning, setSpeedTestRunning] = useState(false);
+    const [speedTestResults, setSpeedTestResults] = useState<Record<string, { ok: boolean; latency_ms: number; error: string; provider: string }>>({});
+    const [speedTestProgress, setSpeedTestProgress] = useState('');
     // Track which keys the user is actively editing (show real value)
     const [editingKey, setEditingKey] = useState<string | null>(null);
     // Track which keys have been loaded from backend (display as masked)
     const [loadedKeys, setLoadedKeys] = useState<Set<string>>(new Set());
+    // CLI mode state
+    const [cliEnabled, setCliEnabled] = useState(false);
+    const [cliPreferred, setCliPreferred] = useState('');
+    const [cliPreferredModel, setCliPreferredModel] = useState('');
+    const [cliDetected, setCliDetected] = useState<Record<string, CLIDetectResult>>({});
+    const [cliNodeOverrides, setCliNodeOverrides] = useState<Record<string, CLINodeOverride>>({});
+    const [cliDetecting, setCliDetecting] = useState(false);
+    const [cliTestResults, setCliTestResults] = useState<Record<string, CLITestResult>>({});
+    const [cliTestingAll, setCliTestingAll] = useState(false);
+    const [cliModelOptions, setCliModelOptions] = useState<Record<string, CLIModelOption[]>>({});
+
+    const loadRelayState = useCallback(async () => {
+        try {
+            const [catalogResp, listResp] = await Promise.all([
+                fetch(`${API_BASE}/api/relay/catalog`, { credentials: 'omit' }),
+                fetch(`${API_BASE}/api/relay/list`, { credentials: 'omit' }),
+            ]);
+            if (catalogResp.ok) {
+                const catalogJson = await catalogResp.json();
+                const catalog = Array.isArray(catalogJson.templates) ? catalogJson.templates : [];
+                setRelayCatalog(
+                    catalog
+                        .map((item: Record<string, unknown>) => ({
+                            id: String(item.id || '').trim(),
+                            label: String(item.label || '').trim(),
+                            provider: String(item.provider || '').trim(),
+                            api_style: String(item.api_style || '').trim(),
+                            default_base_url: String(item.default_base_url || '').trim(),
+                            default_models: normalizeRelayModels(item.default_models),
+                            description: String(item.description || '').trim(),
+                        }))
+                        .filter((item: RelayCatalogItem) => item.id.length > 0)
+                );
+            }
+            if (listResp.ok) {
+                const listJson = await listResp.json();
+                const relays = Array.isArray(listJson.relays) ? listJson.relays : [];
+                setRelayEndpoints(
+                    relays
+                        .map((item: Record<string, unknown>) => ({
+                            id: String(item.id || '').trim(),
+                            name: String(item.name || '').trim(),
+                            base_url: String(item.base_url || '').trim(),
+                            provider: String(item.provider || '').trim(),
+                            api_style: String(item.api_style || '').trim(),
+                            models: normalizeRelayModels(item.models),
+                            enabled: Boolean(item.enabled ?? true),
+                            template_id: String(item.template_id || '').trim(),
+                            last_test: item.last_test && typeof item.last_test === 'object'
+                                ? item.last_test as RelayEndpointRecord['last_test']
+                                : undefined,
+                        }))
+                        .filter((item: RelayEndpointRecord) => item.id.length > 0)
+                );
+            }
+        } catch {
+            // Keep settings usable even if relay endpoints fail to load.
+        }
+    }, []);
 
     // Load settings from backend on open — only load has_keys flags, NOT the masked values
     useEffect(() => {
         if (!open) return;
+        void loadRelayState();
         fetch(`${API_BASE}/api/settings`, { credentials: 'omit' })
             .then(r => r.json())
-            .then(data => {
+            .then(async data => {
                 // Backend returns has_keys: {openai_api_key: true, ...}
                 // We use this to show which keys are already configured
                 if (data.has_keys) {
@@ -189,6 +366,28 @@ export default function SettingsModal({
                 if (data.node_model_preferences && typeof data.node_model_preferences === 'object') {
                     setNodeModelPreferences(normalizeNodeModelPreferences(data.node_model_preferences));
                 }
+                if (data.thinking_depth === 'fast' || data.thinking_depth === 'deep') {
+                    setThinkingDepth(data.thinking_depth);
+                }
+                if (data.analyst && typeof data.analyst === 'object') {
+                    const analystCfg = data.analyst as Record<string, unknown>;
+                    const preferredSites = Array.isArray(analystCfg.preferred_sites)
+                        ? analystCfg.preferred_sites
+                            .map((item) => String(item || '').trim())
+                            .filter(Boolean)
+                        : [];
+                    setAnalystPreferredSites(preferredSites.join('\n'));
+                    const nextIntensity = String(analystCfg.crawl_intensity || 'medium').trim().toLowerCase();
+                    if (['off', 'low', 'medium', 'high'].includes(nextIntensity)) {
+                        setAnalystCrawlIntensity(nextIntensity as AnalystCrawlIntensity);
+                    }
+                    if (typeof analystCfg.use_scrapling_when_available === 'boolean') {
+                        setAnalystUseScrapling(analystCfg.use_scrapling_when_available);
+                    }
+                    if (typeof analystCfg.enable_query_search === 'boolean') {
+                        setAnalystEnableQuerySearch(analystCfg.enable_query_search);
+                    }
+                }
                 if (Array.isArray(data.model_catalog)) {
                     const catalog: ModelCatalogItem[] = data.model_catalog
                         .map((item: unknown) => ({
@@ -198,6 +397,41 @@ export default function SettingsModal({
                         .filter((item: ModelCatalogItem) => item.id.length > 0);
                     if (catalog.length > 0) setModelCatalog(catalog);
                 }
+                // Load CLI mode settings
+                if (data.cli_mode && typeof data.cli_mode === 'object') {
+                    const cliCfg = data.cli_mode as Record<string, unknown>;
+                    if (typeof cliCfg.enabled === 'boolean') setCliEnabled(cliCfg.enabled);
+                    if (typeof cliCfg.preferred_cli === 'string') setCliPreferred(cliCfg.preferred_cli);
+                    if (typeof cliCfg.preferred_model === 'string') setCliPreferredModel(cliCfg.preferred_model);
+                    if (cliCfg.detected_clis && typeof cliCfg.detected_clis === 'object') {
+                        setCliDetected(cliCfg.detected_clis as Record<string, CLIDetectResult>);
+                    }
+                    if (cliCfg.node_cli_overrides && typeof cliCfg.node_cli_overrides === 'object') {
+                        // Backward compat: convert old string format to new {cli, model} format
+                        const raw = cliCfg.node_cli_overrides as Record<string, unknown>;
+                        const parsed: Record<string, CLINodeOverride> = {};
+                        for (const [k, v] of Object.entries(raw)) {
+                            if (typeof v === 'string') {
+                                parsed[k] = { cli: v, model: '' };
+                            } else if (v && typeof v === 'object') {
+                                const obj = v as Record<string, unknown>;
+                                parsed[k] = {
+                                    cli: String(obj.cli || ''),
+                                    model: String(obj.model || ''),
+                                };
+                            }
+                        }
+                        setCliNodeOverrides(parsed);
+                    }
+                }
+                // Fetch CLI model options
+                try {
+                    const modelsResp = await fetch(`${API_BASE}/api/cli/models`, { credentials: 'omit' });
+                    if (modelsResp.ok) {
+                        const modelsData = await modelsResp.json();
+                        if (modelsData.models) setCliModelOptions(modelsData.models);
+                    }
+                } catch { /* offline */ }
                 // Load relay base URLs
                 if (data.api_bases && typeof data.api_bases === 'object') {
                     const bases: Record<string, string> = { openai: '', claude: '', gemini: '', kimi: '', deepseek: '', qwen: '' };
@@ -212,7 +446,7 @@ export default function SettingsModal({
                     setApiBases(bases);
                 }
             }).catch(() => { /* offline */ });
-    }, [open]);
+    }, [open, loadRelayState]);
 
     // Clear sensitive state on close
     const handleClose = useCallback(() => {
@@ -220,6 +454,111 @@ export default function SettingsModal({
         setSaveStatus('idle');
         onClose();
     }, [onClose]);
+
+    const updateRelayDraft = useCallback((patch: Partial<RelayDraft>) => {
+        setRelayDraft((prev) => ({ ...prev, ...patch }));
+    }, []);
+
+    const applyRelayTemplateDraft = useCallback((templateId: string) => {
+        const template = relayCatalog.find((item) => item.id === templateId);
+        updateRelayDraft({
+            templateId,
+            name: template?.label && !relayDraft.name ? template.label : relayDraft.name,
+            baseUrl: template?.default_base_url && !relayDraft.baseUrl ? template.default_base_url : relayDraft.baseUrl,
+            models: template?.default_models && relayDraft.models.trim().length === 0
+                ? template.default_models.join(', ')
+                : relayDraft.models,
+        });
+    }, [relayCatalog, relayDraft.baseUrl, relayDraft.models, relayDraft.name, updateRelayDraft]);
+
+    const importOpenAiBaseIntoRelay = useCallback(() => {
+        updateRelayDraft({
+            templateId: relayDraft.templateId || 'openai_compat',
+            name: relayDraft.name || 'OpenAI Relay',
+            baseUrl: apiBases.openai || relayDraft.baseUrl,
+            models: relayDraft.models || 'gpt-5.4',
+        });
+    }, [apiBases.openai, relayDraft.baseUrl, relayDraft.models, relayDraft.name, relayDraft.templateId, updateRelayDraft]);
+
+    const addRelayEndpoint = useCallback(async () => {
+        const template = relayCatalog.find((item) => item.id === relayDraft.templateId);
+        const payload = {
+            name: relayDraft.name.trim() || template?.label || 'Relay Endpoint',
+            template_id: relayDraft.templateId || '',
+            provider: template?.provider || 'openai',
+            api_style: template?.api_style || 'openai_compatible',
+            base_url: relayDraft.baseUrl.trim(),
+            api_key: relayDraft.apiKey.trim(),
+            models: parseRelayModels(relayDraft.models),
+        };
+        setRelaySaving(true);
+        setRelayStatus('');
+        try {
+            const resp = await fetch(`${API_BASE}/api/relay/add`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'omit',
+                body: JSON.stringify(payload),
+            });
+            const json = await resp.json().catch(() => ({}));
+            if (!resp.ok || json.error) {
+                setRelayStatus(String(json.error || 'Relay add failed'));
+                return;
+            }
+            setRelayDraft(DEFAULT_RELAY_DRAFT);
+            setRelayStatus('ok:add');
+            await loadRelayState();
+        } catch {
+            setRelayStatus('Relay add failed');
+        } finally {
+            setRelaySaving(false);
+        }
+    }, [loadRelayState, relayCatalog, relayDraft]);
+
+    const testRelayEndpoint = useCallback(async (endpointId: string) => {
+        setRelayActionId(endpointId);
+        setRelayStatus('');
+        try {
+            const resp = await fetch(`${API_BASE}/api/relay/test/${endpointId}`, {
+                method: 'POST',
+                credentials: 'omit',
+            });
+            const json = await resp.json().catch(() => ({}));
+            if (!resp.ok || json.error) {
+                setRelayStatus(String(json.error || 'Relay test failed'));
+            } else {
+                setRelayStatus(json.success ? 'ok:test' : String(json.error || 'Relay test failed'));
+            }
+            await loadRelayState();
+        } catch {
+            setRelayStatus('Relay test failed');
+        } finally {
+            setRelayActionId('');
+        }
+    }, [loadRelayState]);
+
+    const removeRelayEndpoint = useCallback(async (endpointId: string) => {
+        setRelayActionId(endpointId);
+        setRelayStatus('');
+        try {
+            const resp = await fetch(`${API_BASE}/api/relay/${endpointId}`, {
+                method: 'DELETE',
+                credentials: 'omit',
+            });
+            const json = await resp.json().catch(() => ({}));
+            if (!resp.ok || json.error) {
+                setRelayStatus(String(json.error || 'Relay delete failed'));
+            } else {
+                setRelayStatus('ok:remove');
+            }
+            await loadRelayState();
+        } catch {
+            setRelayStatus('Relay delete failed');
+        } finally {
+            setRelayActionId('');
+        }
+    }, [loadRelayState]);
+
     // Available models after save
     const [availableModels, setAvailableModels] = useState<Record<string, string[]>>({});
 
@@ -271,7 +610,24 @@ export default function SettingsModal({
                         comfyui_url: comfyUiUrl,
                         workflow_template: comfyWorkflowTemplate,
                     },
+                    analyst: {
+                        preferred_sites: analystPreferredSites
+                            .split(/\r?\n/)
+                            .map((item) => String(item || '').trim())
+                            .filter(Boolean),
+                        crawl_intensity: analystCrawlIntensity,
+                        use_scrapling_when_available: analystUseScrapling,
+                        enable_query_search: analystEnableQuerySearch,
+                    },
                     node_model_preferences: nodeModelPreferences,
+                    thinking_depth: thinkingDepth,
+                    cli_mode: {
+                        enabled: cliEnabled,
+                        preferred_cli: cliPreferred,
+                        preferred_model: cliPreferredModel,
+                        detected_clis: cliDetected,
+                        node_cli_overrides: cliNodeOverrides,
+                    },
                 }),
             });
 
@@ -289,11 +645,29 @@ export default function SettingsModal({
                             browser_headful: browserHeadful,
                             reviewer_tester_force_headful: forceVisibleReview,
                             max_retries: maxRetries,
+                            // v3.0.3: Send UI language so backend reports match user's language
+                            ui_language: lang,
                             image_generation: {
                                 comfyui_url: comfyUiUrl,
                                 workflow_template: comfyWorkflowTemplate,
                             },
+                            analyst: {
+                                preferred_sites: analystPreferredSites
+                                    .split(/\r?\n/)
+                                    .map((item) => String(item || '').trim())
+                                    .filter(Boolean),
+                                crawl_intensity: analystCrawlIntensity,
+                                use_scrapling_when_available: analystUseScrapling,
+                                enable_query_search: analystEnableQuerySearch,
+                            },
                             node_model_preferences: nodeModelPreferences,
+                            thinking_depth: thinkingDepth,
+                            cli_mode: {
+                                enabled: cliEnabled,
+                                preferred_cli: cliPreferred,
+                                preferred_model: cliPreferredModel,
+                                node_cli_overrides: cliNodeOverrides,
+                            },
                         },
                     }));
                 }
@@ -324,7 +698,7 @@ export default function SettingsModal({
         }
         setSaving(false);
         setTimeout(() => setSaveStatus('idle'), 5000);
-    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate, nodeModelPreferences]);
+    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate, analystPreferredSites, analystCrawlIntensity, analystUseScrapling, analystEnableQuerySearch, nodeModelPreferences, thinkingDepth, lang]);
 
     // Handle key input change with sanitization
     const handleKeyChange = useCallback((key: keyof ApiKeys, value: string) => {
@@ -346,6 +720,7 @@ export default function SettingsModal({
             const providerCompare = a.provider.localeCompare(b.provider);
             return providerCompare !== 0 ? providerCompare : a.id.localeCompare(b.id);
         });
+    const selectedRelayTemplate = relayCatalog.find((item) => item.id === relayDraft.templateId);
 
     const updateNodeModelPreference = useCallback((role: string, slotIndex: number, nextModel: string) => {
         setNodeModelPreferences((prev) => {
@@ -500,6 +875,177 @@ export default function SettingsModal({
                                     </div>
                                 )}
                             </div>
+
+                            <div className="s-section">
+                                <div className="s-section-title">{t('Relay Pool', '中转池')}</div>
+                                <div className="s-hint" style={{ marginBottom: 8 }}>
+                                    {t(
+                                        'A single Base URL above is only a direct route. To make GPT-5.4 or other relay-backed models truly fail over smoothly, add relay endpoints here. Relay API keys may be left empty to reuse the saved provider key when available.',
+                                        '上面的单个 Base URL 只是直连路由。要让 GPT-5.4 或其他中转模型真正走中转池并具备切换能力，需要在这里添加 relay endpoint。Relay 的 API key 留空时，会优先复用已保存的对应 provider key。'
+                                    )}
+                                </div>
+                                <div className="s-row">
+                                    <label>{t('Template', '模板')}</label>
+                                    <select
+                                        className="s-input"
+                                        value={relayDraft.templateId}
+                                        onChange={(e) => applyRelayTemplateDraft(e.target.value)}
+                                    >
+                                        {relayCatalog.map((item) => (
+                                            <option key={item.id} value={item.id}>
+                                                {item.label}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </div>
+                                {selectedRelayTemplate?.description && (
+                                    <div className="s-hint" style={{ marginBottom: 8 }}>
+                                        {selectedRelayTemplate.description}
+                                    </div>
+                                )}
+                                <div className="s-row">
+                                    <label>{t('Name', '名称')}</label>
+                                    <input
+                                        className="s-input"
+                                        value={relayDraft.name}
+                                        onChange={(e) => updateRelayDraft({ name: sanitizeInput(e.target.value) })}
+                                        placeholder={selectedRelayTemplate?.label || 'Relay Endpoint'}
+                                    />
+                                </div>
+                                <div className="s-row">
+                                    <label>{t('Base URL', '中转地址')}</label>
+                                    <input
+                                        className="s-input"
+                                        value={relayDraft.baseUrl}
+                                        onChange={(e) => updateRelayDraft({ baseUrl: sanitizeInput(e.target.value) })}
+                                        placeholder={selectedRelayTemplate?.default_base_url || 'https://.../v1'}
+                                    />
+                                </div>
+                                <div className="flex items-center gap-2" style={{ marginBottom: 8 }}>
+                                    <button
+                                        className="btn text-[10px]"
+                                        onClick={importOpenAiBaseIntoRelay}
+                                        type="button"
+                                    >
+                                        {t('Import OpenAI Base', '导入 OpenAI Base')}
+                                    </button>
+                                    <span className="text-[9px]" style={{ color: 'var(--text3)' }}>
+                                        {apiBases.openai ? apiBases.openai : t('No OpenAI Base configured', '当前未配置 OpenAI Base')}
+                                    </span>
+                                </div>
+                                <div className="s-row">
+                                    <label>{t('Relay Key', '中转密钥')}</label>
+                                    <input
+                                        className="s-input"
+                                        type="password"
+                                        value={relayDraft.apiKey}
+                                        onChange={(e) => updateRelayDraft({ apiKey: sanitizeInput(e.target.value) })}
+                                        placeholder={t('Optional: reuse saved provider key', '可选：留空则复用已保存 provider key')}
+                                        autoComplete="off"
+                                    />
+                                </div>
+                                <div className="s-row">
+                                    <label>{t('Models', '模型')}</label>
+                                    <input
+                                        className="s-input"
+                                        value={relayDraft.models}
+                                        onChange={(e) => updateRelayDraft({ models: sanitizeInput(e.target.value) })}
+                                        placeholder={(selectedRelayTemplate?.default_models || []).join(', ') || 'gpt-5.4, gpt-4o'}
+                                    />
+                                </div>
+                                <div className="flex items-center gap-2 mt-2">
+                                    <button className="btn btn-primary text-[10px]" onClick={addRelayEndpoint} disabled={relaySaving}>
+                                        {relaySaving ? t('Adding...', '添加中...') : t('Add Relay', '添加中转')}
+                                    </button>
+                                    {relayStatus === 'ok:add' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Relay added', '中转已添加')}</span>}
+                                    {relayStatus === 'ok:test' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Relay test passed', '中转测试通过')}</span>}
+                                    {relayStatus === 'ok:remove' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Relay removed', '中转已删除')}</span>}
+                                    {relayStatus && !relayStatus.startsWith('ok:') && (
+                                        <span className="text-[9px]" style={{ color: 'var(--red)' }}>
+                                            {relayStatus}
+                                        </span>
+                                    )}
+                                </div>
+
+                                <div style={{ marginTop: 12, display: 'grid', gap: 8 }}>
+                                    {relayEndpoints.length === 0 && (
+                                        <div className="s-hint">
+                                            {t(
+                                                'No relay endpoints configured. This is why GPT-5.4 is still going straight to the current OpenAI-compatible gateway instead of using a relay pool.',
+                                                '当前还没有配置任何 relay endpoint，这就是为什么 GPT-5.4 仍然直接走当前 OpenAI-compatible 网关，而不是走中转池。'
+                                            )}
+                                        </div>
+                                    )}
+                                    {relayEndpoints.map((relay) => {
+                                        const lastTestOk = Boolean(relay.last_test?.success || relay.last_test?.connectivity_ok);
+                                        const lastTestLabel = relay.last_test
+                                            ? (lastTestOk
+                                                ? `${t('Test OK', '测试通过')}${relay.last_test?.latency_ms ? ` · ${relay.last_test.latency_ms}ms` : ''}`
+                                                : t('Test Failed', '测试失败'))
+                                            : t('Untested', '未测试');
+                                        return (
+                                            <div
+                                                key={relay.id}
+                                                style={{
+                                                    padding: '10px 12px',
+                                                    borderRadius: 10,
+                                                    border: '1px solid rgba(148,163,184,0.18)',
+                                                    background: 'rgba(15,23,42,0.16)',
+                                                }}
+                                            >
+                                                <div className="flex items-center justify-between gap-3">
+                                                    <div>
+                                                        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text1)' }}>
+                                                            {relay.name || relay.id}
+                                                        </div>
+                                                        <div style={{ fontSize: 9, color: 'var(--text3)', marginTop: 2 }}>
+                                                            {PROVIDER_LABELS[relay.provider] || relay.provider || 'Relay'} · {relay.base_url || '-'}
+                                                        </div>
+                                                        <div style={{ fontSize: 9, color: 'var(--text2)', marginTop: 4 }}>
+                                                            {(relay.models || []).join(', ') || t('Template defaults', '模板默认模型')}
+                                                        </div>
+                                                    </div>
+                                                    <div className="flex items-center gap-2">
+                                                        <span
+                                                            style={{
+                                                                fontSize: 9,
+                                                                padding: '3px 8px',
+                                                                borderRadius: 999,
+                                                                color: lastTestOk ? 'var(--green)' : 'var(--text3)',
+                                                                border: `1px solid ${lastTestOk ? 'rgba(34,197,94,0.35)' : 'rgba(148,163,184,0.18)'}`,
+                                                                background: lastTestOk ? 'rgba(34,197,94,0.08)' : 'rgba(148,163,184,0.06)',
+                                                            }}
+                                                        >
+                                                            {lastTestLabel}
+                                                        </span>
+                                                        <button
+                                                            className="btn text-[10px]"
+                                                            onClick={() => testRelayEndpoint(relay.id)}
+                                                            disabled={relayActionId === relay.id}
+                                                            type="button"
+                                                        >
+                                                            {relayActionId === relay.id ? t('Testing...', '测试中...') : t('Test', '测试')}
+                                                        </button>
+                                                        <button
+                                                            className="btn text-[10px]"
+                                                            onClick={() => removeRelayEndpoint(relay.id)}
+                                                            disabled={relayActionId === relay.id}
+                                                            type="button"
+                                                        >
+                                                            {t('Delete', '删除')}
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                                {relay.last_test?.error && (
+                                                    <div style={{ fontSize: 9, color: 'var(--red)', marginTop: 6 }}>
+                                                        {relay.last_test.error}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
                         </>
                     )}
 
@@ -591,6 +1137,66 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
+                                <div className="s-section-title">{t('Analyst Research Pipeline', '分析师研究管线')}</div>
+                                <div className="s-row">
+                                    <label>{t('Crawl Intensity', '爬取强度')}</label>
+                                    <select
+                                        className="s-input"
+                                        value={analystCrawlIntensity}
+                                        onChange={e => setAnalystCrawlIntensity(e.target.value as AnalystCrawlIntensity)}
+                                        style={{ width: 'auto' }}
+                                    >
+                                        <option value="off">{t('Off', '关闭')}</option>
+                                        <option value="low">{t('Low', '少量')}</option>
+                                        <option value="medium">{t('Medium', '中等')}</option>
+                                        <option value="high">{t('High', '大量')}</option>
+                                    </select>
+                                </div>
+                                <div className="s-hint" style={{ lineHeight: 1.7 }}>
+                                    {t(
+                                        'Controls how aggressively the analyst searches GitHub/docs/source references before handing builders a brief.',
+                                        '控制分析师在给 builder 下发 brief 之前，搜索 GitHub / 文档 / 源码参考的积极程度。'
+                                    )}
+                                </div>
+                                <div className="s-toggle" style={{ marginTop: 8 }}>
+                                    <label>{t('Enable Query Search', '启用搜索查询')}</label>
+                                    <input type="checkbox" checked={analystEnableQuerySearch} onChange={e => setAnalystEnableQuerySearch(e.target.checked)} />
+                                </div>
+                                <div className="s-hint">
+                                    {t(
+                                        'Allows analyst to use query-based search before batch-fetching concrete URLs.',
+                                        '允许分析师先做 query 搜索，再批量抓取具体 URL。'
+                                    )}
+                                </div>
+                                <div className="s-toggle" style={{ marginTop: 8 }}>
+                                    <label>{t('Prefer Scrapling', '优先使用 Scrapling')}</label>
+                                    <input type="checkbox" checked={analystUseScrapling} onChange={e => setAnalystUseScrapling(e.target.checked)} />
+                                </div>
+                                <div className="s-hint">
+                                    {t(
+                                        'When available, use Scrapling before Crawl4AI/urllib for harder sites and richer extraction.',
+                                        '可用时优先使用 Scrapling，再回退到 Crawl4AI/urllib，以提升复杂页面抓取与抽取质量。'
+                                    )}
+                                </div>
+                                <div className="s-row" style={{ alignItems: 'flex-start', marginTop: 8 }}>
+                                    <label style={{ paddingTop: 6 }}>{t('Preferred Sites', '优先站点')}</label>
+                                    <textarea
+                                        className="s-input"
+                                        value={analystPreferredSites}
+                                        onChange={e => setAnalystPreferredSites(sanitizeMultilineInput(e.target.value))}
+                                        placeholder={'https://github.com\nhttps://threejs.org\nhttps://developer.mozilla.org'}
+                                        rows={6}
+                                        style={{ minHeight: 108, resize: 'vertical', lineHeight: 1.5 }}
+                                    />
+                                </div>
+                                <div className="s-hint" style={{ lineHeight: 1.7 }}>
+                                    {t(
+                                        'One site per line. The analyst will prioritize these domains for source_fetch query/search and source allocation to builders.',
+                                        '每行一个站点。分析师会优先在这些域名内进行 source_fetch 搜索，并把抓到的源码/文档优先分配给各个 builder。'
+                                    )}
+                                </div>
+                            </div>
+                            <div className="s-section">
                                 <div className="s-section-title">{t('Image Generation Backend', '图像生成后端')}</div>
                                 <div className="s-row">
                                     <label>ComfyUI URL</label>
@@ -666,6 +1272,39 @@ export default function SettingsModal({
 
                     {tab === 'nodes' && (
                         <>
+                            <div className="s-section" style={{
+                                background: thinkingDepth === 'fast'
+                                    ? 'rgba(250, 204, 21, 0.08)'
+                                    : 'rgba(59, 130, 246, 0.08)',
+                                border: `1px solid ${thinkingDepth === 'fast' ? 'rgba(250, 204, 21, 0.25)' : 'rgba(59, 130, 246, 0.25)'}`,
+                                borderRadius: 8,
+                                padding: '12px 14px',
+                            }}>
+                                <div className="s-section-title" style={{ fontSize: '12px' }}>
+                                    {thinkingDepth === 'fast' ? '\u26A1' : '\u{1F9E0}'} {t('Speed Mode (Fast / Deep)', '速度模式 (Fast / Deep)')}
+                                </div>
+                                <div className="s-hint" style={{ lineHeight: 1.7 }}>
+                                    {t(
+                                        'Controls the speed/quality tradeoff for ALL AI nodes. Fast = lower reasoning effort + tighter timeouts (faster but less thorough). Deep = full reasoning power + relaxed timeouts (slower but higher quality).',
+                                        '控制所有 AI 节点的速度/质量权衡。Fast = 较低推理力度 + 紧凑超时（更快但不够深入）。Deep = 完整推理能力 + 宽松超时（更慢但质量更高）。'
+                                    )}
+                                </div>
+                                <div className="s-row" style={{ marginTop: 8 }}>
+                                    <label style={{ fontWeight: 600 }}>{t('Global Mode', '全局模式')}</label>
+                                    <select
+                                        className="s-input"
+                                        value={thinkingDepth}
+                                        onChange={(e) => setThinkingDepth(e.target.value as 'fast' | 'deep')}
+                                        style={{
+                                            fontWeight: 600,
+                                            color: thinkingDepth === 'fast' ? '#facc15' : '#60a5fa',
+                                        }}
+                                    >
+                                        <option value="deep">{t('Deep — Full power, relaxed timeouts', 'Deep — 完整推理，宽松超时')}</option>
+                                        <option value="fast">{t('Fast — Quick reasoning, tight timeouts', 'Fast — 快速推理，紧凑超时')}</option>
+                                    </select>
+                                </div>
+                            </div>
                             <div className="s-section">
                                 <div className="s-section-title">{t('Per-Node Model Fallback', '节点专属模型回退链')}</div>
                                 <div className="s-hint" style={{ lineHeight: 1.7 }}>
@@ -733,6 +1372,443 @@ export default function SettingsModal({
                                 {saveStatus === 'success' && <span className="text-[9px]" style={{ color: 'var(--green)' }}>✓ {t('Saved!', '已保存!')}</span>}
                                 {saveStatus === 'error' && <span className="text-[9px]" style={{ color: 'var(--red)' }}>✗ {t('Failed', '保存失败')}</span>}
                             </div>
+                        </>
+                    )}
+
+                    {tab === 'speed' && (
+                        <>
+                            <div className="s-section">
+                                <div className="s-section-title">{t('Model Speed Test', '可用模型测速')}</div>
+                                <div className="s-hint" style={{ lineHeight: 1.7 }}>
+                                    {t(
+                                        'Test the latency of all configured models. Only models with valid API keys are tested. Each model receives a trivial prompt with a 15s timeout.',
+                                        '测试所有已配置模型的延迟。仅测试有 API Key 的模型。每个模型发送一个简单请求，超时 15 秒。'
+                                    )}
+                                </div>
+                                <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
+                                    <button
+                                        className="btn btn-primary text-[10px]"
+                                        disabled={speedTestRunning}
+                                        onClick={async () => {
+                                            setSpeedTestRunning(true);
+                                            setSpeedTestProgress(lang === 'zh' ? '正在测速...' : 'Testing...');
+                                            setSpeedTestResults({});
+                                            try {
+                                                const resp = await fetch(`${API_BASE}/api/models/speed-test`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    body: '{}',
+                                                    signal: AbortSignal.timeout(300_000),
+                                                });
+                                                if (resp.ok) {
+                                                    const data = await resp.json();
+                                                    setSpeedTestResults(data.results || {});
+                                                    setSpeedTestProgress(
+                                                        lang === 'zh'
+                                                            ? `完成：测试了 ${data.tested_count || 0} / ${data.total_models || 0} 个模型`
+                                                            : `Done: tested ${data.tested_count || 0} / ${data.total_models || 0} models`
+                                                    );
+                                                } else {
+                                                    setSpeedTestProgress(lang === 'zh' ? '测速失败' : 'Speed test failed');
+                                                }
+                                            } catch (err) {
+                                                setSpeedTestProgress(lang === 'zh' ? '请求超时或网络错误' : 'Timeout or network error');
+                                            } finally {
+                                                setSpeedTestRunning(false);
+                                            }
+                                        }}
+                                    >
+                                        {speedTestRunning
+                                            ? t('Testing...', '测速中...')
+                                            : t('Start Speed Test', '开始测速')}
+                                    </button>
+                                    {speedTestProgress && (
+                                        <span className="text-[9px]" style={{ color: 'var(--dimmed)' }}>{speedTestProgress}</span>
+                                    )}
+                                </div>
+                            </div>
+                            {Object.keys(speedTestResults).length > 0 && (
+                                <div className="s-section">
+                                    <div className="s-section-title">{t('Results', '测速结果')}</div>
+                                    <div style={{ overflowX: 'auto' }}>
+                                        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '10px' }}>
+                                            <thead>
+                                                <tr style={{ borderBottom: '1px solid var(--border)', textAlign: 'left' }}>
+                                                    <th style={{ padding: '6px 8px' }}>{t('Model', '模型')}</th>
+                                                    <th style={{ padding: '6px 8px' }}>{t('Provider', '提供商')}</th>
+                                                    <th style={{ padding: '6px 8px' }}>{t('Latency', '延迟')}</th>
+                                                    <th style={{ padding: '6px 8px' }}>{t('Status', '状态')}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {Object.entries(speedTestResults)
+                                                    .sort((a, b) => {
+                                                        // Sort: OK models by latency ascending, then failed models
+                                                        if (a[1].ok && !b[1].ok) return -1;
+                                                        if (!a[1].ok && b[1].ok) return 1;
+                                                        if (a[1].ok && b[1].ok) return a[1].latency_ms - b[1].latency_ms;
+                                                        return a[0].localeCompare(b[0]);
+                                                    })
+                                                    .map(([model, info]) => (
+                                                        <tr key={model} style={{ borderBottom: '1px solid var(--border-faint, rgba(255,255,255,0.06))' }}>
+                                                            <td style={{ padding: '5px 8px', fontWeight: 500 }}>{model}</td>
+                                                            <td style={{ padding: '5px 8px', color: 'var(--dimmed)' }}>
+                                                                {PROVIDER_LABELS[info.provider] || info.provider}
+                                                            </td>
+                                                            <td style={{ padding: '5px 8px' }}>
+                                                                {info.ok ? (
+                                                                    <span style={{
+                                                                        color: info.latency_ms < 3000 ? 'var(--green, #4ade80)' :
+                                                                               info.latency_ms < 8000 ? 'var(--yellow, #facc15)' :
+                                                                               'var(--red, #f87171)',
+                                                                        fontWeight: 600,
+                                                                    }}>
+                                                                        {info.latency_ms}ms
+                                                                    </span>
+                                                                ) : (
+                                                                    <span style={{ color: 'var(--dimmed)' }}>—</span>
+                                                                )}
+                                                            </td>
+                                                            <td style={{ padding: '5px 8px' }}>
+                                                                {info.ok ? (
+                                                                    <span style={{ color: 'var(--green, #4ade80)' }}>OK</span>
+                                                                ) : info.error === 'no_api_key' ? (
+                                                                    <span style={{ color: 'var(--dimmed)' }}>{t('No Key', '未配置')}</span>
+                                                                ) : (
+                                                                    <span style={{ color: 'var(--red, #f87171)' }} title={info.error}>
+                                                                        {t('Failed', '失败')}
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+                        </>
+                    )}
+
+                    {tab === 'cli' && (
+                        <>
+                            {/* CLI Mode Toggle */}
+                            <div className="s-section">
+                                <div className="s-section-title">{t('CLI Mode', 'CLI 模式')}</div>
+                                <div className="s-hint" style={{ marginBottom: 8 }}>
+                                    {t(
+                                        'When enabled, all node AI calls are routed through local CLI tools (Claude Code, Codex, Gemini CLI, etc.) instead of API relay endpoints. This gives direct access, lower latency, and built-in file editing capabilities.',
+                                        '开启后，所有节点的 AI 调用将通过本地 CLI 工具（Claude Code、Codex、Gemini CLI 等）执行，而不是通过 API 中转站。这提供直连访问、更低延迟和内置文件编辑能力。',
+                                    )}
+                                </div>
+                                <div className="s-toggle">
+                                    <label>{t('Enable CLI Mode', '启用 CLI 模式')}</label>
+                                    <input type="checkbox" checked={cliEnabled} onChange={e => setCliEnabled(e.target.checked)} />
+                                </div>
+                                {/* Save button — prominently placed right after toggle */}
+                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
+                                    <button
+                                        style={{
+                                            padding: '6px 18px', fontSize: 13, fontWeight: 600,
+                                            background: 'var(--accent, #3b82f6)', color: '#fff',
+                                            border: 'none', borderRadius: 6, cursor: 'pointer',
+                                            opacity: saving ? 0.6 : 1,
+                                        }}
+                                        onClick={saveToBackend} disabled={saving}
+                                    >
+                                        {saving ? t('Saving...', '保存中...') : t('Save CLI Settings', '保存 CLI 设置')}
+                                    </button>
+                                    {saveStatus === 'success' && <span style={{ fontSize: 12, color: 'var(--green, #4ade80)' }}>✓ {t('Saved!', '已保存!')}</span>}
+                                    {saveStatus === 'error' && <span style={{ fontSize: 12, color: 'var(--red, #f87171)' }}>✗ {t('Failed', '保存失败')}</span>}
+                                </div>
+                            </div>
+
+                            {/* CLI Detection — auto-detect on tab open */}
+                            <div className="s-section" ref={(el) => {
+                                // Auto-detect CLIs when the tab first appears and nothing was detected yet
+                                if (el && Object.keys(cliDetected).length === 0 && !cliDetecting) {
+                                    setCliDetecting(true);
+                                    fetch(`${API_BASE}/api/cli/detect?force=true`, { credentials: 'omit' })
+                                        .then(r => r.ok ? r.json() : null)
+                                        .then(data => { if (data?.clis) setCliDetected(data.clis); })
+                                        .catch(() => {})
+                                        .finally(() => setCliDetecting(false));
+                                }
+                            }}>
+                                <div className="s-section-title">{t('Detected CLI Tools', '已检测的 CLI 工具')}</div>
+                                <div className="s-hint" style={{ marginBottom: 8 }}>
+                                    {t(
+                                        'Scans your system PATH for all known AI CLI tools — registered (Claude Code, Codex, Gemini, Aider) and discovered (Cursor, Copilot, Ollama, etc.).',
+                                        '扫描系统 PATH 中所有已知的 AI CLI 工具 — 注册的（Claude Code、Codex、Gemini、Aider）和发现的（Cursor、Copilot、Ollama 等）。',
+                                    )}
+                                </div>
+                                <div className="s-row" style={{ gap: 8 }}>
+                                    <button
+                                        className="s-btn"
+                                        disabled={cliDetecting}
+                                        onClick={async () => {
+                                            setCliDetecting(true);
+                                            try {
+                                                const resp = await fetch(`${API_BASE}/api/cli/detect?force=true`, { credentials: 'omit' });
+                                                if (resp.ok) {
+                                                    const data = await resp.json();
+                                                    if (data.clis) setCliDetected(data.clis);
+                                                }
+                                            } catch { /* offline */ }
+                                            setCliDetecting(false);
+                                        }}
+                                    >
+                                        {cliDetecting ? t('Scanning...', '扫描中...') : t('Scan All CLIs', '扫描所有 CLI')}
+                                    </button>
+                                    <button
+                                        className="s-btn"
+                                        disabled={cliTestingAll || Object.keys(cliDetected).length === 0}
+                                        onClick={async () => {
+                                            setCliTestingAll(true);
+                                            setCliTestResults({});
+                                            try {
+                                                const resp = await fetch(`${API_BASE}/api/cli/test-all`, {
+                                                    method: 'POST',
+                                                    headers: { 'Content-Type': 'application/json' },
+                                                    credentials: 'omit',
+                                                });
+                                                if (resp.ok) {
+                                                    const data = await resp.json();
+                                                    if (data.results) setCliTestResults(data.results);
+                                                }
+                                            } catch { /* offline */ }
+                                            setCliTestingAll(false);
+                                        }}
+                                    >
+                                        {cliTestingAll ? t('Testing All...', '全部测试中...') : t('Test All', '全部测试')}
+                                    </button>
+                                </div>
+
+                                {cliDetecting && Object.keys(cliDetected).length === 0 && (
+                                    <div style={{ marginTop: 12, opacity: 0.6, fontSize: 12 }}>
+                                        {t('Scanning system PATH for AI CLI tools...', '正在扫描系统 PATH 中的 AI CLI 工具...')}
+                                    </div>
+                                )}
+                                {Object.keys(cliDetected).length > 0 && (
+                                    <div style={{ marginTop: 12 }}>
+                                        <div style={{ fontSize: 11, opacity: 0.5, marginBottom: 6 }}>
+                                            {t(
+                                                `Found ${Object.values(cliDetected).filter(d => d.available).length} available / ${Object.keys(cliDetected).length} scanned`,
+                                                `发现 ${Object.values(cliDetected).filter(d => d.available).length} 个可用 / 共扫描 ${Object.keys(cliDetected).length} 个`,
+                                            )}
+                                        </div>
+                                        <table className="s-table" style={{ width: '100%', borderCollapse: 'collapse' }}>
+                                            <thead>
+                                                <tr>
+                                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>{t('CLI', 'CLI')}</th>
+                                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>{t('Status', '状态')}</th>
+                                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>{t('Path', '路径')}</th>
+                                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>{t('Version', '版本')}</th>
+                                                    <th style={{ textAlign: 'left', padding: '6px 8px' }}>{t('Features', '特性')}</th>
+                                                    <th style={{ textAlign: 'center', padding: '6px 8px' }}>{t('Test', '测试')}</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody>
+                                                {/* Available CLIs first, then unavailable */}
+                                                {Object.entries(cliDetected)
+                                                    .sort(([,a], [,b]) => (b.available ? 1 : 0) - (a.available ? 1 : 0))
+                                                    .map(([name, info]) => {
+                                                    const testResult = cliTestResults[name];
+                                                    const isExtra = info.is_extra;
+                                                    return (
+                                                        <tr key={name} style={{ borderBottom: '1px solid var(--border, #333)', opacity: info.available ? 1 : 0.4 }}>
+                                                            <td style={{ padding: '6px 8px', fontWeight: 600 }}>
+                                                                {info.display_name}
+                                                                {isExtra && <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>{t('(discovered)', '(发现)')}</span>}
+                                                            </td>
+                                                            <td style={{ padding: '6px 8px' }}>
+                                                                {info.available
+                                                                    ? <span style={{ color: '#4ade80' }}>{t('Available', '可用')}</span>
+                                                                    : <span style={{ color: '#f87171' }}>{t('Not Found', '未找到')}</span>
+                                                                }
+                                                            </td>
+                                                            <td style={{ padding: '6px 8px', fontSize: 10, opacity: 0.6, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={info.path || ''}>
+                                                                {info.path || '-'}
+                                                            </td>
+                                                            <td style={{ padding: '6px 8px', fontSize: 11, opacity: 0.7 }}>
+                                                                {info.version || '-'}
+                                                            </td>
+                                                            <td style={{ padding: '6px 8px', fontSize: 11 }}>
+                                                                {[
+                                                                    info.supports_json && 'JSON',
+                                                                    info.supports_file_ops && t('File Ops', '文件操作'),
+                                                                    info.supports_streaming && t('Stream', '流式'),
+                                                                ].filter(Boolean).join(', ') || '-'}
+                                                            </td>
+                                                            <td style={{ padding: '6px 8px', textAlign: 'center' }}>
+                                                                {info.available ? (
+                                                                    testResult ? (
+                                                                        testResult.success
+                                                                            ? <span style={{ color: '#4ade80' }}>{testResult.latency_s}s</span>
+                                                                            : <span style={{ color: '#f87171' }} title={testResult.error}>FAIL</span>
+                                                                    ) : (
+                                                                        <button
+                                                                            className="s-btn-sm"
+                                                                            onClick={async () => {
+                                                                                try {
+                                                                                    const resp = await fetch(`${API_BASE}/api/cli/test`, {
+                                                                                        method: 'POST',
+                                                                                        headers: { 'Content-Type': 'application/json' },
+                                                                                        credentials: 'omit',
+                                                                                        body: JSON.stringify({ cli: name }),
+                                                                                    });
+                                                                                    if (resp.ok) {
+                                                                                        const result = await resp.json();
+                                                                                        setCliTestResults(prev => ({ ...prev, [name]: result }));
+                                                                                    }
+                                                                                } catch { /* offline */ }
+                                                                            }}
+                                                                        >
+                                                                            {t('Test', '测试')}
+                                                                        </button>
+                                                                    )
+                                                                ) : '-'}
+                                                            </td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Global CLI + Model Preference */}
+                            <div className="s-section">
+                                <div className="s-section-title">{t('Global CLI & Model', '全局 CLI 和模型')}</div>
+                                <div className="s-hint" style={{ marginBottom: 8 }}>
+                                    {t(
+                                        'Set the default CLI and model for all nodes. Per-node overrides below take precedence.',
+                                        '设置所有节点的默认 CLI 和模型。下方的单节点设置优先级更高。',
+                                    )}
+                                </div>
+                                <div className="s-row" style={{ gap: 8, alignItems: 'center' }}>
+                                    <label style={{ width: 80 }}>{t('CLI', 'CLI')}</label>
+                                    <select
+                                        className="s-input"
+                                        value={cliPreferred}
+                                        onChange={e => { setCliPreferred(e.target.value); setCliPreferredModel(''); }}
+                                        style={{ width: 'auto', minWidth: 140 }}
+                                    >
+                                        <option value="">{t('Auto (per node type)', '自动（按节点类型）')}</option>
+                                        {Object.entries(cliDetected)
+                                            .filter(([, info]) => info.available && !info.is_extra)
+                                            .map(([name, info]) => (
+                                                <option key={name} value={name}>{info.display_name}</option>
+                                            ))
+                                        }
+                                    </select>
+                                    <label style={{ width: 60 }}>{t('Model', '模型')}</label>
+                                    <select
+                                        className="s-input"
+                                        value={cliPreferredModel}
+                                        onChange={e => setCliPreferredModel(e.target.value)}
+                                        style={{ width: 'auto', minWidth: 160 }}
+                                        disabled={!cliPreferred}
+                                    >
+                                        <option value="">{t('Default', '默认')}</option>
+                                        {(cliModelOptions[cliPreferred] || [])
+                                            .filter(m => m.id !== '')
+                                            .map(m => (
+                                                <option key={m.id} value={m.id}>{m.name}</option>
+                                            ))
+                                        }
+                                    </select>
+                                </div>
+                            </div>
+
+                            {/* Per-node CLI + Model override */}
+                            {cliEnabled && Object.values(cliDetected).some(d => d.available) && (
+                                <div className="s-section">
+                                    <div className="s-section-title">{t('Per-Node CLI & Model', '单节点 CLI 和模型')}</div>
+                                    <div className="s-hint" style={{ marginBottom: 8 }}>
+                                        {t(
+                                            'Override the CLI and model for each node type. Auto inherits the global setting above.',
+                                            '为每个节点类型单独指定 CLI 和模型。自动则继承上方的全局设置。',
+                                        )}
+                                    </div>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                                        <thead>
+                                            <tr style={{ borderBottom: '1px solid var(--border, #333)' }}>
+                                                <th style={{ textAlign: 'left', padding: '4px 6px', width: 100 }}>{t('Node', '节点')}</th>
+                                                <th style={{ textAlign: 'left', padding: '4px 6px' }}>{t('CLI', 'CLI')}</th>
+                                                <th style={{ textAlign: 'left', padding: '4px 6px' }}>{t('Model', '模型')}</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {NODE_MODEL_CONFIG_ROLES.map(role => {
+                                                const override = cliNodeOverrides[role] || { cli: '', model: '' };
+                                                const effectiveCli = override.cli || cliPreferred;
+                                                const modelsForCli = cliModelOptions[effectiveCli] || [];
+                                                return (
+                                                    <tr key={role} style={{ borderBottom: '1px solid var(--border, #222)' }}>
+                                                        <td style={{ padding: '4px 6px', fontWeight: 500, textTransform: 'capitalize' }}>{role}</td>
+                                                        <td style={{ padding: '4px 6px' }}>
+                                                            <select
+                                                                className="s-input"
+                                                                value={override.cli}
+                                                                onChange={e => setCliNodeOverrides(prev => ({
+                                                                    ...prev,
+                                                                    [role]: { ...prev[role], cli: e.target.value, model: '' },
+                                                                }))}
+                                                                style={{ width: 'auto', minWidth: 120, fontSize: 11 }}
+                                                            >
+                                                                <option value="">{t('Auto', '自动')}</option>
+                                                                {Object.entries(cliDetected)
+                                                                    .filter(([, info]) => info.available && !info.is_extra)
+                                                                    .map(([name, info]) => (
+                                                                        <option key={name} value={name}>{info.display_name}</option>
+                                                                    ))
+                                                                }
+                                                            </select>
+                                                        </td>
+                                                        <td style={{ padding: '4px 6px' }}>
+                                                            <select
+                                                                className="s-input"
+                                                                value={override.model}
+                                                                onChange={e => setCliNodeOverrides(prev => ({
+                                                                    ...prev,
+                                                                    [role]: { ...prev[role], cli: prev[role]?.cli || '', model: e.target.value },
+                                                                }))}
+                                                                style={{ width: 'auto', minWidth: 140, fontSize: 11 }}
+                                                            >
+                                                                <option value="">{t('Default', '默认')}</option>
+                                                                {modelsForCli
+                                                                    .filter((m: CLIModelOption) => m.id !== '')
+                                                                    .map((m: CLIModelOption) => (
+                                                                        <option key={m.id} value={m.id}>{m.name}</option>
+                                                                    ))
+                                                                }
+                                                            </select>
+                                                        </td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                    {/* Bottom save button — always visible after table */}
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
+                                        <button
+                                            style={{
+                                                padding: '6px 18px', fontSize: 13, fontWeight: 600,
+                                                background: 'var(--accent, #3b82f6)', color: '#fff',
+                                                border: 'none', borderRadius: 6, cursor: 'pointer',
+                                                opacity: saving ? 0.6 : 1,
+                                            }}
+                                            onClick={saveToBackend} disabled={saving}
+                                        >
+                                            {saving ? t('Saving...', '保存中...') : t('Save CLI Settings', '保存 CLI 设置')}
+                                        </button>
+                                        {saveStatus === 'success' && <span style={{ fontSize: 12, color: 'var(--green, #4ade80)' }}>✓ {t('Saved!', '已保存!')}</span>}
+                                        {saveStatus === 'error' && <span style={{ fontSize: 12, color: 'var(--red, #f87171)' }}>✗ {t('Failed', '保存失败')}</span>}
+                                    </div>
+                                </div>
+                            )}
                         </>
                     )}
 

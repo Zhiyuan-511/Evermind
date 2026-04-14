@@ -65,13 +65,30 @@ function serializeLogArg(value) {
     }
 }
 
-function writeDesktopLog(level, args) {
+// V4.3 PERF: Async batched log writes — old appendFileSync blocked the
+// Electron main thread on every console.log, causing UI stutter and CPU heat.
+let _logBuffer = '';
+let _logFlushTimer = null;
+function _flushLogBuffer() {
+    if (!_logBuffer) return;
+    const chunk = _logBuffer;
+    _logBuffer = '';
+    _logFlushTimer = null;
     try {
         fs.mkdirSync(LOG_DIR, { recursive: true });
-        const line = `[${new Date().toISOString()}] [${level.toUpperCase()}] ${args.map(serializeLogArg).join(' ')}\n`;
-        fs.appendFileSync(MAIN_LOG_PATH, line, 'utf8');
+        fs.appendFile(MAIN_LOG_PATH, chunk, 'utf8', () => {});
     } catch {
         // ignore log write failures
+    }
+}
+function writeDesktopLog(level, args) {
+    try {
+        _logBuffer += `[${new Date().toISOString()}] [${level.toUpperCase()}] ${args.map(serializeLogArg).join(' ')}\n`;
+        if (!_logFlushTimer) {
+            _logFlushTimer = setTimeout(_flushLogBuffer, 500);
+        }
+    } catch {
+        // ignore
     }
 }
 
@@ -1050,12 +1067,20 @@ app.on('open-url', (event, deepLinkUrl) => {
 });
 
 // ── Cleanup ──
+// v3.1: Graceful shutdown with idempotent flag to prevent double-kill.
+let _cleanupRan = false;
 function cleanup() {
+    if (_cleanupRan) return;
+    _cleanupRan = true;
     console.log('[Electron] Cleaning up...');
     if (backendProcess && backendProcess.pid) {
-        treeKill(backendProcess.pid, 'SIGTERM', (err) => {
-            if (err) console.error('[Electron] Failed to kill backend:', err);
-        });
+        try { process.kill(backendProcess.pid, 'SIGTERM'); } catch {}
+        // v3.1: 8s grace period (was 3s) — backend needs time for uvicorn
+        // lifespan shutdown, task persistence, and lock file cleanup.
+        const pid = backendProcess.pid;
+        setTimeout(() => {
+            try { process.kill(pid, 0); treeKill(pid, 'SIGKILL', () => {}); } catch {}
+        }, 8000);
         backendProcess = null;
     }
     if (frontendProcess && frontendProcess.pid) {
@@ -1069,7 +1094,7 @@ function cleanup() {
 app.on('before-quit', cleanup);
 app.on('window-all-closed', () => {
     cleanup();
-    app.quit();
+    setTimeout(() => app.quit(), 2000);
 });
 
 process.on('SIGINT', () => { cleanup(); process.exit(0); });

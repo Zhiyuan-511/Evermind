@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState, useMemo, useCallback, type CSSProperties } from 'react';
-import { type TaskCard, type TaskStatus, type RunReportRecord, type NodeExecutionRecord, type RunRecord, type RunStatus, type SelfCheckItem, type ArtifactRecord, type ReviewDecisionRecord, type ValidationResultRecord, TASK_COLUMNS } from '@/lib/types';
+import { type TaskCard, type TaskStatus, type RunReportRecord, type NodeExecutionRecord, type RunStatus, type SelfCheckItem, type ArtifactRecord, type ReviewDecisionRecord, type ValidationResultRecord, TASK_COLUMNS } from '@/lib/types';
 import RunTimeline from './RunTimeline';
 import NodeInspectorPanel from './NodeInspectorPanel';
 import { useRunContext } from '@/contexts/TaskRunProvider';
@@ -170,9 +170,9 @@ const REVIEW_DECISION_CONFIG: Record<string, { label_en: string; label_zh: strin
 };
 
 const FALLBACK_TEMPLATES: WorkflowTemplateSummary[] = [
-    { id: 'simple', label: 'Simple (3 nodes)', description: '', nodeCount: 3 },
-    { id: 'standard', label: 'Standard (4 nodes)', description: '', nodeCount: 4 },
-    { id: 'pro', label: 'Pro (7-10 nodes)', description: '', nodeCount: 7 },
+    { id: 'simple', label: 'Simple (3 nodes)', description: '', nodeCount: 3, nodeCountMin: 3, nodeCountMax: 3 },
+    { id: 'standard', label: 'Standard (4 nodes)', description: '', nodeCount: 4, nodeCountMin: 4, nodeCountMax: 4 },
+    { id: 'pro', label: 'Pro (8-12 nodes)', description: '', nodeCount: 10, nodeCountMin: 8, nodeCountMax: 12 },
 ];
 
 export default function TaskDetailPanel({ task, lang, onClose, onBoardClose, onTransition, onUpdate, onRunActivity, runReports }: TaskDetailPanelProps) {
@@ -187,7 +187,7 @@ export default function TaskDetailPanel({ task, lang, onClose, onBoardClose, onT
     const [actionError, setActionError] = useState('');
     const [tabArtifacts, setTabArtifacts] = useState<ArtifactRecord[]>([]);
     const [tabArtifactsLoading, setTabArtifactsLoading] = useState(false);
-    const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
+    const tr = useCallback((zh: string, en: string) => (lang === 'zh' ? zh : en), [lang]);
 
     const { runs, latestRun, fetchRuns, fetchNodeExecutions, transitionRun } = useRunContext();
     const runCount = Math.max(task.runIds?.length || 0, runs.length);
@@ -297,7 +297,6 @@ export default function TaskDetailPanel({ task, lang, onClose, onBoardClose, onT
         })();
 
         return () => controller.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeTab, latestRun?.id, task.id]);
 
     const latestReviewDecision = useMemo(() => {
@@ -1242,7 +1241,7 @@ export default function TaskDetailPanel({ task, lang, onClose, onBoardClose, onT
                             const result = await apiLaunchRun({
                                 task_id: task.id,
                                 template_id: selectedTemplate,
-                                runtime: 'openclaw',
+                                runtime: 'local',
                                 trigger_source: 'ui',
                             });
                             if (!result?.success) throw new Error('Failed to launch run');

@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{GAME_TITLE}}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;overflow:hidden;background:#1a1a2e}
+canvas{display:block;margin:0 auto;background:#16213e}
+#hud{position:fixed;top:10px;left:50%;transform:translateX(-50%);color:#fff;font:bold 18px/1 monospace;text-shadow:0 2px 4px rgba(0,0,0,.6);z-index:10}
+#menu{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(0,0,0,.85);z-index:20;color:#fff;font-family:sans-serif}
+#menu h1{font-size:40px;margin-bottom:20px}
+#menu button{padding:12px 32px;font-size:18px;background:#e94560;color:#fff;border:none;border-radius:6px;cursor:pointer}
+#menu.hidden{display:none}
+</style>
+</head>
+<body>
+<div id="hud"><span id="scoreDisplay">Score: 0 | Level: 1</span></div>
+<div id="menu"><h1>{{GAME_TITLE}}</h1><p style="margin-bottom:20px;opacity:.7">Arrow keys / WASD to move, Space to jump</p><button onclick="startGame()">PLAY</button></div>
+<canvas id="gameCanvas"></canvas>
+<script>
+// ═══ CONFIG ═══
+const GRAVITY = 0.6, JUMP_FORCE = -12, MOVE_SPEED = 5, TILE = 32;
+const STATE = { MENU: 0, PLAYING: 1, GAME_OVER: 2 };
+let gameState = STATE.MENU, score = 0, level = 1;
+
+// ═══ CANVAS ═══
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = Math.min(800, innerWidth);
+canvas.height = Math.min(600, innerHeight);
+
+// ═══ PLAYER ═══
+const player = {
+  x: 64, y: 0, w: 24, h: 32, vx: 0, vy: 0, grounded: false, color: '#e94560',
+  update(dt) {
+    this.vy += GRAVITY;
+    this.x += this.vx;
+    this.y += this.vy;
+    this.grounded = false;
+    // Platform collision
+    for (const p of platforms) {
+      if (this.x + this.w > p.x && this.x < p.x + p.w &&
+          this.y + this.h > p.y && this.y + this.h < p.y + p.h / 2 + this.vy + 2) {
+        this.y = p.y - this.h;
+        this.vy = 0;
+        this.grounded = true;
+      }
+    }
+    // Coin collection
+    for (let i = coins.length - 1; i >= 0; i--) {
+      const c = coins[i];
+      if (Math.abs(this.x + this.w/2 - c.x) < 20 && Math.abs(this.y + this.h/2 - c.y) < 20) {
+        coins.splice(i, 1);
+        score += 10;
+        updateHUD();
+      }
+    }
+    // Fall death
+    if (this.y > canvas.height + 100) gameOver();
+    // Win condition
+    if (coins.length === 0) nextLevel();
+  },
+  draw() {
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, this.w, this.h);
+    // Eyes
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(this.x + 6, this.y + 8, 5, 5);
+    ctx.fillRect(this.x + 14, this.y + 8, 5, 5);
+  }
+};
+
+// ═══ PLATFORMS & COINS ═══
+let platforms = [], coins = [];
+function generateLevel(lvl) {
+  platforms = [{ x: 0, y: canvas.height - TILE, w: canvas.width, h: TILE, color: '#0f3460' }];
+  coins = [];
+  const count = 4 + lvl * 2;
+  for (let i = 0; i < count; i++) {
+    const px = 60 + Math.random() * (canvas.width - 120);
+    const py = canvas.height - 80 - Math.random() * (canvas.height * 0.6);
+    platforms.push({ x: px, y: py, w: 60 + Math.random() * 60, h: 16, color: '#533483' });
+    coins.push({ x: px + 30, y: py - 20, r: 8 });
+  }
+  player.x = 64; player.y = canvas.height - TILE - 40; player.vx = 0; player.vy = 0;
+}
+
+// ═══ INPUT ═══
+const keys = {};
+document.addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space') e.preventDefault(); });
+document.addEventListener('keyup', e => { keys[e.code] = false; });
+function handleInput() {
+  player.vx = 0;
+  if (keys['ArrowLeft'] || keys['KeyA']) player.vx = -MOVE_SPEED;
+  if (keys['ArrowRight'] || keys['KeyD']) player.vx = MOVE_SPEED;
+  if ((keys['ArrowUp'] || keys['KeyW'] || keys['Space']) && player.grounded) player.vy = JUMP_FORCE;
+}
+
+// ═══ RENDER ═══
+function draw() {
+  ctx.fillStyle = '#16213e';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // Stars
+  ctx.fillStyle = 'rgba(255,255,255,0.3)';
+  for (let i = 0; i < 30; i++) ctx.fillRect((i*137)%canvas.width, (i*89)%canvas.height, 2, 2);
+  // Platforms
+  for (const p of platforms) { ctx.fillStyle = p.color; ctx.fillRect(p.x, p.y, p.w, p.h); }
+  // Coins
+  ctx.fillStyle = '#ffd700';
+  for (const c of coins) { ctx.beginPath(); ctx.arc(c.x, c.y, c.r, 0, Math.PI*2); ctx.fill(); }
+  // Player
+  player.draw();
+}
+
+// ═══ STATE MANAGEMENT ═══
+function updateHUD() {
+  document.getElementById('scoreDisplay').textContent = `Score: ${score} | Level: ${level}`;
+}
+function gameOver() {
+  gameState = STATE.GAME_OVER;
+  document.getElementById('menu').classList.remove('hidden');
+  document.getElementById('menu').querySelector('h1').textContent = `Game Over — Score: ${score}`;
+}
+function nextLevel() {
+  level++;
+  generateLevel(level);
+  updateHUD();
+}
+function startGame() {
+  gameState = STATE.PLAYING; score = 0; level = 1;
+  generateLevel(level);
+  document.getElementById('menu').classList.add('hidden');
+  document.getElementById('menu').querySelector('h1').textContent = '{{GAME_TITLE}}';
+  updateHUD();
+}
+
+// ═══ GAME LOOP ═══
+function loop() {
+  requestAnimationFrame(loop);
+  if (gameState !== STATE.PLAYING) return;
+  handleInput();
+  player.update();
+  draw();
+}
+window.addEventListener('resize', () => {
+  canvas.width = Math.min(800, innerWidth);
+  canvas.height = Math.min(600, innerHeight);
+});
+loop();
+</script>
+</body>
+</html>

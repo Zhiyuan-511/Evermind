@@ -92,16 +92,27 @@ class SettingsPersistenceTests(unittest.TestCase):
         self.assertFalse(loaded['browser_headful'])
         self.assertFalse(loaded['reviewer_tester_force_headful'])
 
+    def test_default_analyst_settings_include_source_policy(self):
+        loaded = settings.load_settings()
+        analyst = loaded['analyst']
+        self.assertIn('https://github.com', analyst['preferred_sites'])
+        self.assertIn('https://github.com/KhronosGroup/glTF-Sample-Assets', analyst['preferred_sites'])
+        self.assertIn('https://github.com/D4Vinci/Scrapling', analyst['preferred_sites'])
+        self.assertIn('https://quaternius.com', analyst['preferred_sites'])
+        self.assertEqual(analyst['crawl_intensity'], 'medium')
+        self.assertTrue(analyst['use_scrapling_when_available'])
+        self.assertTrue(analyst['enable_query_search'])
+
     def test_default_models_prioritize_kimi_for_heavy_nodes_and_gpt_for_planner(self):
         loaded = settings.load_settings()
-        self.assertEqual(loaded['default_model'], 'kimi-coding')
-        self.assertEqual(loaded['node_model_preferences']['router'][:2], ['gpt-5.4', 'kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-5.4', 'kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['builder'][:1], ['kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['polisher'][:1], ['kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['imagegen'], ['kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['spritesheet'], ['kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['assetimport'], ['kimi-coding'])
+        self.assertEqual(loaded['default_model'], 'gpt-5.4-mini')
+        self.assertEqual(loaded['node_model_preferences']['router'][:2], ['gpt-5.4-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-5.4-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['builder'][:1], ['gpt-5.4-mini'])
+        self.assertEqual(loaded['node_model_preferences']['polisher'][:1], ['gpt-5.4-mini'])
+        self.assertEqual(loaded['node_model_preferences']['imagegen'], ['gpt-5.4-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['spritesheet'], ['gpt-5.4-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['assetimport'], ['gpt-5.4-mini', 'kimi-coding'])
 
     def test_node_model_preferences_round_trip(self):
         sample = settings.load_settings()
@@ -115,4 +126,21 @@ class SettingsPersistenceTests(unittest.TestCase):
 
         self.assertEqual(loaded['node_model_preferences']['builder'], ['gpt-5.4', 'claude-4-sonnet', 'kimi-coding'])
         self.assertEqual(loaded['node_model_preferences']['reviewer'], ['claude-4-sonnet'])
-        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-5.4', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-5.4-mini', 'kimi-coding'])
+
+    def test_analyst_settings_round_trip(self):
+        sample = settings.load_settings()
+        sample['analyst'] = {
+            'preferred_sites': ['https://github.com', 'https://threejs.org'],
+            'crawl_intensity': 'high',
+            'use_scrapling_when_available': False,
+            'enable_query_search': False,
+        }
+
+        self.assertTrue(settings.save_settings(sample))
+        loaded = settings.load_settings()
+
+        self.assertEqual(loaded['analyst']['preferred_sites'], ['https://github.com', 'https://threejs.org'])
+        self.assertEqual(loaded['analyst']['crawl_intensity'], 'high')
+        self.assertFalse(loaded['analyst']['use_scrapling_when_available'])
+        self.assertFalse(loaded['analyst']['enable_query_search'])

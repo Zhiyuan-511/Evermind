@@ -1,13 +1,16 @@
 'use client';
 
-import { ChatMessage } from '@/lib/types';
+import { ChatAttachment, ChatMessage } from '@/lib/types';
+import { uploadChatAttachments } from '@/lib/api';
+import { dedupeChatAttachments, formatAttachmentSize, MAX_CHAT_ATTACHMENTS } from '@/lib/chatAttachments';
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import TaskSummaryStrip from './TaskSummaryStrip';
 import RunCompletionCard from './RunCompletionCard';
 
 interface ChatPanelProps {
     messages: ChatMessage[];
-    onSendGoal: (goal: string) => void;
+    onSendGoal: (goal: string, attachments?: ChatAttachment[]) => void;
+    sessionId?: string;
     connected: boolean;
     running: boolean;
     onStop: () => void;
@@ -26,6 +29,7 @@ interface ChatPanelProps {
     onRevealInFinder?: (previewUrl: string) => void;
     selectedRuntime?: 'local' | 'openclaw';
     onRuntimeChange?: (runtime: 'local' | 'openclaw') => void;
+    showOpenClawRuntime?: boolean;
 }
 
 // ── Sanitization (unchanged) ──
@@ -217,9 +221,127 @@ function scrollToBottom(element: HTMLDivElement): void {
     element.scrollTop = element.scrollHeight;
 }
 
+function AttachmentList({
+    attachments,
+    lang,
+    onRemove,
+}: {
+    attachments: ChatAttachment[];
+    lang: 'en' | 'zh';
+    onRemove?: (attachmentId: string) => void;
+}) {
+    if (!attachments.length) return null;
+    return (
+        <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(auto-fill, minmax(88px, 1fr))',
+            gap: 8,
+            marginTop: 8,
+        }}>
+            {attachments.map((attachment) => {
+                const isImage = attachment.kind === 'image' && !!attachment.previewUrl;
+                return (
+                    <div
+                        key={attachment.id}
+                        title={attachment.path}
+                        style={{
+                            position: 'relative',
+                            borderRadius: 10,
+                            border: '1px solid rgba(255,255,255,0.08)',
+                            background: 'rgba(255,255,255,0.04)',
+                            overflow: 'hidden',
+                            minHeight: isImage ? 112 : 72,
+                        }}
+                    >
+                        {onRemove && (
+                            <button
+                                type="button"
+                                onClick={() => onRemove(attachment.id)}
+                                style={{
+                                    position: 'absolute',
+                                    top: 4,
+                                    right: 4,
+                                    zIndex: 2,
+                                    width: 20,
+                                    height: 20,
+                                    borderRadius: '50%',
+                                    border: 'none',
+                                    cursor: 'pointer',
+                                    background: 'rgba(0,0,0,0.55)',
+                                    color: '#fff',
+                                    fontSize: 11,
+                                    lineHeight: '20px',
+                                }}
+                            >
+                                ×
+                            </button>
+                        )}
+                        {isImage ? (
+                            <a
+                                href={attachment.previewUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{ display: 'block', textDecoration: 'none' }}
+                            >
+                                {/* eslint-disable-next-line @next/next/no-img-element */}
+                                <img
+                                    src={attachment.previewUrl}
+                                    alt={attachment.name}
+                                    style={{
+                                        display: 'block',
+                                        width: '100%',
+                                        height: 84,
+                                        objectFit: 'cover',
+                                        background: 'rgba(0,0,0,0.18)',
+                                    }}
+                                />
+                            </a>
+                        ) : (
+                            <div style={{
+                                height: 52,
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                fontSize: 18,
+                                color: 'var(--text2)',
+                                background: 'rgba(255,255,255,0.03)',
+                            }}>
+                                {attachment.kind === 'image' ? '🖼' : '📎'}
+                            </div>
+                        )}
+                        <div style={{ padding: '7px 8px 8px' }}>
+                            <div style={{
+                                fontSize: 10,
+                                fontWeight: 600,
+                                color: 'var(--text1)',
+                                lineHeight: 1.35,
+                                wordBreak: 'break-word',
+                            }}>
+                                {attachment.name}
+                            </div>
+                            <div style={{
+                                marginTop: 4,
+                                fontSize: 9,
+                                color: 'var(--text3)',
+                                lineHeight: 1.3,
+                            }}>
+                                {formatAttachmentSize(attachment.size)}
+                                {attachment.kind === 'image'
+                                    ? ` · ${lang === 'zh' ? '图片' : 'Image'}`
+                                    : ` · ${lang === 'zh' ? '文件' : 'File'}`}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })}
+        </div>
+    );
+}
+
 export default function ChatPanel({
     messages,
     onSendGoal,
+    sessionId = '',
     connected,
     running,
     onStop,
@@ -238,18 +360,23 @@ export default function ChatPanel({
     onRevealInFinder,
     selectedRuntime = 'local',
     onRuntimeChange,
+    showOpenClawRuntime = true,
 }: ChatPanelProps) {
     const [input, setInput] = useState('');
     const [logsExpanded, setLogsExpanded] = useState(false);
     const [inputFocused, setInputFocused] = useState(false);
     const [sendFlash, setSendFlash] = useState(false);
+    const [pendingAttachments, setPendingAttachments] = useState<ChatAttachment[]>([]);
+    const [attachmentsBusy, setAttachmentsBusy] = useState(false);
+    const [attachmentError, setAttachmentError] = useState('');
     const feedRef = useRef<HTMLDivElement>(null);
     const logsRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
     const feedShouldAutoScrollRef = useRef(true);
     const logsShouldAutoScrollRef = useRef(true);
 
-    const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
+    const tr = useCallback((zh: string, en: string) => lang === 'zh' ? zh : en, [lang]);
 
     // P0-1: Auto-focus input on mount and when run finishes
     useEffect(() => {
@@ -280,6 +407,37 @@ export default function ChatPanel({
         logsShouldAutoScrollRef.current = isNearBottom(logsRef.current);
     }, []);
 
+    const handlePickAttachments = useCallback(() => {
+        if (attachmentsBusy) return;
+        fileInputRef.current?.click();
+    }, [attachmentsBusy]);
+
+    const handleAttachmentSelection = useCallback(async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const files = Array.from(event.target.files || []).slice(0, MAX_CHAT_ATTACHMENTS);
+        event.target.value = '';
+        if (files.length === 0) return;
+        setAttachmentsBusy(true);
+        setAttachmentError('');
+        try {
+            const { attachments, rejected } = await uploadChatAttachments(sessionId, files);
+            if (attachments.length > 0) {
+                setPendingAttachments((prev) => dedupeChatAttachments([...prev, ...attachments]).slice(0, MAX_CHAT_ATTACHMENTS));
+            }
+            if (rejected.length > 0) {
+                setAttachmentError(rejected.slice(0, 2).join(' · '));
+            }
+        } catch (error) {
+            setAttachmentError(String(error instanceof Error ? error.message : error || tr('附件上传失败', 'Attachment upload failed')));
+        } finally {
+            setAttachmentsBusy(false);
+        }
+    }, [sessionId, tr]);
+
+    const handleRemoveAttachment = useCallback((attachmentId: string) => {
+        setPendingAttachments((prev) => prev.filter((attachment) => attachment.id !== attachmentId));
+        setAttachmentError('');
+    }, []);
+
     useEffect(() => {
         if (!feedRef.current || !feedShouldAutoScrollRef.current) return;
         scrollToBottom(feedRef.current);
@@ -292,12 +450,14 @@ export default function ChatPanel({
 
     // P0-2: Send with visual flash confirmation
     const handleSend = useCallback(() => {
-        if (!input.trim() || !connected) return;
-        onSendGoal(input.trim());
+        if ((!input.trim() && pendingAttachments.length === 0) || !connected || attachmentsBusy) return;
+        onSendGoal(input.trim(), pendingAttachments);
         setInput('');
+        setPendingAttachments([]);
+        setAttachmentError('');
         setSendFlash(true);
         setTimeout(() => setSendFlash(false), 800);
-    }, [input, connected, onSendGoal]);
+    }, [attachmentsBusy, connected, input, onSendGoal, pendingAttachments]);
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
@@ -395,6 +555,9 @@ export default function ChatPanel({
                                 }}
                                 dangerouslySetInnerHTML={{ __html: sanitizeHtml(stripLeadingMarker(msg.content)) }}
                             />
+                            )}
+                            {msg.attachments && msg.attachments.length > 0 && (
+                                <AttachmentList attachments={msg.attachments} lang={lang} />
                             )}
                         </div>
                     )})
@@ -526,7 +689,7 @@ export default function ChatPanel({
                     ))}
                 </div>
                 {/* P1-2: Runtime toggle */}
-                {onRuntimeChange && (
+                {showOpenClawRuntime && onRuntimeChange && (
                     <div style={{
                         display: 'flex', gap: 0, marginBottom: 6,
                         borderRadius: 8, overflow: 'hidden',
@@ -560,7 +723,7 @@ export default function ChatPanel({
                         ))}
                     </div>
                 )}
-                {selectedRuntime === 'openclaw' && (
+                {showOpenClawRuntime && selectedRuntime === 'openclaw' && (
                     <div style={{
                         fontSize: 9,
                         color: 'var(--text3)',
@@ -578,7 +741,69 @@ export default function ChatPanel({
                     </div>
                 )}
 
+                <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    onChange={handleAttachmentSelection}
+                    style={{ display: 'none' }}
+                />
+
+                {(pendingAttachments.length > 0 || attachmentError) && (
+                    <div style={{
+                        marginBottom: 8,
+                        padding: '8px 9px',
+                        borderRadius: 10,
+                        border: '1px solid rgba(255,255,255,0.08)',
+                        background: 'rgba(255,255,255,0.03)',
+                    }}>
+                        {pendingAttachments.length > 0 && (
+                            <>
+                                <div style={{
+                                    fontSize: 9,
+                                    fontWeight: 700,
+                                    color: 'var(--text3)',
+                                    letterSpacing: '0.04em',
+                                    textTransform: 'uppercase',
+                                }}>
+                                    {tr('待发送附件', 'Pending attachments')}
+                                </div>
+                                <AttachmentList attachments={pendingAttachments} lang={lang} onRemove={handleRemoveAttachment} />
+                            </>
+                        )}
+                        {attachmentError && (
+                            <div style={{
+                                marginTop: pendingAttachments.length > 0 ? 8 : 0,
+                                fontSize: 9,
+                                color: '#f59e0b',
+                                lineHeight: 1.45,
+                            }}>
+                                {attachmentError}
+                            </div>
+                        )}
+                    </div>
+                )}
+
                 <div className="flex gap-2" style={{ position: 'relative', zIndex: 10 }}>
+                    <button
+                        type="button"
+                        onClick={handlePickAttachments}
+                        disabled={!connected || attachmentsBusy}
+                        title={tr('添加文件或图片', 'Add files or images')}
+                        style={{
+                            width: 34,
+                            flexShrink: 0,
+                            fontSize: 15,
+                            background: !connected || attachmentsBusy ? 'rgba(255,255,255,0.04)' : 'rgba(255,255,255,0.06)',
+                            color: !connected || attachmentsBusy ? 'var(--text3)' : 'var(--text1)',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            borderRadius: 8,
+                            cursor: !connected || attachmentsBusy ? 'not-allowed' : 'pointer',
+                            transition: 'all 0.2s',
+                        }}
+                    >
+                        {attachmentsBusy ? '...' : '+'}
+                    </button>
                     <input
                         ref={inputRef}
                         value={input}
@@ -606,15 +831,15 @@ export default function ChatPanel({
                     />
                     <button
                         onClick={handleSend}
-                        disabled={!connected || !input.trim()}
+                        disabled={!connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0)}
                         style={{
                             padding: '6px 14px',
                             fontSize: 14,
-                            background: !connected || !input.trim() ? 'rgba(255,255,255,0.04)' : sendFlash ? 'rgba(34, 197, 94, 0.2)' : 'rgba(79, 143, 255, 0.12)',
-                            color: !connected || !input.trim() ? 'var(--text3)' : sendFlash ? '#22c55e' : 'var(--blue)',
+                            background: !connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0) ? 'rgba(255,255,255,0.04)' : sendFlash ? 'rgba(34, 197, 94, 0.2)' : 'rgba(79, 143, 255, 0.12)',
+                            color: !connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0) ? 'var(--text3)' : sendFlash ? '#22c55e' : 'var(--blue)',
                             border: `1px solid ${sendFlash ? 'rgba(34,197,94,0.3)' : 'rgba(79, 143, 255, 0.2)'}`,
                             borderRadius: 8,
-                            cursor: !connected || !input.trim() ? 'not-allowed' : 'pointer',
+                            cursor: !connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0) ? 'not-allowed' : 'pointer',
                             transition: 'all 0.2s',
                             fontWeight: 600,
                             transform: sendFlash ? 'scale(0.92)' : 'scale(1)',
@@ -639,6 +864,15 @@ export default function ChatPanel({
                             {tr('离线 — 启动后端: python server.py', 'Offline — start backend: python server.py')}
                           </>
                     }
+                </div>
+                <div style={{
+                    fontSize: 8,
+                    color: 'var(--text3)',
+                    marginTop: 4,
+                    textAlign: 'center',
+                    opacity: 0.85,
+                }}>
+                    {tr('支持拖选图片、PDF、文档等常见文件作为任务上下文', 'Attach images, PDFs, docs, and other common files as task context')}
                 </div>
             </div>
         </div>
