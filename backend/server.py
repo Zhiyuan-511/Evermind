@@ -20,6 +20,7 @@ import re
 import signal
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -46,7 +47,7 @@ from plugins.base import (
     resolve_enabled_plugins_for_node,
 )
 from plugins.implementations import register_all as register_plugins
-from ai_bridge import AIBridge, MODEL_REGISTRY
+from ai_bridge import AIBridge, MODEL_REGISTRY, PROVIDER_ENV_KEY_MAP
 from config_utils import coerce_bool, coerce_int
 from executor import NodeExecutor
 from orchestrator import Orchestrator
@@ -1202,6 +1203,48 @@ _SESSION_MEMORY: Dict[str, Dict[str, list]] = {}
 _SESSION_MEMORY_MAX_PIPELINE_RESULTS = 5   # keep last N pipeline runs
 _SESSION_MEMORY_MAX_CHAT_MESSAGES = 60     # keep last N chat exchanges
 _SESSION_MEMORY_MAX_SESSIONS = 50          # evict oldest when exceeded
+_SESSION_MEMORY_FILE = Path.home() / ".evermind" / "chat_sessions.json"
+_SESSION_MEMORY_SAVE_LOCK = threading.Lock()
+
+
+def _load_session_memory_from_disk() -> None:
+    """Load persisted chat session memory from disk at startup."""
+    global _SESSION_MEMORY
+    try:
+        if _SESSION_MEMORY_FILE.exists():
+            raw = _SESSION_MEMORY_FILE.read_text("utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                _SESSION_MEMORY = data
+                logger.info(f"Loaded {len(_SESSION_MEMORY)} chat session(s) from {_SESSION_MEMORY_FILE}")
+    except Exception as e:
+        logger.warning(f"Failed to load chat sessions from disk: {e}")
+
+
+def _save_session_memory_to_disk() -> None:
+    """Persist chat session memory to disk (debounced by caller)."""
+    with _SESSION_MEMORY_SAVE_LOCK:
+        try:
+            _SESSION_MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = _SESSION_MEMORY_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(_SESSION_MEMORY, ensure_ascii=False), "utf-8")
+            tmp.replace(_SESSION_MEMORY_FILE)
+        except Exception as e:
+            logger.warning(f"Failed to save chat sessions to disk: {e}")
+
+
+# Debounce disk writes — schedule a save 2s after last change
+_session_memory_save_timer: Optional[threading.Timer] = None
+
+
+def _schedule_session_memory_save() -> None:
+    """Schedule a debounced save of session memory to disk."""
+    global _session_memory_save_timer
+    if _session_memory_save_timer is not None:
+        _session_memory_save_timer.cancel()
+    _session_memory_save_timer = threading.Timer(2.0, _save_session_memory_to_disk)
+    _session_memory_save_timer.daemon = True
+    _session_memory_save_timer.start()
 
 
 def _get_session_memory(session_id: str) -> Dict[str, list]:
@@ -1240,6 +1283,7 @@ def _store_pipeline_result_in_session(session_id: str, report: Dict[str, Any]) -
     # Trim to max
     if len(mem["pipeline_results"]) > _SESSION_MEMORY_MAX_PIPELINE_RESULTS:
         mem["pipeline_results"] = mem["pipeline_results"][-_SESSION_MEMORY_MAX_PIPELINE_RESULTS:]
+    _schedule_session_memory_save()
 
 
 def _store_chat_message_in_session(session_id: str, role: str, content: str) -> None:
@@ -1254,6 +1298,7 @@ def _store_chat_message_in_session(session_id: str, role: str, content: str) -> 
     })
     if len(mem["chat_messages"]) > _SESSION_MEMORY_MAX_CHAT_MESSAGES:
         _compress_chat_messages(mem)
+    _schedule_session_memory_save()
 
 
 def _compress_chat_messages(mem: Dict[str, list]) -> None:
@@ -2931,6 +2976,18 @@ async def list_models():
     return {"models": bridge.get_available_models()}
 
 
+@app.get("/api/chat/history")
+async def get_chat_history(session_id: str = ""):
+    """Return persisted chat messages for a session."""
+    sid = session_id.strip()
+    if not sid:
+        return {"messages": []}
+    mem = _SESSION_MEMORY.get(sid)
+    if not mem:
+        return {"messages": []}
+    return {"messages": mem.get("chat_messages", [])}
+
+
 @app.post("/api/chat/attachments")
 async def upload_chat_attachments(request: Request, payload: Dict[str, Any] = Body(default={})):
     session_id = _safe_session_segment(payload.get("session_id") or payload.get("sessionId") or "")
@@ -4004,6 +4061,7 @@ def _persist_relays(settings: Dict):
 # Auto-load saved settings on startup
 _saved_settings = load_settings()
 _applied = apply_api_keys(_saved_settings)
+_load_session_memory_from_disk()
 get_relay_manager().load(_saved_settings.get("relay_endpoints", []))
 if _saved_settings.get("builder", {}).get("enable_browser_search", False):
     os.environ["EVERMIND_BUILDER_ENABLE_BROWSER"] = "1"
@@ -4799,6 +4857,11 @@ async def lifespan(application):
         except Exception:
             pass
     connected_clients.clear()
+    # Flush chat session memory to disk before exit
+    global _session_memory_save_timer
+    if _session_memory_save_timer is not None:
+        _session_memory_save_timer.cancel()
+    _save_session_memory_to_disk()
     _release_backend_runtime_lock()
     logger.info("Shutdown complete.")
 
@@ -6422,7 +6485,11 @@ async def websocket_endpoint(ws: WebSocket):
             # ─────────────────────────────────────────
             elif msg_type == "chat_message":
                 chat_text = str(msg.get("message", "")).strip()
-                chat_model = str(msg.get("model", "")).strip() or "gpt-4o"
+                # Resolve model: frontend "Auto" sends empty string
+                _raw_chat_model = str(msg.get("model", "")).strip()
+                if not _raw_chat_model:
+                    _raw_chat_model = str(_saved_settings.get("default_model", "")).strip() or "gpt-5.4-mini"
+                chat_model = _raw_chat_model
                 conv_id = str(msg.get("conversation_id", ""))
                 session_id = str(msg.get("session_id", ""))
                 chat_history = msg.get("history", [])
@@ -6477,15 +6544,66 @@ async def websocket_endpoint(ws: WebSocket):
                 def _chat_worker():
                     try:
                         from openai import OpenAI
-                        api_key = os.getenv("OPENAI_API_KEY", "")
-                        base_url = os.getenv("OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE", ""))
-                        client_kwargs = {"api_key": api_key} if api_key else {}
+
+                        # ── Model-aware routing via MODEL_REGISTRY ──
+                        _model_info = MODEL_REGISTRY.get(chat_model, {})
+                        _provider = str(_model_info.get("provider") or "openai").lower()
+
+                        # Resolve API key for this provider
+                        _env_key = PROVIDER_ENV_KEY_MAP.get(_provider, "OPENAI_API_KEY")
+                        api_key = os.getenv(_env_key, "")
+
+                        # Resolve base URL: model-level api_base > env var > empty
+                        base_url = str(_model_info.get("api_base") or "").strip()
+                        if not base_url:
+                            _base_env_map = {
+                                "openai": "OPENAI_API_BASE", "anthropic": "ANTHROPIC_API_BASE",
+                                "google": "GEMINI_API_BASE", "deepseek": "DEEPSEEK_API_BASE",
+                                "kimi": "KIMI_API_BASE", "qwen": "QWEN_API_BASE",
+                                "zhipu": "ZHIPU_API_BASE", "doubao": "DOUBAO_API_BASE",
+                                "yi": "YI_API_BASE", "minimax": "MINIMAX_API_BASE",
+                            }
+                            base_url = os.getenv(_base_env_map.get(_provider, ""), "")
+
+                        # Resolve actual model ID (strip litellm prefix like "openai/")
+                        _litellm_id = str(_model_info.get("litellm_id") or chat_model)
+                        api_model_id = _litellm_id.split("/", 1)[1] if "/" in _litellm_id else _litellm_id
+
+                        # ── Anthropic native path (no OpenAI-compatible gateway) ──
+                        if _provider == "anthropic" and not base_url:
+                            try:
+                                from anthropic import Anthropic
+                                _anth_key = api_key or os.getenv("ANTHROPIC_API_KEY", "")
+                                anth_client = Anthropic(api_key=_anth_key)
+                                _sys = llm_messages[0]["content"] if llm_messages and llm_messages[0].get("role") == "system" else ""
+                                _msgs = [m for m in llm_messages if m.get("role") != "system"]
+                                with anth_client.messages.stream(
+                                    model=api_model_id, messages=_msgs, system=_sys,
+                                    max_tokens=4096, temperature=0.7,
+                                ) as stream:
+                                    full_content = ""
+                                    for text in stream.text_stream:
+                                        full_content += text
+                                        token_queue.put(("token", text))
+                                token_queue.put(("done", full_content))
+                                return
+                            except Exception as e:
+                                token_queue.put(("error", str(e)))
+                                return
+
+                        # ── OpenAI-compatible path (covers openai/kimi/deepseek/qwen/etc) ──
+                        client_kwargs = {}
+                        if api_key:
+                            client_kwargs["api_key"] = api_key
                         if base_url:
                             client_kwargs["base_url"] = base_url
+                        _extra_headers = _model_info.get("extra_headers")
+                        if _extra_headers:
+                            client_kwargs["default_headers"] = _extra_headers
                         client = OpenAI(**client_kwargs)
 
                         stream = client.chat.completions.create(
-                            model=chat_model,
+                            model=api_model_id,
                             messages=llm_messages,
                             stream=True,
                             temperature=0.7,

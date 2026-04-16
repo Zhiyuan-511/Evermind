@@ -460,7 +460,7 @@ class CLIDetector:
     def __init__(self):
         self._cache: Dict[str, Dict] = {}
         self._cache_ts: float = 0
-        self._cache_ttl: float = 300  # 5 minutes
+        self._cache_ttl: float = 1800  # V4.6 SPEED: 30min cache (was 5min) — CLI binaries don't change often
 
     def _cache_valid(self) -> bool:
         return bool(self._cache) and (time.time() - self._cache_ts < self._cache_ttl)

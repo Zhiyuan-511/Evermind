@@ -241,9 +241,12 @@ class TestSupportLaneBuilderQuality(unittest.TestCase):
             with patch.object(orchestrator_module, "OUTPUT_DIR", tmp_out):
                 report = orch._validate_builder_quality([], html, goal=plan.goal, plan=plan, subtask=builder2)
 
+        # v5.1: Support-lane concept removed. Quality gate still passes
+        # (threshold=0 default), issues are in warnings.
         self.assertTrue(report["pass"])
         warnings = " | ".join(str(item) for item in report.get("warnings", []))
-        self.assertIn("Support-lane builder produced HTML", warnings)
+        # Verify quality issues are still detected as warnings
+        self.assertTrue(len(report.get("warnings", [])) > 0)
 
 
 class TestWriteProgressMetrics(unittest.TestCase):

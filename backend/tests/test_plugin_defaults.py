@@ -197,11 +197,13 @@ class TestBuilderBrowserDefaults(unittest.TestCase):
         )
         self.assertEqual(resolved, ["file_ops"])
 
-    def test_spritesheet_defaults_do_not_enable_file_ops(self):
-        self.assertEqual(get_default_plugins_for_node("spritesheet"), [])
+    def test_spritesheet_defaults_enable_file_ops(self):
+        # v5.1: spritesheet now produces code files and needs file_ops
+        self.assertEqual(get_default_plugins_for_node("spritesheet"), ["file_ops"])
 
-    def test_assetimport_defaults_do_not_enable_file_ops(self):
-        self.assertEqual(get_default_plugins_for_node("assetimport"), [])
+    def test_assetimport_defaults_enable_file_ops(self):
+        # v5.1: assetimport now produces code files and needs file_ops
+        self.assertEqual(get_default_plugins_for_node("assetimport"), ["file_ops"])
 
     def test_image_generation_requires_url_and_workflow(self):
         with patch.dict("os.environ", {}, clear=False):

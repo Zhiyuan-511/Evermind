@@ -864,6 +864,16 @@ export function useRuntimeConnection({
                 const prevPrompt = isRetried ? Number(existingData.promptTokens || 0) : 0;
                 const prevCompletion = isRetried ? Number(existingData.completionTokens || 0) : 0;
                 const prevCost = isRetried ? Number(existingData.cost || 0) : 0;
+                // v5.0.1: Include code metrics from subtask_complete for sync
+                const scCodeLines = Number(msg.code_lines || 0);
+                const scTotalLines = Number(msg.total_lines || 0);
+                const scCodeKb = Number(msg.code_kb || 0);
+                const scCodeLangs = Array.isArray(msg.code_languages) ? (msg.code_languages as string[]) : [];
+                const codeMetricsPatch: Record<string, unknown> = {};
+                if (scCodeLines > 0) codeMetricsPatch.codeLines = scCodeLines;
+                if (scTotalLines > 0) codeMetricsPatch.totalLines = scTotalLines;
+                if (scCodeKb > 0) codeMetricsPatch.codeKb = scCodeKb;
+                if (scCodeLangs.length > 0) codeMetricsPatch.codeLanguages = scCodeLangs;
                 updateNodeData(canvasNodeId, {
                     status: success ? 'passed' : (retryPending ? 'running' : (blocked ? 'blocked' : 'failed')),
                     progress: success ? 100 : (retryPending ? 45 : 100),
@@ -877,6 +887,7 @@ export function useRuntimeConnection({
                     promptTokens: prevPrompt + Number(msg.prompt_tokens || 0),
                     completionTokens: prevCompletion + Number(msg.completion_tokens || 0),
                     cost: prevCost + Number(msg.cost || 0),
+                    ...codeMetricsPatch,
                 });
             }
 
@@ -2031,6 +2042,10 @@ export function useRuntimeConnection({
                 }
                 if (payload.modelLatencyMs !== undefined && Number(payload.modelLatencyMs) > 0) {
                     updatePayload.modelLatencyMs = Number(payload.modelLatencyMs);
+                }
+                // v5.0.1: Forward walkthroughReport so popup can detect data change and re-fetch
+                if (typeof payload.walkthroughReport === 'string' && payload.walkthroughReport.length > 0) {
+                    updatePayload.walkthroughReport = payload.walkthroughReport;
                 }
                 if (status === 'queued' || status === 'running') updatePayload._terminalStatus = false;
                 if (['passed', 'failed', 'cancelled', 'skipped'].includes(status)) updatePayload._terminalStatus = true;

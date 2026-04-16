@@ -105,6 +105,8 @@ NODE_DEFAULT_PLUGINS = {
     "analyst":   ["file_ops", "shell", "source_fetch", "browser"],
     "scribe":    ["file_ops", "shell"],
     "planner":   ["file_ops", "shell"],
+    "spritesheet": ["file_ops"],
+    "assetimport": ["file_ops"],
     "router":    [],
     # Local execution nodes — these have their own built-in capabilities
     "localshell":  ["shell"],
@@ -119,8 +121,7 @@ NODE_DEFAULT_PLUGINS = {
     "bgremove":    [],
     "videoedit":   [],
     "uidesign":    ["browser"],
-    "spritesheet": [],
-    "assetimport": [],
+    # v5.1: spritesheet/assetimport now produce code files — moved above with file_ops
 }
 
 

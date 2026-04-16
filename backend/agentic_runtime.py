@@ -373,10 +373,10 @@ NODE_ROLE_TOOLS: Dict[str, List[str]] = {
         "web_fetch", "web_search", "file_write", "file_list",
     ],
     "spritesheet": [
-        "file_read", "file_list",
+        "file_read", "file_write", "file_list", "grep_search",
     ],
     "assetimport": [
-        "file_read", "file_list",
+        "file_read", "file_write", "file_list", "grep_search",
     ],
     "uidesign": [
         "web_fetch", "web_search", "file_read", "file_list", "glob",

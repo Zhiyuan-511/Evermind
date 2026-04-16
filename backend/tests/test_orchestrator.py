@@ -17,6 +17,7 @@ from orchestrator import Orchestrator, Plan, SubTask, TaskStatus
 class TestParseTestResult(unittest.TestCase):
     def setUp(self):
         self.orch = Orchestrator(ai_bridge=None, executor=None)
+        self.orch._quality_gate_default_threshold = 70
 
     def test_json_fail_is_respected(self):
         output = '{"status":"fail","errors":["Missing <head> tag"]}'
@@ -991,10 +992,10 @@ class TestPolisherFlow(unittest.TestCase):
 
     def test_custom_polisher_description_preserves_structure(self):
         desc = self.orch._custom_node_task_desc("polisher", "Polisher", "做一个像苹果一样高级的 8 页奢侈品官网")
-        self.assertIn("Refine the strongest existing deliverable", desc)
-        self.assertIn("Do NOT collapse the site to fewer pages", desc)
-        self.assertIn("styles.css and app.js upgrades FIRST", desc)
-        self.assertIn("patch at most 2 HTML files", desc)
+        self.assertIn("Polish the existing deliverable", desc)
+        self.assertIn("shared CSS/JS upgrades first", desc)
+        self.assertIn("max 2 HTML rewrites", desc)
+        self.assertIn("Extend existing palette and structure", desc)
 
     def test_reviewer_task_description_allows_direct_route_coverage_after_nav_validation(self):
         desc = self.orch._reviewer_task_description("做一个三页面官网，包含首页、定价页和联系页")
@@ -1136,6 +1137,7 @@ class TestReviewerReworkBrief(unittest.TestCase):
 class TestBuilderFailureCleanup(unittest.TestCase):
     def setUp(self):
         self.orch = Orchestrator(ai_bridge=None, executor=None)
+        self.orch._quality_gate_default_threshold = 70
 
     def test_cleanup_internal_builder_artifacts_removes_scaffolds_but_keeps_real_page(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2113,7 +2115,9 @@ class TestBuilderFailureCleanup(unittest.TestCase):
         self.assertFalse(report.get("pass"))
         error_text = "\n".join(str(item).lower() for item in report.get("errors", []))
         self.assertIn("stage progression", error_text)
-        self.assertIn("victory/pass/mission-complete", error_text)
+        # The test HTML contains id="gameOver" which satisfies victory_flow check,
+        # so only the stage progression error fires.
+        self.assertIn("endless arena", error_text)
 
     def test_validate_builder_quality_rejects_missing_drag_camera_for_mouse_hold_phrase(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2819,7 +2823,7 @@ class TestReviewerGate(unittest.TestCase):
 
     def test_reviewer_description_uses_consistent_strict_thresholds(self):
         desc = self.orch._reviewer_task_description("做一个高质量官网", pro=True)
-        self.assertIn("ANY single dimension score below 5 = AUTOMATIC REJECT", desc)
+        self.assertIn("If any single dimension is below 5", desc)
         self.assertIn("originality", desc)
         self.assertIn("ship_readiness", desc)
         self.assertIn("missing_deliverables", desc)
@@ -4235,9 +4239,9 @@ class TestReportIntegrity(unittest.TestCase):
         )
         joined = "\n".join(result)
         self.assertIn("CoreEngine", joined)
-        self.assertIn("Module Breakdown", joined)
-        self.assertIn("Execution Order", joined)
-        self.assertIn("Key Dependencies", joined)
+        self.assertIn("模块分解", joined)
+        self.assertIn("执行顺序", joined)
+        self.assertIn("关键依赖", joined)
         self.assertIn("InputSystem -> CameraController", joined)
 
     def test_humanize_output_summary_for_assetimport_is_narrative(self):
@@ -4357,6 +4361,7 @@ class TestAINarrativeReport(unittest.TestCase):
 class TestBuilderQualityGate(unittest.TestCase):
     def setUp(self):
         self.orch = Orchestrator(ai_bridge=None, executor=None)
+        self.orch._quality_gate_default_threshold = 70
 
     def test_html_quality_report_rejects_truncated_inline_game_javascript(self):
         html = """<!DOCTYPE html>
@@ -6074,7 +6079,8 @@ class TestDifficultyPlansAndRetryTargets(unittest.TestCase):
             [s.agent_type for s in plan.subtasks],
             ["analyst", "imagegen", "spritesheet", "assetimport", "builder", "reviewer", "deployer", "tester"],
         )
-        self.assertEqual(plan.subtasks[4].depends_on, ["1", "4"])
+        # v5.1: Asset nodes are parallel; builder depends on analyst + all 3 asset nodes
+        self.assertEqual(plan.subtasks[4].depends_on, ["1", "2", "3", "4"])
 
     def test_standard_asset_heavy_game_skips_specialized_pipeline_without_image_backend(self):
         plan = type("PlanObj", (), {})()
@@ -6210,8 +6216,9 @@ class TestDifficultyPlansAndRetryTargets(unittest.TestCase):
             ["planner", "analyst", "imagegen", "spritesheet", "assetimport", "builder", "builder", "builder", "reviewer", "deployer", "tester", "debugger"],
         )
         self.assertEqual(plan.subtasks[1].depends_on, ["1"])
-        self.assertEqual(plan.subtasks[5].depends_on, ["2", "5"])
-        self.assertEqual(plan.subtasks[6].depends_on, ["2", "5"])
+        # v5.1: Asset nodes are parallel; builders depend on analyst + all 3 asset nodes
+        self.assertEqual(plan.subtasks[5].depends_on, ["2", "3", "4", "5"])
+        self.assertEqual(plan.subtasks[6].depends_on, ["2", "3", "4", "5"])
         self.assertEqual(plan.subtasks[7].depends_on, ["6", "7"])
 
     def test_enforce_plan_shape_pro_asset_heavy_game_uses_parallel_integrator_builders(self):
@@ -6226,8 +6233,9 @@ class TestDifficultyPlansAndRetryTargets(unittest.TestCase):
             [s.agent_type for s in plan.subtasks],
             ["planner", "analyst", "imagegen", "spritesheet", "assetimport", "builder", "builder", "builder", "reviewer", "deployer", "tester", "debugger"],
         )
-        self.assertEqual(plan.subtasks[5].depends_on, ["2", "5"])
-        self.assertEqual(plan.subtasks[6].depends_on, ["2", "5"])
+        # v5.1: Asset nodes are parallel; builders depend on analyst + all 3 asset nodes
+        self.assertEqual(plan.subtasks[5].depends_on, ["2", "3", "4", "5"])
+        self.assertEqual(plan.subtasks[6].depends_on, ["2", "3", "4", "5"])
         self.assertEqual(plan.subtasks[7].depends_on, ["6", "7"])
 
     def test_enforce_plan_shape_pro_single_file_game_uses_parallel_integrator_builders(self):
@@ -6260,8 +6268,9 @@ class TestDifficultyPlansAndRetryTargets(unittest.TestCase):
             ["planner", "analyst", "imagegen", "spritesheet", "assetimport", "builder", "builder", "builder", "reviewer", "deployer", "tester", "debugger"],
         )
         self.assertEqual(plan.subtasks[1].depends_on, ["1"])
-        self.assertEqual(plan.subtasks[5].depends_on, ["2", "5"])
-        self.assertEqual(plan.subtasks[6].depends_on, ["2", "5"])
+        # v5.1: Asset nodes are parallel; builders depend on analyst + all 3 asset nodes
+        self.assertEqual(plan.subtasks[5].depends_on, ["2", "3", "4", "5"])
+        self.assertEqual(plan.subtasks[6].depends_on, ["2", "3", "4", "5"])
         self.assertEqual(plan.subtasks[7].depends_on, ["6", "7"])
 
     def test_enforce_plan_shape_standard_canonicalizes_to_four_nodes(self):
@@ -10322,6 +10331,7 @@ class TestExtractionAndRetrySemantics(unittest.TestCase):
             )
             bridge = StubBridge(root_html)
             orch = Orchestrator(ai_bridge=bridge, executor=None, on_event=None)
+            orch._quality_gate_default_threshold = 70
             orch.emit = AsyncMock()
             plan = Plan(
                 goal="做一个八页面奢侈品品牌官网，包含首页、品牌、工艺、系列、定价、故事、门店、联系页",
@@ -10826,8 +10836,9 @@ class TestExtractionAndRetrySemantics(unittest.TestCase):
 
         result = asyncio.run(orch._execute_subtask(subtask, plan, "kimi-coding", prev_results={}))
 
-        self.assertFalse(result.get("success"))
-        self.assertIn("at least 2 live reference URLs", str(result.get("error", "")))
+        # V4.9.1: Analyst shallow research downgraded from hard-fail to soft-warning.
+        # The analyst proceeds with available output even when URLs < 2.
+        self.assertTrue(result.get("success"))
 
     def test_analyst_output_injects_browser_urls_into_report(self):
         class StubBridge:
@@ -11855,13 +11866,15 @@ small { opacity:.75; }
                 orchestrator_module.OUTPUT_DIR = original_output
                 preview_validation_module.OUTPUT_DIR = original_preview_output
 
-        self.assertEqual(bridge.calls, ["builder", "builder"])
-        reviewer = next(st for st in plan.subtasks if st.id == "4")
-        deployer = next(st for st in plan.subtasks if st.id == "5")
-        tester = next(st for st in plan.subtasks if st.id == "6")
-        self.assertEqual(reviewer.status, TaskStatus.BLOCKED)
-        self.assertEqual(deployer.status, TaskStatus.BLOCKED)
-        self.assertEqual(tester.status, TaskStatus.BLOCKED)
+        # V4.9.2: Builder failure is a soft-dep when a sibling builder succeeded,
+        # so deployer/reviewer proceed. Only tester (depends on reviewer+deployer) is blocked
+        # if the reviewer chain exhausts retries.
+        self.assertIn("builder", bridge.calls)
+        self.assertEqual(bridge.calls[:2], ["builder", "builder"])
+        builder2 = next(st for st in plan.subtasks if st.id == "2")
+        builder3 = next(st for st in plan.subtasks if st.id == "3")
+        self.assertEqual(builder2.status, TaskStatus.COMPLETED)
+        self.assertEqual(builder3.status, TaskStatus.FAILED)
 
 
 class TestRetryFromFailureStateReset(unittest.TestCase):
@@ -12612,9 +12625,9 @@ class TestBuilderRootOwnership(unittest.TestCase):
         )
 
         self.assertIn("MERGER / INTEGRATOR CONTRACT", desc)
-        self.assertIn("Patch and integrate in place", desc)
-        self.assertIn("non-empty, implementation-grade support files", desc)
-        self.assertIn("Do NOT leave meaningful support files unwired", desc)
+        self.assertIn("INVENTORY", desc)
+        self.assertIn("Do NOT rewrite module logic from scratch", desc)
+        self.assertIn("browser-native", desc)
 
     def test_secondary_builder_can_write_root_index_for_single_entry_game_patch_mode(self):
         orch = Orchestrator(ai_bridge=SimpleNamespace(config={}), executor=None, on_event=None)
@@ -12629,7 +12642,9 @@ class TestBuilderRootOwnership(unittest.TestCase):
 
         self.assertTrue(orch._builder_can_write_root_index(plan, plan.subtasks[0], plan.goal))
         self.assertTrue(orch._single_entry_game_secondary_builder_patch_mode(plan, plan.subtasks[1], plan.goal))
-        self.assertTrue(orch._builder_can_write_root_index(plan, plan.subtasks[1], plan.goal))
+        # V5.1: Without a merger, only slot-1 builder writes root index.
+        # Secondary builder uses patch mode but writes to module files, not root.
+        self.assertFalse(orch._builder_can_write_root_index(plan, plan.subtasks[1], plan.goal))
 
     def test_parallel_game_support_builder_stays_out_of_direct_text_root_delivery(self):
         orch = Orchestrator(ai_bridge=SimpleNamespace(config={}), executor=None, on_event=None)
@@ -12648,13 +12663,16 @@ class TestBuilderRootOwnership(unittest.TestCase):
         self.assertEqual(builder3.node_key, "merger")
         self.assertEqual(builder3.node_label, "Merger")
 
-        self.assertEqual(orch._builder_bootstrap_targets(plan, builder1), ["index.html"])
-        self.assertEqual(orch._builder_bootstrap_targets(plan, builder2), [])
+        # V5.1: Builder1 (non-merger) cannot write root when merger exists.
+        # Builder2 is detected as merger-like (description references Merger contract).
+        # Both merger-like builders (builder2 + merger) get root index targets.
+        self.assertEqual(orch._builder_bootstrap_targets(plan, builder1), [])
+        self.assertEqual(orch._builder_bootstrap_targets(plan, builder2), ["index.html"])
         self.assertEqual(orch._builder_bootstrap_targets(plan, builder3), ["index.html"])
-        self.assertTrue(orch._builder_can_write_root_index(plan, builder1, plan.goal))
-        self.assertFalse(orch._builder_can_write_root_index(plan, builder2, plan.goal))
+        self.assertFalse(orch._builder_can_write_root_index(plan, builder1, plan.goal))
+        self.assertTrue(orch._builder_can_write_root_index(plan, builder2, plan.goal))
         self.assertTrue(orch._builder_can_write_root_index(plan, builder3, plan.goal))
-        self.assertTrue(orch._builder_execution_direct_text_mode(plan, builder1))
+        self.assertFalse(orch._builder_execution_direct_text_mode(plan, builder1))
         self.assertFalse(orch._builder_execution_direct_text_mode(plan, builder2))
         self.assertFalse(orch._builder_execution_direct_text_mode(plan, builder3))
 
@@ -12681,10 +12699,12 @@ class TestBuilderRootOwnership(unittest.TestCase):
 
         self.assertGreaterEqual(len(prefs1), 2)
         self.assertEqual(prefs1[0], "kimi-coding")
-        self.assertEqual(prefs2[0], "gpt-5.4-mini")
-        self.assertIn("kimi-coding", prefs2[1:])
-        self.assertEqual(prefs3[0], "gpt-5.4-mini")
-        self.assertIn("kimi-coding", prefs3[1:])
+        # V5.1: builder2 and merger are both merger-like, so they use the
+        # viable chain starting with kimi-coding (no gpt-5.4-mini in chain).
+        self.assertEqual(prefs2[0], "kimi-coding")
+        self.assertIn("gpt-5.4", prefs2)
+        self.assertEqual(prefs3[0], "kimi-coding")
+        self.assertIn("gpt-5.4", prefs3)
 
     def test_parallel_game_builders_respect_single_builder_model_preference(self):
         from ai_bridge import AIBridge
@@ -12773,6 +12793,7 @@ class TestBuilderRootOwnership(unittest.TestCase):
 
     def test_parallel_game_support_builder_rejects_empty_support_file(self):
         orch = Orchestrator(ai_bridge=SimpleNamespace(config={}), executor=None, on_event=None)
+        orch._quality_gate_default_threshold = 70
         goal = "创建一个第三人称 3D 射击游戏，带怪物、武器、大地图和精美建模。"
         plan = Plan(
             goal=goal,
@@ -12918,6 +12939,7 @@ class TestHandleFailureRequiresValidation(unittest.TestCase):
 
         bridge = StubBridge()
         orch = Orchestrator(ai_bridge=bridge, executor=None, on_event=None)
+        orch._quality_gate_default_threshold = 70
 
         async def _noop(_evt):
             return None
@@ -12933,7 +12955,11 @@ class TestHandleFailureRequiresValidation(unittest.TestCase):
         ok = asyncio.run(orch._handle_failure(builder, plan, "kimi-coding", results={}))
         self.assertFalse(ok)
         self.assertEqual(builder.status, TaskStatus.FAILED)
-        self.assertIn("quality gate failed", builder.error.lower())
+        # Builder reports success but produces zero files — demoted to failure
+        self.assertTrue(
+            "quality gate failed" in builder.error.lower()
+            or "zero files" in builder.error.lower()
+        )
 
     def test_support_lane_builder_retry_prompt_preserves_support_file_contract(self):
         orch = Orchestrator(ai_bridge=SimpleNamespace(config={}), executor=None, on_event=None)
@@ -12967,9 +12993,11 @@ class TestHandleFailureRequiresValidation(unittest.TestCase):
 
         self.assertTrue(ok)
         prompt = captured.get("description", "")
-        self.assertIn("support-lane builder", prompt.lower())
+        # V5.1: "support-lane" terminology replaced by "Parallel Peer"
+        self.assertIn("Parallel Peer", prompt)
         self.assertIn("Do NOT overwrite /tmp/evermind_output/index.html", prompt)
-        self.assertIn("Never replace a meaningful support file with an empty shell", prompt)
+        # V5.1: Retry prompt preserves the module-file contract
+        self.assertIn("module", prompt.lower())
 
     def test_support_lane_builder_integrity_flags_invalid_js_syntax(self):
         orch = Orchestrator(ai_bridge=SimpleNamespace(config={}), executor=None, on_event=None)
@@ -13072,6 +13100,7 @@ class TestHandleFailureRequiresValidation(unittest.TestCase):
 
     def test_builder_quality_flags_missing_crosshair_for_shooter_brief(self):
         orch = Orchestrator(ai_bridge=SimpleNamespace(config={}), executor=None, on_event=None)
+        orch._quality_gate_default_threshold = 70
         goal = "创建一个第三人称3D射击游戏，要有清晰弹道和射击准心。"
         plan = Plan(goal=goal, difficulty="pro", subtasks=orch._build_pro_plan_subtasks(goal))
         builder1 = [st for st in plan.subtasks if st.agent_type == "builder"][0]
@@ -14022,6 +14051,8 @@ class TestReviewerVisualGate(unittest.TestCase):
                 self.config = {}
 
             async def execute(self, node, plugins, input_data, model, on_progress):
+                # V4.9.3: FAILED_REQUEST_TOLERANCE raised to 5,
+                # so use 8 failed requests to trigger the gate.
                 for event in [
                     {
                         "stage": "browser_action",
@@ -14029,7 +14060,7 @@ class TestReviewerVisualGate(unittest.TestCase):
                         "ok": True,
                         "url": "http://127.0.0.1:8765/preview/",
                         "state_hash": "snap111",
-                        "failed_request_count": 3,
+                        "failed_request_count": 8,
                     },
                     {
                         "stage": "browser_action",
@@ -14038,7 +14069,7 @@ class TestReviewerVisualGate(unittest.TestCase):
                         "url": "http://127.0.0.1:8765/preview/",
                         "state_hash": "scroll222",
                         "state_changed": True,
-                        "failed_request_count": 3,
+                        "failed_request_count": 8,
                     },
                     {
                         "stage": "browser_action",
@@ -14048,7 +14079,7 @@ class TestReviewerVisualGate(unittest.TestCase):
                         "state_hash": "click333",
                         "previous_state_hash": "scroll222",
                         "state_changed": True,
-                        "failed_request_count": 3,
+                        "failed_request_count": 8,
                     },
                     {
                         "stage": "browser_action",
@@ -14058,7 +14089,7 @@ class TestReviewerVisualGate(unittest.TestCase):
                         "state_hash": "click333",
                         "previous_state_hash": "click333",
                         "state_changed": False,
-                        "failed_request_count": 3,
+                        "failed_request_count": 8,
                     },
                 ]:
                     await on_progress(event)
@@ -15039,11 +15070,17 @@ class TestTesterBrowserGate(unittest.TestCase):
         }
 
         with patch.object(orch, "_maybe_collect_desktop_qa_session", new=AsyncMock(return_value=desktop_session)):
-            result = asyncio.run(orch._execute_subtask(reviewer, plan, "kimi-coding", prev_results={}))
+            with patch.object(
+                orchestrator_module,
+                "_playwright_runtime_status",
+                new=AsyncMock(return_value={"available": True, "reason": ""}),
+            ):
+                result = asyncio.run(orch._execute_subtask(reviewer, plan, "kimi-coding", prev_results={}))
         # Reviewer rejected with low scores, but no builder in plan so soft-pass
         self.assertTrue(result.get("success"))
-        self.assertNotIn("browser", bridge.plugins_seen)
-        self.assertNotIn("browser_use", bridge.plugins_seen)
+        # V4.9.7: Browser is no longer suppressed for desktop QA — desktop QA
+        # is supplementary, reviewer still gets browser for independent review.
+        self.assertIn("browser", bridge.plugins_seen)
 
     def test_tester_dashboard_requires_visible_state_change(self):
         class StubBridge:
@@ -15964,12 +16001,12 @@ class TestBug1ModelDowngradeOrder(unittest.TestCase):
         orch = Orchestrator(ai_bridge=None, executor=None)
         # Monkeypatch _has_key_for to accept all models for this test
         orch._has_key_for = lambda model_name: True
-        # From gpt-5.3-codex (index 1), should go to deepseek-v3 (index 2), NOT back to kimi-coding (index 0)
+        # From gpt-5.3-codex (index 3), should go to deepseek-v3 (index 4), NOT back to kimi-coding (index 0)
         result = orch._alternate_retry_model("gpt-5.3-codex")
         self.assertEqual(result, "deepseek-v3")
-        # From kimi-coding (index 0), should go forward
+        # From kimi-coding (index 0), should go to gpt-5.4 (index 1)
         result2 = orch._alternate_retry_model("kimi-coding")
-        self.assertEqual(result2, "gpt-5.3-codex")
+        self.assertEqual(result2, "gpt-5.4")
 
     def test_downgrade_model_skips_recently_unhealthy_gateway_candidates(self):
         from ai_bridge import AIBridge

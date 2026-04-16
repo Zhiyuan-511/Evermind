@@ -793,9 +793,14 @@ export default function NodeDetailPopup({ open, onClose, lang, nodeData }: NodeD
         // V4.3 PERF: Relaxed from 4s to 8s — reduces HTTP requests during execution
         const shouldPoll = String(nodeData.status || '') === 'running';
         const timer = shouldPoll ? window.setInterval(() => { void sync(); }, 8000) : null;
+        // v5.0.1: When node reaches terminal status, schedule one delayed re-fetch
+        // to catch late-arriving walkthrough report (generated after subtask_complete)
+        const isTerminal = ['passed', 'failed', 'cancelled', 'skipped'].includes(String(nodeData.status || ''));
+        const delayedFetch = isTerminal ? window.setTimeout(() => { if (!cancelled) void sync(); }, 3500) : null;
         return () => {
             cancelled = true;
             if (timer) window.clearInterval(timer);
+            if (delayedFetch) window.clearTimeout(delayedFetch);
         };
     }, [open, nodeData, nodeExecutionId]);
 

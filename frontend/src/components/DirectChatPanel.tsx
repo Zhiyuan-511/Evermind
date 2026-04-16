@@ -37,12 +37,46 @@ const MODEL_OPTIONS = [
     { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
 ];
 
+const CHAT_STORAGE_KEY = 'evermind-direct-chat-v1';
+const MAX_PERSISTED_MESSAGES = 200;
+
+function loadPersistedMessages(sid: string): DirectChatMessage[] {
+    if (!sid) return [];
+    try {
+        const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+        if (!raw) return [];
+        const store = JSON.parse(raw);
+        const msgs: DirectChatMessage[] = store[sid] || [];
+        // Strip any leftover streaming state
+        return msgs.map(m => ({ ...m, streaming: false }));
+    } catch { return []; }
+}
+
+function persistMessages(sid: string, msgs: DirectChatMessage[]) {
+    if (!sid) return;
+    try {
+        const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+        const store = raw ? JSON.parse(raw) : {};
+        // Only persist non-streaming, non-empty messages
+        store[sid] = msgs
+            .filter(m => !m.streaming && m.content)
+            .slice(-MAX_PERSISTED_MESSAGES);
+        // Evict oldest sessions if store grows too large (keep 20 sessions max)
+        const keys = Object.keys(store);
+        if (keys.length > 20) {
+            for (const k of keys.slice(0, keys.length - 20)) delete store[k];
+        }
+        localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(store));
+    } catch { /* quota exceeded — silently skip */ }
+}
+
 export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onOpenFile, onFileDiffs }: DirectChatPanelProps) {
-    const [messages, setMessages] = useState<DirectChatMessage[]>([]);
+    const [messages, setMessages] = useState<DirectChatMessage[]>(() => loadPersistedMessages(sessionId || ''));
     const [input, setInput] = useState('');
     const [model, setModel] = useState('');
     const [streaming, setStreaming] = useState(false);
-    const [convId] = useState(() => `conv_${Date.now()}`);
+    // Stable conversation ID per session — survives remount
+    const [convId] = useState(() => sessionId ? `conv_${sessionId}` : `conv_${Date.now()}`);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const streamBufferRef = useRef('');
     const listenerAttachedRef = useRef(false);
@@ -52,6 +86,13 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
     }, []);
 
     useEffect(() => { scrollToBottom(); }, [messages, scrollToBottom]);
+
+    // Persist messages to localStorage whenever they change (skip during streaming)
+    useEffect(() => {
+        if (!streaming && sessionId) {
+            persistMessages(sessionId, messages);
+        }
+    }, [messages, streaming, sessionId]);
 
     // Listen for WS messages related to direct chat
     useEffect(() => {
@@ -154,7 +195,8 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
         setMessages([]);
         streamBufferRef.current = '';
         setStreaming(false);
-    }, []);
+        if (sessionId) persistMessages(sessionId, []);
+    }, [sessionId]);
 
     const handleStop = useCallback(() => {
         const ws = wsRef.current;

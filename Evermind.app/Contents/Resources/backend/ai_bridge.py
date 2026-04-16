@@ -942,33 +942,56 @@ AGENT_PRESETS = {
     },
     "imagegen": {
         "instructions": (
-            "You are a game-asset and image-direction specialist.\n"
-            "Produce production-ready asset briefs, prompt packs, shot lists, visual constraints, and builder-facing replacement guidance.\n"
-            "For game tasks, prioritize implementation-ready character / monster / weapon / environment design over poster-only output.\n"
-            "For 3D game tasks, land a minimum viable replacement pack first: 00_visual_target.md, 01_style_lock.md, manifest.json, character_hero_brief.md, monster_primary_brief.md, weapon_primary_brief.md, and environment_kit_brief.md.\n"
-            "Do not create optional companion docs, extra variants, or long shortlists until that core pack is complete and substantive.\n"
-            "If the comfyui plugin is available, call it to check health first and generate assets when the pipeline is configured.\n"
-            "If no image tool is attached or the generation backend is unavailable, do NOT pretend to render images.\n"
-            "Instead return modeling briefs, silhouette / topology guidance, material notes, rig-or-animation needs, open-source asset shortlist notes,\n"
-            "negative prompts when helpful, and fallback directions that builder/spritesheet/assetimport can execute immediately.\n"
-            "When source_fetch or browser is available, use source_fetch first on permissive asset/model libraries, GitHub READMEs, or docs pages so your pack contains exact file/page anchors; use browser only when a page needs interactive inspection or source_fetch fails.\n"
-            "Gather only a small licensed-source shortlist from permissive libraries such as Kenney, Quaternius, ambientCG, clearly licensed OpenGameArt entries, or GitHub-hosted sample-asset repos with explicit license notes.\n"
-            "Do not bulk-scrape asset marketplaces or sites whose terms make automated AI ingestion inappropriate; keep asset research to a few direct human-readable pages.\n"
-            "Never suggest copyrighted game IP scraping or unlicensed model/image reuse."
+            "You are a game-asset and visual-code specialist.\n"
+            "YOUR PRIMARY OUTPUT: Generate actual CSS/SVG code files that builders can import directly.\n\n"
+            "MUST produce these files via file_ops write:\n"
+            "1. /tmp/evermind_output/assets/visuals.css — CSS with custom properties for the project's color palette, "
+            "gradients, shadows, animations (@keyframes), and background patterns. Include CSS art for simple icons/shapes.\n"
+            "2. /tmp/evermind_output/assets/sprites_visual.svg — Inline SVG sprite sheet with <symbol> elements for "
+            "characters, items, UI icons, and environmental elements. Each symbol must have a unique id and viewBox.\n"
+            "3. /tmp/evermind_output/assets/visual_config.json — JSON manifest mapping asset IDs to descriptions, "
+            "dimensions, animation frames, and color tokens.\n\n"
+            "For 3D tasks, also produce:\n"
+            "- Material definitions as CSS custom properties (--mat-*) and Three.js-compatible JSON configs\n"
+            "- Modeling briefs only when actual generation is impossible\n\n"
+            "If comfyui plugin is available, call it to generate raster assets.\n"
+            "If no image tool is attached, produce CSS-art, SVG, and data-URI alternatives — never leave the builder "
+            "without usable visual assets.\n"
+            "When source_fetch or browser is available, gather a small licensed-source shortlist from Kenney, "
+            "Quaternius, ambientCG, or clearly licensed OpenGameArt entries.\n"
+            "Never suggest copyrighted game IP scraping or unlicensed reuse."
         ),
     },
     "spritesheet": {
         "instructions": (
-            "You are a game asset pipeline specialist. Plan sprite families, frame states, palette constraints, and export layout.\n"
-            "Output ONLY compact JSON with asset_families, animation_states, palette_constraints, export_layout,\n"
-            "frame_counts, style_lock_tokens, and builder_replacement_rules. No prose, no file writes, no speculative extras."
+            "You are a game sprite and animation code specialist.\n"
+            "YOUR PRIMARY OUTPUT: Generate a working browser-native JS module for sprite/animation management.\n\n"
+            "MUST produce this file via file_ops write:\n"
+            "/tmp/evermind_output/assets/sprites.js — A self-contained browser-native JS file that exports:\n"
+            "- SPRITE_DEFS: object mapping sprite names to {x, y, width, height, frames, fps} on the sprite sheet\n"
+            "- AnimationController class: manages frame cycling, state transitions (idle→run→attack→hurt→die)\n"
+            "- drawSprite(ctx, spriteName, x, y, frame) function for Canvas2D rendering\n"
+            "- For 3D: export animation clip definitions compatible with Three.js AnimationMixer\n\n"
+            "The file must be browser-native (no require/import from node_modules). Use IIFE or globalThis.\n"
+            "Include actual frame coordinates, timing data, and state machine logic — not just metadata.\n"
+            "Also write /tmp/evermind_output/assets/sprite_config.json with the raw sprite sheet data for builders.\n"
+            "Code must be production-grade and immediately usable by builder nodes."
         ),
     },
     "assetimport": {
         "instructions": (
-            "You are an asset pipeline coordinator. Organize imported assets, naming, folder structure, usage mapping, and handoff notes.\n"
-            "Output ONLY compact JSON with naming_rules, folder_structure, manifest_fields, runtime_mapping,\n"
-            "replacement_keys, source_candidates, license_matrix, download_strategy, and builder_integration_notes. No prose, no file writes, no speculative extras."
+            "You are an asset pipeline and resource-loading code specialist.\n"
+            "YOUR PRIMARY OUTPUT: Generate a working browser-native JS resource loader.\n\n"
+            "MUST produce this file via file_ops write:\n"
+            "/tmp/evermind_output/assets/loader.js — A self-contained browser-native JS file that exports:\n"
+            "- ASSET_MANIFEST: object mapping logical names to {type, path, size, preload} entries\n"
+            "- AssetLoader class: preloads images/audio/JSON with progress callback, caching, and error recovery\n"
+            "- getAsset(name) function returning loaded asset by logical name\n"
+            "- preloadAll(onProgress) function that loads all manifest entries with a progress bar\n\n"
+            "The file must be browser-native (no require/import from node_modules). Use IIFE or globalThis.\n"
+            "Include actual loading logic with XMLHttpRequest/fetch, Image(), Audio() constructors.\n"
+            "Also write /tmp/evermind_output/assets/manifest.json with the full asset registry.\n"
+            "Code must handle missing assets gracefully (fallback placeholders) and be immediately usable by builders."
         ),
     },
 }
@@ -3084,9 +3107,9 @@ class AIBridge:
             # tool_iterations_exhausted → 8 critical handoff fields lost.
             value = self._read_int_env("EVERMIND_ANALYST_TIMEOUT_SEC", 180, 45, 360)
         elif normalized_node_type == "merger":
-            # v3.1: Merger needs to read all builder outputs then produce merged result.
-            # Give it the same budget as a builder.
-            value = self._read_int_env("EVERMIND_MERGER_TIMEOUT_SEC", 720, 60, 1800)
+            # v5.1: With module-assembly architecture, Merger reads pre-built modules
+            # and glues them together — much less work than full rewrite. Reduced from 720→480s.
+            value = self._read_int_env("EVERMIND_MERGER_TIMEOUT_SEC", 480, 60, 1800)
         elif normalized_node_type == "router":
             # V4.3: Router must analyze the task and assign models to all nodes.
             # For complex pipelines (11+ nodes) with deep-thinking models, 120s
@@ -3331,32 +3354,24 @@ class AIBridge:
         text = str(input_data or "")
         text_lower = text.lower()
         is_3d = self._builder_input_wants_3d(input_data)
-        is_support_lane = self._builder_is_support_lane(input_data)
-        # v4.0 FIX: Detect merger-like builders and give them sufficient timeout.
-        # Merger produces 120K+ char merged files at ~340 chars/s = ~350s streaming.
-        # The previous 300s default caused systematic 3-retry timeout failures.
+        # v5.1: support-lane concept removed; _builder_is_support_lane always returns False
         is_merger = bool((node or {}).get("builder_merger_like")) or bool(
             re.search(r"\b(?:final merger|merger|integrator|integration|assemble|assembly|merge)\b", text_lower)
         )
-        if is_merger and not is_support_lane:
+        if is_merger:
+            # v5.1: Reduced from 600→360s — module assembly is faster than full rewrite
             base = max(
                 base,
-                self._read_int_env("EVERMIND_MERGER_FIRST_WRITE_SEC", 600, 300, 900),
+                self._read_int_env("EVERMIND_MERGER_FIRST_WRITE_SEC", 360, 180, 900),
             )
         if task_classifier.wants_multi_page(text):
             base = max(
                 base,
                 self._read_int_env("EVERMIND_BUILDER_MULTI_PAGE_FIRST_WRITE_SEC", 180, 90, 420),
             )
-        if is_support_lane:
-            # v3.5: raised from 120→180. Support-lane builders need to read primary
-            # builder's artifacts before writing, which adds ~60s overhead.
-            base = min(
-                base,
-                self._read_int_env("EVERMIND_BUILDER_SUPPORT_FIRST_WRITE_SEC", 180, 60, 300),
-            )
+        # v5.1: All peer builders get equal timeout — no support-lane cap
         # §FIX: 3D engine games need significantly more time — Three.js code is 20K+ chars
-        if is_3d and not is_support_lane:
+        if is_3d:
             base = max(
                 base,
                 self._read_int_env("EVERMIND_BUILDER_3D_FIRST_WRITE_SEC", 420, 180, 600),
@@ -4938,24 +4953,9 @@ class AIBridge:
         return f"{text.rstrip()}\n\n{contract}".strip()
 
     def _builder_is_support_lane(self, input_data: str) -> bool:
-        text = str(input_data or "")
-        lower = text.lower()
-        merger_like = bool(
-            re.search(r"\b(?:final merger|merger|integrator|integration|assemble|assembly|merge)\b", lower)
-        )
-        if merger_like:
-            return False
-        markers = (
-            "support-lane builder",
-            "non-overlapping support subsystem",
-            "support js/css/json",
-            "support files",
-            "root index.html unless explicitly reassigned",
-            "do not overwrite /tmp/evermind_output/index.html",
-            "builder 2 ships non-overlapping support systems/files",
-            "browser-native support files",
-        )
-        return any(marker in lower for marker in markers)
+        # v5.1: Support-lane concept removed. All builders are parallel peers
+        # writing independent module files. Merger handles integration.
+        return False
 
     def _builder_support_lane_targets(self, input_data: str) -> List[str]:
         text = str(input_data or "")

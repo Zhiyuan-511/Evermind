@@ -2941,28 +2941,19 @@ class Orchestrator:
 
         if role == "builder":
             merger_like = self._builder_is_merger_like_subtask(subtask)
-            support_lane = not self._builder_can_write_root_index(plan, subtask, plan.goal) and not merger_like
-            # v4.0-fix: Extract AI's own opening statement from raw output instead of
-            # using hardcoded template text. The AI's first sentence typically describes
-            # its intent and approach — this is far more informative than generic role labels.
+            # v5.1: Removed support_lane concept — all builders are parallel peers
             _ai_opening = self._extract_ai_opening_statement(full_output)
             if merger_like:
-                _role_label = _L("### Role: Merger (Integration Builder)", "### Role: Merger (Integration Builder)")
-            elif support_lane:
-                _role_label = _L("### Role: Support-lane Builder", "### Role: Support-lane Builder")
+                _role_label = _L("### Role: Merger (Module Assembler)", "### Role: Merger (Module Assembler)")
             else:
-                _role_label = _L("### Role: Primary Builder", "### Role: Primary Builder")
+                slot = self._builder_slot_index(plan, subtask.id)
+                _role_label = _L(f"### Role: Builder {slot} (Parallel Peer)", f"### Role: Builder {slot} (Parallel Peer)")
             if _ai_opening:
                 lines.append(f"{_role_label}\n\n{_ai_opening}")
             elif merger_like:
                 lines.append(f"{_role_label}\n\n" + _L(
-                    "本节点的职责是整合上游 Builder 产物，将各模块定点接线到最终产物中。",
-                    "This node integrates upstream Builder artifacts into the final deliverable.",
-                ))
-            elif support_lane:
-                lines.append(f"{_role_label}\n\n" + _L(
-                    "本节点负责补足支撑模块（组件、子系统、辅助功能等）。",
-                    "This node builds supplementary modules (components, subsystems, utilities).",
+                    "本节点的职责是读取上游 Builder 产出的独立模块文件，组装成最终可运行的产物。",
+                    "This node reads independent module files from upstream Builders and assembles the final deliverable.",
                 ))
             else:
                 lines.append(f"{_role_label}\n\n" + _L(
@@ -6068,6 +6059,7 @@ class Orchestrator:
                 "codeKb": ne_snapshot.get("code_kb", 0),
                 "codeLanguages": ne_snapshot.get("code_languages", []),
                 "modelLatencyMs": ne_snapshot.get("model_latency_ms", 0),
+                "walkthroughReport": ne_snapshot.get("walkthrough_report", ""),
                 "timestamp": int(time.time() * 1000),
                 "_neVersion": ne_snapshot.get("version", 0),
             }
@@ -6891,16 +6883,23 @@ class Orchestrator:
             desc = f"{desc} {builder_note}"
         return (
             f"{node_label}: {desc}\n\n"
-            "MERGER / INTEGRATOR CONTRACT:\n"
-            "- First inspect /tmp/evermind_output/ with file_ops list, then read the current live index.html, every staged builder HTML under /tmp/evermind_output/task_*/index.html, and any local JS/CSS/JSON support files you plan to merge.\n"
-            "- Treat the existing playable artifact as the source of truth. Patch and integrate in place; do NOT restart from zero and do NOT replace a stronger gameplay shell with a smaller rewrite.\n"
-            "- Preserve Builder 1's strongest working root shell, then merge Builder 2+ subsystem files into that shell instead of rewriting the shipped root artifact from scratch.\n"
-            "- Import only non-empty, implementation-grade support files. If a sibling support module is empty or near-empty, repair that file first or skip wiring it until it is valid.\n"
-            "- Any retained JS support file must ship as browser-native code (<script> or type=\"module\"). Do NOT leave Node/CommonJS module.exports files in the final browser output.\n"
-            "- Repair or rewrite browser-breaking support-file footers such as `module.exports` / `exports.*` before wiring them into the shipped artifact.\n"
-            "- If a support file remains meaningful in the output directory, the final root artifact must reference it or inline its implementation. Do NOT leave meaningful support files unwired beside the shipped entry.\n"
-            "- Preserve working start flow, camera/input semantics, combat loop, HUD, progression, and asset-manifest wiring while merging subsystem upgrades.\n"
-            "- Final delivery must keep /tmp/evermind_output/index.html as the shipped entry, wire any retained support files into that live artifact, and avoid reintroducing mirrored controls or broken runtime flow.\n"
+            "MERGER / INTEGRATOR CONTRACT (v5.1 — Module Assembly):\n"
+            "STEP 1 — INVENTORY: Run file_ops list on /tmp/evermind_output/ to see all builder module files "
+            "(game_engine.js, game_features.js, module_structure.html, module_content.html, etc.) and any "
+            "asset files from ImageGen/Spritesheet/AssetImport (assets/visuals.css, assets/sprites.js, assets/loader.js).\n"
+            "STEP 2 — READ: Read EVERY module file in full. Understand each module's exports, globals, init functions.\n"
+            "STEP 3 — INTEGRATE: Create /tmp/evermind_output/index.html that:\n"
+            "  a) Combines all module code into a single working page\n"
+            "  b) Resolves cross-module dependencies (e.g., game_features.js expects engine globals from game_engine.js)\n"
+            "  c) Adds proper initialization order — engine first, then features, then assets\n"
+            "  d) Inlines or <script src> references all JS modules and <link>/<style> for CSS\n"
+            "  e) Wires asset pipeline outputs (sprites.js, loader.js, visuals.css) if they exist\n"
+            "CRITICAL RULES:\n"
+            "- Do NOT rewrite module logic from scratch. Preserve each builder's implementation verbatim — only add glue code.\n"
+            "- If modules have conflicting variable names, namespace them rather than rewriting.\n"
+            "- All JS must be browser-native. Convert any CommonJS require()/module.exports to inline or IIFE.\n"
+            "- The final index.html must be a complete, working standalone page.\n"
+            "- If a module file is empty or broken, skip it rather than fabricating a replacement.\n"
         )
 
     def _custom_node_task_desc(self, agent_type: str, node_label: str, goal: str) -> str:
@@ -7101,19 +7100,13 @@ class Orchestrator:
             pass
 
     def _builder_timeout_multiplier(self, plan: Optional[Plan], subtask: Optional[SubTask]) -> float:
-        """Secondary (support-lane) builders get more time since they must read
-        and understand the primary builder's artifacts before starting to write.
-        v4.0-fix: Merger multiplier reduced from 1.5→1.25. Must stay >= 1.25 so
-        outer first-write watchdog (480×1.25=600s) does not undercut ai_bridge's
-        inner merger prewrite budget (600s). Previous 1.5× caused 277s idle when
-        merger went silent; 1.25× gives idle=225s (still improved from 270s)."""
+        """v5.1: All peer builders get equal timeout. Merger keeps 1.25× for its inner
+        prewrite budget (480×1.25=600s must not undercut ai_bridge's inner 600s)."""
         if not plan or not subtask or subtask.agent_type != "builder":
             return 1.0
         if self._builder_is_merger_like_subtask(subtask):
             return 1.25  # v4.0: must not undercut inner 600s prewrite budget
-        slot = self._builder_slot_index(plan, subtask.id)
-        if slot > 1:
-            return 1.25  # v4.0: reduced from 1.5 — support builders shouldn't idle long
+        # v5.1: All builders (slot 1, 2, ...) get equal timeout — no support-lane penalty
         return 1.0
 
     def _builder_handoff_tags(self, plan: Plan) -> List[str]:
@@ -8714,11 +8707,14 @@ class Orchestrator:
         builders = [st for st in plan.subtasks if st.agent_type == "builder"]
         if len(builders) <= 1:
             return True
-        if self._single_entry_game_secondary_builder_patch_mode(plan, subtask, goal):
-            return True
-        # Default rule: in multi-builder plans only the primary builder owns the
-        # root artifact. Single-entry games are the exception when Builder 2 is a
-        # sequential refinement pass that intentionally patches Builder 1's root.
+        # v5.1: In parallel peer-builder mode, NEITHER builder writes index.html.
+        # Both write independent module files; Merger assembles the final index.html.
+        # This eliminates file conflicts and enables true parallel execution.
+        has_merger = any(self._builder_is_merger_like_subtask(st) for st in builders)
+        if has_merger:
+            # With a merger in the plan, only merger writes root index
+            return False
+        # Fallback: if no merger, primary builder can write root
         return self._builder_slot_index(plan, subtask.id) == 1
 
     def _builder_requires_staged_root_artifact(
@@ -8809,43 +8805,9 @@ class Orchestrator:
         subtask: Optional[SubTask],
         prev_results: Optional[Dict[str, Any]] = None,
     ) -> str:
-        if not plan or not subtask or subtask.agent_type != "builder":
-            return ""
-        if self._single_entry_game_secondary_builder_patch_mode(plan, subtask, plan.goal):
-            return ""
-        if self._builder_can_write_root_index(plan, subtask, plan.goal):
-            return ""
-        try:
-            task_type = task_classifier.classify(plan.goal).task_type
-        except Exception:
-            task_type = ""
-        if task_type != "game":
-            return ""
-        if self._is_multi_page_website_goal(plan.goal):
-            return ""
-        if any(
-            self._builder_is_merger_like_subtask(st)
-            for st in (plan.subtasks or [])
-            if getattr(st, "agent_type", "") == "builder"
-        ):
-            # Parallel single-entry game flows rely on Builder 2 producing real
-            # support artifacts for the downstream merger. Shadow-skipping that
-            # lane makes the merger start without the second handoff.
-            return ""
-        primary_builder = self._homepage_builder_task(plan)
-        if primary_builder is None or primary_builder.id == subtask.id:
-            return ""
-        primary_result = (prev_results or {}).get(primary_builder.id, {}) if isinstance(prev_results, dict) else {}
-        if not primary_result.get("success"):
-            return ""
-        root_index = OUTPUT_DIR / "index.html"
-        if not root_index.exists() or not root_index.is_file():
-            return ""
-        return (
-            "Secondary builder skipped: the primary builder already owns the single-entry game artifact "
-            "and passed quality gates. Shadow rewrite disabled to avoid builder-to-builder regression, "
-            "context drift, and index.html corruption."
-        )
+        # v5.1: Never skip Builder-2. Both builders are parallel peers producing
+        # independent module files. The old support-lane skip logic is removed.
+        return ""
 
 
     def _secondary_builder_root_backup_path(self, subtask_id: str) -> Path:
@@ -13988,10 +13950,11 @@ class Orchestrator:
                 if slot == builder_count:
                     break
                 focus_map[slot] = (
-                    f"YOUR JOB: Support-lane Builder {slot}. Own one non-overlapping subsystem assigned by the analyst, such as HUD/UI density, "
-                    "camera feel, encounter scripting, stage data, effects/audio, asset manifests, or replacement hooks. "
-                    "Prefer editing or creating supporting local files first and do NOT overwrite /tmp/evermind_output/index.html unless explicitly reassigned. "
-                    "Any JS support file you emit must already be browser-native; do NOT use `module.exports`, `exports.*`, or `require(...)` in shipped browser support code."
+                    f"YOUR JOB: Builder {slot} (Parallel Peer). Own one non-overlapping subsystem module assigned by the analyst, such as HUD/UI, "
+                    "camera system, encounter scripting, stage data, effects/audio, asset manifests, or replacement hooks. "
+                    "Write your module to its own file (e.g., /tmp/evermind_output/module_b{slot}.js). "
+                    "Do NOT overwrite /tmp/evermind_output/index.html — Merger will integrate all modules. "
+                    "Any JS you emit must be browser-native; do NOT use `module.exports`, `exports.*`, or `require(...)` in shipped browser code."
                 )
             focus_map[builder_count] = (
                 "YOUR JOB: Final integrator/refiner. Read the current live artifact plus any support files produced by earlier builders, "
@@ -14062,9 +14025,10 @@ class Orchestrator:
                 )
             else:
                 focus_map[slot] = (
-                    f"YOUR JOB: Support-lane Builder {slot}. Own one non-overlapping subsystem assigned by the analyst, such as HUD/UI, "
+                    f"YOUR JOB: Builder {slot} (Parallel Peer). Own one non-overlapping subsystem module assigned by the analyst, such as HUD/UI, "
                     "enemy/level scripting, content/data, effects/audio, responsive polish, or asset wiring. "
-                    "Prefer creating or editing supporting local files/modules first. If you must patch the main artifact, read it first and preserve existing working systems. "
+                    "Write your module to its own file (e.g., /tmp/evermind_output/module_b{slot}.js). "
+                    "Do NOT overwrite /tmp/evermind_output/index.html — Merger will integrate all modules. "
                     "Do not emit CommonJS-only browser support files."
                 )
         return focus_map
@@ -14552,61 +14516,94 @@ class Orchestrator:
         return written
 
     def _pro_builder_focus(self, goal: str) -> tuple[str, str]:
-        """Return parallel builder focus for pro mode. Each builder creates an independent part.
-        Website parts save separately; Evermind assembles index.html preview automatically."""
+        """v5.1: Parallel peer builder architecture — each builder owns separate module files.
+        Merger integrates them into final index.html. No support-lane; both builders are equal."""
         task_type = task_classifier.classify(goal).task_type
         if task_type == "website" and task_classifier.wants_multi_page(goal):
             return self._pro_multi_page_builder_focus(goal)
+        # ── v5.1: Module-ownership parallel architecture ──
+        # Each builder writes to its OWN file(s). Neither touches index.html.
+        # Merger reads both module files and integrates into final index.html.
         mapping = {
             "website": (
-                "YOUR JOB: Build the TOP HALF — header/nav, hero, trust badges, features grid. "
-                "Save ONLY your assigned output to /tmp/evermind_output/index_part1.html via file_ops write. "
-                "Do NOT overwrite /tmp/evermind_output/index.html in this step.",
-                "YOUR JOB: Build the BOTTOM HALF — testimonials, pricing/CTA, footer. "
-                "Save ONLY your assigned output to /tmp/evermind_output/index_part2.html via file_ops write. "
-                "Do NOT overwrite /tmp/evermind_output/index.html in this step.",
+                "YOUR JOB (Builder 1 — Structure & Hero Module): Build header/nav, hero section, "
+                "trust badges, features grid, and all shared CSS variables/typography. "
+                "Save to /tmp/evermind_output/module_structure.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble the final page.",
+                "YOUR JOB (Builder 2 — Content & Conversion Module): Build testimonials, "
+                "pricing/CTA section, contact form, footer, and any interactive JS (smooth scroll, "
+                "form validation, animations). "
+                "Save to /tmp/evermind_output/module_content.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble the final page.",
             ),
             "game": (
-                "YOUR JOB: Build core gameplay — game loop, controls, collision, rendering, start screen. "
-                "Save to /tmp/evermind_output/index.html via file_ops write.",
-                "YOUR JOB: Refine the existing game in place — preserve the strongest gameplay shell, "
-                "then add HUD density, score/ammo state, game-over/restart, sound/visual feedback "
-                "(particles, hit flash, shake), mobile touch support, and richer level/encounter clarity. "
-                "Do NOT restart from scratch. Do NOT replace good sections with empty wrappers. "
-                "Read the existing game code from the injected refinement context, "
-                "rewrite the FULL improved version, and save it back to /tmp/evermind_output/index.html. "
-                "CRITICAL: You are Builder 2 in a sequential repair pass that starts AFTER Builder 1. "
-                "Treat Builder 1's output as the live base artifact and improve it in place instead of replacing it with a fresh concept.",
+                "YOUR JOB (Builder 1 — Game Engine Module): Build the core engine — game loop, "
+                "physics/collision system, rendering pipeline, player & enemy entities, controls, "
+                "camera system, and core game state machine. Write self-contained browser-native JS. "
+                "Save to /tmp/evermind_output/game_engine.js via file_ops write. "
+                "Do NOT create index.html — Merger will integrate all modules.",
+                "YOUR JOB (Builder 2 — Game Features Module): Build the feature layer — HUD/score "
+                "display, menu system (start/pause/game-over screens), audio manager, particle/VFX "
+                "system, mobile touch controls, level/encounter/wave system, progression/save state. "
+                "Write self-contained browser-native JS that exposes an init(engine) function. "
+                "Save to /tmp/evermind_output/game_features.js via file_ops write. "
+                "Do NOT create index.html — Merger will integrate all modules.",
             ),
             "presentation": (
-                "YOUR JOB: Build slide framework + slides 1-5 (title, overview, context, first content). "
-                "Include nav controls, progress bar, keyboard bindings, PDF print CSS. "
-                "Save to /tmp/evermind_output/index.html via file_ops write.",
-                "YOUR JOB: Read existing /tmp/evermind_output/index.html and ADD slides 6-10 "
-                "(remaining content, takeaways, Q&A). Keep existing nav/framework intact. Write back.",
+                "YOUR JOB (Builder 1 — Framework & Core Slides): Build the slide framework "
+                "(nav, progress bar, keyboard/touch bindings, PDF print CSS, transitions) "
+                "plus slides 1-5 (title, overview, context, first content sections). "
+                "Save to /tmp/evermind_output/module_framework.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
+                "YOUR JOB (Builder 2 — Content Slides & Polish): Build slides 6-10+ "
+                "(remaining content, data visualizations, takeaways, Q&A) plus visual polish "
+                "(custom animations, chart rendering, speaker notes). "
+                "Save to /tmp/evermind_output/module_slides.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
             ),
             "dashboard": (
-                "YOUR JOB: Build layout shell (sidebar/topbar) + KPI stat cards + main chart area. "
-                "Save to /tmp/evermind_output/index.html via file_ops write.",
-                "YOUR JOB: Read existing /tmp/evermind_output/index.html and ADD table/filters, "
-                "secondary panels, responsive polish. Write back.",
+                "YOUR JOB (Builder 1 — Layout & Data Module): Build layout shell (sidebar/topbar), "
+                "KPI stat cards, main chart area with chart.js/d3 rendering, data fetch/transform "
+                "layer, and responsive grid system. "
+                "Save to /tmp/evermind_output/module_layout.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
+                "YOUR JOB (Builder 2 — Widgets & Interaction Module): Build data table with "
+                "sort/filter/search, secondary chart panels, settings/filter sidebar, theme toggle, "
+                "export (CSV/PDF), notification toasts, and all interactive state management. "
+                "Save to /tmp/evermind_output/module_widgets.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
             ),
             "tool": (
-                "YOUR JOB: Build core input/output workflow, validation, primary utility function. "
-                "Save to /tmp/evermind_output/index.html via file_ops write.",
-                "YOUR JOB: Read existing /tmp/evermind_output/index.html and ADD UX polish "
-                "(copy/reset buttons, keyboard shortcuts, error states, responsive). Write back.",
+                "YOUR JOB (Builder 1 — Core Logic Module): Build the core tool workflow — "
+                "input parsing, validation, primary transformation/utility function, output "
+                "formatting, and the processing pipeline. "
+                "Save to /tmp/evermind_output/module_core.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
+                "YOUR JOB (Builder 2 — UI & UX Module): Build the user interface — input forms, "
+                "output display, copy/download/reset buttons, keyboard shortcuts, drag-drop, "
+                "error states, history/undo, responsive layout, and accessibility. "
+                "Save to /tmp/evermind_output/module_ui.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
             ),
             "creative": (
-                "YOUR JOB: Build core render loop, visual concept, interaction model. "
-                "Save to /tmp/evermind_output/index.html via file_ops write.",
-                "YOUR JOB: Read existing /tmp/evermind_output/index.html and ADD visual richness "
-                "(particle effects, color transitions, interaction feedback). Write back.",
+                "YOUR JOB (Builder 1 — Render Engine Module): Build the core render loop, "
+                "canvas/WebGL setup, primary visual algorithm, math utilities, and interaction model. "
+                "Save to /tmp/evermind_output/module_render.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
+                "YOUR JOB (Builder 2 — Effects & Polish Module): Build particle systems, "
+                "color transitions, secondary visual layers, audio-reactive elements, "
+                "UI overlay controls (sliders, palettes), and performance optimizations. "
+                "Save to /tmp/evermind_output/module_effects.html via file_ops write. "
+                "Do NOT create index.html — Merger will assemble.",
             ),
         }
         return mapping.get(task_type, (
-            "Build core structure and primary features. Save to /tmp/evermind_output/index.html.",
-            "Read existing file, add polish and secondary features. Write back.",
+            "YOUR JOB (Builder 1 — Core Module): Build core structure and primary features. "
+            "Save to /tmp/evermind_output/module_core.html via file_ops write. "
+            "Do NOT create index.html — Merger will assemble.",
+            "YOUR JOB (Builder 2 — Extension Module): Build secondary features, UI polish, "
+            "and interactive elements. Save to /tmp/evermind_output/module_ext.html via file_ops write. "
+            "Do NOT create index.html — Merger will assemble.",
         ))
 
     def _runtime_config(self) -> Optional[Dict[str, Any]]:
@@ -14798,12 +14795,13 @@ class Orchestrator:
 
         if strategy.get("include_asset_pipeline"):
             imagegen_desc, spritesheet_desc, assetimport_desc = self._asset_pipeline_descriptions(goal)
+            # v5.1: Asset nodes run in PARALLEL (all depend only on Analyst)
             subtasks.extend([
                 SubTask(id="3", agent_type="imagegen", description=imagegen_desc, depends_on=[analyst_id]),
-                SubTask(id="4", agent_type="spritesheet", description=spritesheet_desc, depends_on=[analyst_id, "3"]),
-                SubTask(id="5", agent_type="assetimport", description=assetimport_desc, depends_on=[analyst_id, "3", "4"]),
+                SubTask(id="4", agent_type="spritesheet", description=spritesheet_desc, depends_on=[analyst_id]),
+                SubTask(id="5", agent_type="assetimport", description=assetimport_desc, depends_on=[analyst_id]),
             ])
-            builder_dep_ids = [analyst_id, "5"]
+            builder_dep_ids = [analyst_id, "3", "4", "5"]
             next_id = 6
         else:
             if strategy.get("include_uidesign"):
@@ -15142,8 +15140,20 @@ class Orchestrator:
         )
 
     def _materialize_parallel_builder_preview(self) -> Optional[Path]:
-        part_paths = [OUTPUT_DIR / "index_part1.html", OUTPUT_DIR / "index_part2.html"]
-        if not all(path.exists() and path.is_file() for path in part_paths):
+        # v5.1: Check both old (index_part1/2.html) and new (module_*.html, game_*.js) patterns
+        old_parts = [OUTPUT_DIR / "index_part1.html", OUTPUT_DIR / "index_part2.html"]
+        new_html_parts = sorted(OUTPUT_DIR.glob("module_*.html"))
+        new_js_parts = sorted(OUTPUT_DIR.glob("game_*.js"))
+
+        part_paths: List[Path] = []
+        if all(p.exists() and p.is_file() for p in old_parts):
+            part_paths = old_parts
+        elif new_html_parts:
+            part_paths = new_html_parts
+        elif new_js_parts:
+            part_paths = new_js_parts
+
+        if not part_paths:
             return None
 
         html_parts: List[tuple[str, str]] = []
@@ -15909,7 +15919,7 @@ class Orchestrator:
         pass_threshold = (
             self._adaptive_quality_pass_threshold(model_name_clean, retry_count_int, max_retries_int)
             if model_name_clean
-            else 0  # V4.6 SPEED: default threshold also 0
+            else getattr(self, "_quality_gate_default_threshold", 0)
         )
         # V4.6 SPEED: When threshold is 0, always pass — errors are informational only
         passed = True if pass_threshold <= 0 else (not errors and score >= pass_threshold)
@@ -18030,7 +18040,7 @@ class Orchestrator:
             threshold = (
                 self._adaptive_quality_pass_threshold(model_name_clean, retry_int, max_retries_int)
                 if model_name_clean
-                else 0  # V4.6 SPEED: default threshold 0 (was 70)
+                else getattr(self, "_quality_gate_default_threshold", 0)
             )
             report_obj.setdefault("model_name", model_name_clean)
             report_obj.setdefault("model_tier", tier)
@@ -18053,14 +18063,9 @@ class Orchestrator:
             plan=plan,
             subtask=subtask,
         )
-        support_lane_only = bool(
-            plan is not None
-            and subtask is not None
-            and subtask.agent_type == "builder"
-            and task_classifier.classify(goal).task_type == "game"
-            and not self._builder_can_write_root_index(plan, subtask, goal)
-            and not self._builder_is_merger_like_subtask(subtask)
-        )
+        # v5.1: Support-lane concept removed — all builders are equal peers.
+        # Quality gate applies normal HTML validation to every builder.
+        support_lane_only = False
         html_path = ""
         preview_artifact = prepared_preview_artifact or self._select_preview_artifact_for_files(quality_files)
         if preview_artifact is not None:
@@ -19693,12 +19698,14 @@ class Orchestrator:
         if difficulty == "standard":
             if asset_pipeline_enabled:
                 imagegen_desc, spritesheet_desc, assetimport_desc = self._asset_pipeline_descriptions(goal)
+                # v5.1: Asset nodes run in PARALLEL (all depend only on Analyst).
+                # Each produces actual code files that Builder can import.
                 plan.subtasks = [
                     SubTask(id="1", agent_type="analyst", description=task_classifier.analyst_description(goal), depends_on=[]),
                     SubTask(id="2", agent_type="imagegen", description=imagegen_desc, depends_on=["1"]),
-                    SubTask(id="3", agent_type="spritesheet", description=spritesheet_desc, depends_on=["1", "2"]),
-                    SubTask(id="4", agent_type="assetimport", description=assetimport_desc, depends_on=["1", "2", "3"]),
-                    SubTask(id="5", agent_type="builder", description=builder_desc_base, depends_on=["1", "4"]),
+                    SubTask(id="3", agent_type="spritesheet", description=spritesheet_desc, depends_on=["1"]),
+                    SubTask(id="4", agent_type="assetimport", description=assetimport_desc, depends_on=["1"]),
+                    SubTask(id="5", agent_type="builder", description=builder_desc_base, depends_on=["1", "2", "3", "4"]),
                     SubTask(id="6", agent_type="reviewer", description=self._reviewer_task_description(goal, pro=False), depends_on=["5"]),
                     SubTask(id="7", agent_type="deployer", description="List generated files and provide local preview URL http://127.0.0.1:8765/preview/", depends_on=["5"]),
                     SubTask(id="8", agent_type="tester", description=profile.tester_hint, depends_on=["6", "7"]),
@@ -22661,6 +22668,8 @@ class Orchestrator:
                 if recent_imagegen_assets:
                     files_created = self._merge_generated_paths(files_created, recent_imagegen_assets)
 
+            # v5.1: Initialize so subtask_complete always has access
+            files_created_metrics: Dict[str, Any] = {}
             if files_created:
                 # De-duplicate artifacts while preserving order (tool writes may report same file twice).
                 files_created = self._merge_generated_paths(files_created)
@@ -24275,6 +24284,8 @@ class Orchestrator:
                 and int(getattr(subtask, "retries", 0) or 0) < int(getattr(subtask, "max_retries", 0) or 0)
             )
 
+            # v5.0.1: Include code metrics in subtask_complete for frontend sync
+            _sc_code_metrics = files_created_metrics
             await self.emit("subtask_complete", {
                 "subtask_id": subtask.id,
                 "agent": subtask.agent_type,
@@ -24290,6 +24301,10 @@ class Orchestrator:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "cost": estimated_cost,
+                "code_lines": int(_sc_code_metrics.get("code_lines", 0) or 0),
+                "total_lines": int(_sc_code_metrics.get("total_lines", 0) or 0),
+                "code_kb": float(_sc_code_metrics.get("code_kb", 0) or 0),
+                "code_languages": list(_sc_code_metrics.get("languages", []) or []),
                 # v3.0: Attach walkthrough report and handoff packet
                 "walkthrough_report": result.get("walkthrough_report", ""),
                 "handoff_packet": result.get("handoff_packet"),
