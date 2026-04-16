@@ -1375,22 +1375,30 @@ def classify(goal: str) -> TaskProfile:
     return PROFILES["website"]
 
 
-def builder_system_prompt(goal: str) -> str:
-    """Generate a task-adaptive builder system prompt WITH injected CSS template.
-    The CSS template provides pre-built professional styling so the model
-    only needs to write HTML structure and content."""
+def builder_system_prompt(goal: str, *, split_deferred: bool = False):
+    """Generate a task-adaptive builder system prompt.
+
+    When *split_deferred* is True, returns ``(core_prompt, deferred_context)``
+    where *deferred_context* holds large reference blocks (CSS templates,
+    design-system data, topic images) that can be injected into the user
+    message instead. This keeps the system prompt small and stable for
+    prompt caching — the system prefix no longer changes between different
+    CSS templates, reducing wasted input tokens on multi-round tool calls.
+
+    When *split_deferred* is False (default), returns a single string with
+    everything inlined, preserving backward compatibility.
+    """
     profile = classify(goal)
 
     # Load pre-built CSS templates
     base_css = _load_template("base.css")
-    # Map task types to template files
     type_css_map = {
         "website": "website.css",
         "presentation": "presentation.css",
         "game": "game.css",
         "dashboard": "dashboard.css",
-        "tool": "website.css",  # tools use website base
-        "creative": "game.css",  # creative uses game base
+        "tool": "website.css",
+        "creative": "game.css",
     }
     type_css = _load_template(type_css_map.get(profile.task_type, "website.css"))
 
@@ -1452,12 +1460,29 @@ def builder_system_prompt(goal: str) -> str:
     )
     foundation_block = gameplay_foundation_contract(goal)
 
-    return (
+    if not split_deferred:
+        # Legacy path: everything in one system prompt string
+        return (
+            f"{profile.role}\n"
+            f"{_COMMON_RULES}"
+            f"{css_block}"
+            f"{design_system_with_runtime}"
+            f"{foundation_block}"
+            f"{profile.blueprint}"
+            f"{first_write_contract}"
+            f"{multi_page_block}"
+            f"{motion_block}"
+            f"{language_block}"
+            f"Quality: {profile.quality}\n"
+            f"{delivery_block}"
+        )
+
+    # V4.6 SPEED: Split into compact system prompt + deferred user context.
+    # System prompt: identity + behavioral rules + contracts (stable prefix for caching)
+    # Deferred: CSS templates + design system data + topic images (reference material)
+    core_prompt = (
         f"{profile.role}\n"
         f"{_COMMON_RULES}"
-        f"{css_block}"
-        f"{design_system_with_runtime}"
-        f"{foundation_block}"
         f"{profile.blueprint}"
         f"{first_write_contract}"
         f"{multi_page_block}"
@@ -1466,6 +1491,16 @@ def builder_system_prompt(goal: str) -> str:
         f"Quality: {profile.quality}\n"
         f"{delivery_block}"
     )
+    deferred_parts = []
+    if css_block:
+        deferred_parts.append(css_block)
+    if design_system_with_runtime:
+        deferred_parts.append(design_system_with_runtime)
+    if foundation_block:
+        deferred_parts.append(foundation_block)
+    deferred_context = "\n".join(deferred_parts)
+
+    return (core_prompt, deferred_context)
 
 
 def builder_task_description(goal: str) -> str:

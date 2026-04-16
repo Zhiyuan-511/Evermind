@@ -276,8 +276,8 @@ export interface UseRuntimeConnectionReturn {
     running: boolean;
     previewUrl: string | null;
     previewRunId: string | null;
-    canvasView: 'editor' | 'preview';
-    setCanvasView: React.Dispatch<React.SetStateAction<'editor' | 'preview'>>;
+    canvasView: 'editor' | 'preview' | 'files';
+    setCanvasView: React.Dispatch<React.SetStateAction<'editor' | 'preview' | 'files'>>;
     connected: boolean;
     wsRef: React.RefObject<WebSocket | null>;
     handleSendGoal: (goal: string, attachments?: ChatAttachment[]) => void;
@@ -311,7 +311,7 @@ export function useRuntimeConnection({
     const [running, setRunning] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
     const [previewRunId, setPreviewRunId] = useState<string | null>(null);
-    const [canvasView, setCanvasView] = useState<'editor' | 'preview'>('editor');
+    const [canvasView, setCanvasView] = useState<'editor' | 'preview' | 'files'>('editor');
     const [connectorRuntimeId, setConnectorRuntimeId] = useState('');
     const [connectorPid, setConnectorPid] = useState('');
     const [connectorConnectedAt, setConnectorConnectedAt] = useState<number | null>(null);
@@ -1998,7 +1998,7 @@ export function useRuntimeConnection({
                     updatePayload.nodeType = normalizeCanvasNodeType(payload.nodeKey || existingData.nodeType || 'builder');
                 }
                 updatePayload.runtime = String(payload.runtime || 'openclaw');
-                updatePayload.progress = payload.progress !== undefined ? Number(payload.progress) : fallbackProgress;
+                updatePayload.progress = Math.max(0, Math.min(100, payload.progress !== undefined ? Number(payload.progress) : fallbackProgress));
                 if (payload.tokensUsed !== undefined) updatePayload.tokensUsed = Number(payload.tokensUsed);
                 if (payload.cost !== undefined) updatePayload.cost = Number(payload.cost);
                 if (payload.costDelta !== undefined && !payload.cost) updatePayload.cost = Number(payload.costDelta);
@@ -2175,7 +2175,7 @@ export function useRuntimeConnection({
                     update.nodeType = normalizeCanvasNodeType(payload.nodeKey || existingData.nodeType || 'builder');
                 }
                 update.runtime = String(payload.runtime || 'openclaw');
-                if (progressPct !== undefined) update.progress = progressPct;
+                if (progressPct !== undefined) update.progress = Math.max(0, Math.min(100, progressPct));
                 if (partialOutput) {
                     update.outputSummary = buildReadableCurrentWork({
                         lang,

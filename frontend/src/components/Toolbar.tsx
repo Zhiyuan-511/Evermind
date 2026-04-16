@@ -22,8 +22,9 @@ interface ToolbarProps {
     onOpenHistory: () => void;
     onOpenDiagnostics: () => void;
     /* Canvas view toggle */
-    canvasView: 'editor' | 'preview';
+    canvasView: 'editor' | 'preview' | 'files';
     onToggleCanvasView: () => void;
+    onSetCanvasView?: (view: 'editor' | 'preview' | 'files') => void;
     hasPreview: boolean;
     /* P0-2: OpenClaw status bar */
     activeRunStatus?: string;
@@ -44,7 +45,7 @@ export default function Toolbar({
     onOpenSettings, onOpenTemplates, onOpenGuide,
     onOpenSkillsLibrary,
     onOpenHistory, onOpenDiagnostics,
-    canvasView, onToggleCanvasView, hasPreview,
+    canvasView, onToggleCanvasView, onSetCanvasView, hasPreview,
     activeRunStatus, runtimeModeLabel, activeTaskLabel, activeRunId, lastEventAt, wsUrl, envTag, onOpenConnectorPanel, showOpenClaw = true,
 }: ToolbarProps) {
     const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
@@ -140,10 +141,10 @@ export default function Toolbar({
                     overflow: 'hidden', flexShrink: 0,
                 }}>
                     <button
-                        onClick={canvasView === 'editor' ? undefined : onToggleCanvasView}
+                        onClick={() => { if (canvasView !== 'editor') { onSetCanvasView ? onSetCanvasView('editor') : onToggleCanvasView(); } }}
                         style={{
                             padding: '4px 10px', fontSize: 10, fontWeight: 600,
-                            border: 'none', cursor: 'pointer',
+                            border: 'none', cursor: canvasView === 'editor' ? 'default' : 'pointer',
                             background: canvasView === 'editor' ? 'rgba(79,143,255,0.15)' : 'transparent',
                             color: canvasView === 'editor' ? 'var(--blue)' : 'var(--text3)',
                             transition: 'all 0.15s',
@@ -152,10 +153,10 @@ export default function Toolbar({
                         {tr('节点', 'Nodes')}
                     </button>
                     <button
-                        onClick={canvasView === 'preview' ? undefined : onToggleCanvasView}
+                        onClick={() => { if (canvasView !== 'preview') { onSetCanvasView ? onSetCanvasView('preview') : onToggleCanvasView(); } }}
                         style={{
                             padding: '4px 10px', fontSize: 10, fontWeight: 600,
-                            border: 'none', cursor: 'pointer',
+                            border: 'none', cursor: canvasView === 'preview' ? 'default' : 'pointer',
                             background: canvasView === 'preview' ? 'rgba(64,214,124,0.15)' : 'transparent',
                             color: canvasView === 'preview' ? 'var(--green)' : 'var(--text3)',
                             transition: 'all 0.15s',
@@ -171,6 +172,18 @@ export default function Toolbar({
                                 flexShrink: 0,
                             }} />
                         )}
+                    </button>
+                    <button
+                        onClick={() => { if (canvasView !== 'files' && onSetCanvasView) onSetCanvasView('files'); }}
+                        style={{
+                            padding: '4px 10px', fontSize: 10, fontWeight: 600,
+                            border: 'none', cursor: 'pointer',
+                            background: canvasView === 'files' ? 'rgba(168,85,247,0.15)' : 'transparent',
+                            color: canvasView === 'files' ? '#a855f7' : 'var(--text3)',
+                            transition: 'all 0.15s',
+                        }}
+                    >
+                        {tr('文件', 'Files')}
                     </button>
                 </div>
 

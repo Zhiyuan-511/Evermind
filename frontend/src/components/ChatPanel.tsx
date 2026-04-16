@@ -467,7 +467,7 @@ export default function ChatPanel({
     };
 
     return (
-        <div className="glass-strong flex flex-col h-full border-l border-white/5" style={{ width: '320px', minWidth: 260, flexShrink: 0, overflow: 'hidden' }}>
+        <div className="glass-strong flex flex-col h-full border-l border-white/5" style={{ width: '100%', minWidth: 0, flexShrink: 0, overflow: 'hidden' }}>
 
             {/* Layer 1: TaskSummaryStrip */}
             <TaskSummaryStrip

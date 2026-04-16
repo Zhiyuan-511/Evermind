@@ -100,7 +100,7 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const nodeType = data.nodeType as string || 'builder';
     const info = NODE_TYPES[nodeType] || { icon: '', color: '#666', label_en: nodeType, label_zh: nodeType, desc_en: '', desc_zh: '', inputs: [{ id: 'in', label: 'Input' }], outputs: [{ id: 'out', label: 'Output' }] };
     const rawStatus = data.status as string || 'idle';
-    const progress = (data.progress as number) || 0;
+    const progress = Math.max(0, Math.min(100, (data.progress as number) || 0));
     const model = (data.model as string) || '';
     const assignedModel = (data.assignedModel as string) || '';
     const displayModel = assignedModel || model || 'gpt-5.4';

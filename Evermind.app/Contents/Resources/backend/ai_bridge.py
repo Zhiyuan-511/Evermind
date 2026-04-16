@@ -150,6 +150,16 @@ MAX_MESSAGE_CONTENT_CHARS = int(os.getenv("EVERMIND_MAX_MESSAGE_CONTENT_CHARS", 
 # V4.5.1: Lowered 80K→60K — relay shows 29K-51K input tokens causing 14-27s latency.
 # Target: keep requests under ~16K tokens (≈64K chars) to hit <8s TTFT.
 MAX_REQUEST_TOTAL_CHARS = int(os.getenv("EVERMIND_MAX_REQUEST_TOTAL_CHARS", "60000"))
+# V4.6 SPEED: Responses API migration flag. When True, use OpenAI Responses API
+# (/v1/responses) instead of Chat Completions (/v1/chat/completions).
+# Key benefits:
+#   1. previous_response_id: server-side context retention → no repeated system prompt
+#   2. Built-in tool orchestration → smaller request payloads
+#   3. Better prompt caching (40-80% improvement per OpenAI benchmarks)
+# Currently gated behind config flag — enable after validation with relay.
+USE_RESPONSES_API = str(
+    os.getenv("EVERMIND_USE_RESPONSES_API", "0")
+).strip().lower() in {"1", "true", "yes"}
 # V4.5.1: Reduced 6→4 — aggressive trim for multi-tool-call sessions.
 MAX_CONTEXT_KEEP_LAST_MESSAGES = int(os.getenv("EVERMIND_MAX_CONTEXT_KEEP_LAST_MESSAGES", "4"))
 CONTEXT_OMITTED_MARKER = "... [OLDER_CONTEXT_OMITTED_FOR_TOKEN_BUDGET]"
@@ -240,13 +250,14 @@ PROVIDER_ENV_KEY_MAP = {
     "minimax": "MINIMAX_API_KEY",
 }
 
-# V4.5: Pruned fallback chain — only models confirmed available.
-# relay: gpt-5.3-codex works reliably; gpt-5.4 intermittently blocked/not-found.
-# kimi-coding direct has auth failures (401) as of 2026-04-14 — demoted.
-# Removed dead models that waste retry time and trigger rejection cooldowns.
+# V4.6: Restored gpt-5.4 to fallback chain — user's preferred model.
+# V4.6 SPEED: kimi-coding (via relay → kimi-k2.5) is 50-100x faster than
+# gpt-5.4 on relay today. gpt-5.4 takes 115-280s for chat calls, kimi ~2s.
+# Promote kimi-coding to primary, keep gpt-5.4 as fallback.
 LEGACY_AUTO_FALLBACK_ORDER = [
-    "gpt-5.3-codex",
     "kimi-coding",
+    "gpt-5.4",
+    "gpt-5.3-codex",
     "deepseek-v3",
     "claude-4-sonnet",
     "gemini-2.5-pro",
@@ -321,7 +332,15 @@ def compress_system_prompt(text: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# Agent Presets
+# Agent Presets — loaded from YAML templates
+# ─────────────────────────────────────────────
+# Harness definitions are maintained as YAML files in
+# backend/prompt_templates/*.yaml.  Edit a node's system prompt by
+# modifying its YAML file — no Python changes needed.
+#
+# The inline dict below serves as a resilient fallback.  When YAML
+# templates load successfully, AGENT_PRESETS is overridden (see the
+# try/except block after the dict).
 # ─────────────────────────────────────────────
 AGENT_PRESETS = {
     "router": {
@@ -526,7 +545,8 @@ AGENT_PRESETS = {
             "  Use browser act with semantic targets for buttons, forms, controls.\n"
             "  After EVERY interaction: call browser wait_for or observe to verify state change.\n"
             "  PASS is invalid without post-action verification evidence.\n"
-            "  For GAMES: click start/play, then browser press_sequence with Arrow/WASD/Space/Enter.\n"
+            "  For GAMES: you MUST use the browser_use tool (NOT just internal browser) to click start/play and interact with gameplay keys (Arrow/WASD/Space/Enter).\n"
+            "  The browser_use tool is MANDATORY for game tasks — internal browser alone will NOT pass the quality gate.\n"
             "  PASS only if game is playable and state visibly changes (HUD, score, position).\n"
             "  FAIL if browser diagnostics report runtime errors.\n"
             "  If [Desktop QA Session Evidence] exists, use as primary record; only open browser for concrete bug confirmation.\n"
@@ -539,8 +559,6 @@ AGENT_PRESETS = {
             "  Note if page loads slowly, if animations stutter, or if large assets block rendering.\n"
             "  Flag any accessibility concerns (missing alt text, low contrast, no keyboard navigation).\n"
             "\n"
-            "OUTPUT: {\"status\": \"pass\"/\"fail\", \"visual_score\": 1-10, \"issues\": [...], \"screenshot\": \"taken\", "
-            "\"performance_notes\": \"...\", \"accessibility_flags\": [...]}\n"
             "IMPORTANT: Do NOT skip the browser step. You MUST navigate to the preview URL.\n\n"
             "## ANTI-LAZINESS CONTRACT (v3.5.1 — OMC evidence chain + GStack verification)\n"
             "IRON RULES:\n"
@@ -551,11 +569,19 @@ AGENT_PRESETS = {
             "5. FAIL-FAST: If the build artifact is missing or empty, report FAIL immediately.\n"
             "6. PARTIAL IS OK: If Builder 2 failed, test Builder 1's output only — a partial product that works beats a failed test.\n"
             "7. 'IT SHOULD WORK' IS NOT A TEST RESULT: You must observe it working, not assume it.\n\n"
-            "STRUCTURED TEST REPORT: Your final output MUST be the JSON object described in the OUTPUT section above. "
-            "Do NOT use a plain-text format — use the JSON schema with status, visual_score, issues, screenshot, etc.\n"
-            "\n\n## COVERAGE MAP (v4.0)\n"
-            "List tested features + untested features.\n"
-            "Interaction depth: games >= 5 interactions, sites >= 3 page navigations."
+            "## OUTPUT FORMAT (v4.6 — rich prose + JSON verdict)\n"
+            "Write your test report as DETAILED natural-language prose with markdown headings:\n\n"
+            "### Test Environment & Setup\n"
+            "Browser version, viewport size, preview URL used.\n\n"
+            "### Functional Testing\n"
+            "For each feature tested: what you did, what happened, pass/fail with evidence.\n\n"
+            "### Visual & Performance Assessment\n"
+            "Visual quality score 1-10 with justification. Performance observations.\n\n"
+            "### Coverage Map\n"
+            "Tested features vs untested features. Interaction depth: games >= 5, sites >= 3 pages.\n\n"
+            "### JSON Test Result (MANDATORY — must be last)\n"
+            "End with one JSON object for machine parsing:\n"
+            "{\"status\":\"pass\" or \"fail\",\"visual_score\":1-10,\"issues\":[...],\"performance_notes\":\"...\",\"accessibility_flags\":[...]}"
         ),
     },
     "reviewer": {
@@ -573,9 +599,9 @@ AGENT_PRESETS = {
             "6. Interactive testing:\n"
             "   - You MUST use browser act for the main interaction test.\n"
             "   - After EVERY interaction, you MUST call browser wait_for or observe to verify state change.\n"
-            "   - For GAMES: you MUST click start/play and use browser press_sequence with gameplay keys (Arrow/WASD/Space/Enter). "
-            "Verify HUD changes, score updates, or visible game state transitions.\n"
-            "   - Prefer internal browser first; escalate to browser_use only for complex multi-step play sessions.\n"
+            "   - For GAMES: you MUST use the browser_use tool (NOT just internal browser) to click start/play and interact with gameplay keys (Arrow/WASD/Space/Enter). "
+            "Verify HUD changes, score updates, or visible game state transitions. "
+            "The browser_use tool is MANDATORY for game tasks — internal browser alone will NOT pass the quality gate.\n"
             "7. Multi-page: validate at least one real navigation path via UI first, then cover ALL requested pages.\n"
             "8. Error check: reject if browser diagnostics show runtime errors, if post-action verification is missing, or state appears unchanged.\n"
             "9. False positive guard: before claiming a file is truncated/incomplete, verify with file_ops. "
@@ -604,36 +630,35 @@ AGENT_PRESETS = {
             "- Any single dimension < 5 → auto REJECTED\n"
             "- Any functionality/completeness/originality < 6 → REJECTED\n"
             "- APPROVED is invalid if blocking_issues or required_changes are non-empty\n\n"
-            "## OUTPUT FORMAT (strict JSON only)\n\n"
-            "Your FINAL answer MUST be exactly one JSON object. Start with { and end with }. "
-            "No markdown fences, bullet lists, or prose before/after.\n"
-            "Name exact page routes (index.html, cities.html) in all issue fields.\n"
-            "Include concrete UI anchors (heading text, button label, section title) for every blocking issue.\n"
-            "required_changes MUST be executable, prefixed with owner: 'Builder: ...' or 'Polisher: ...'.\n\n"
-            '{"verdict": "APPROVED" or "REJECTED", '
-            '"scores": {"layout": N, "color": N, "typography": N, "animation": N, "responsive": N, "functionality": N, "completeness": N, "originality": N}, '
-            '"score_details": {"layout": "justification + improvement suggestion", "color": "...", "typography": "...", "animation": "...", "responsive": "...", "functionality": "...", "completeness": "...", "originality": "..."}, '
-            '"ship_readiness": N, '
-            '"average": N.N, '
-            '"zone_analysis": ["Hero: ...", "Nav: ...", "Content Section 1: ...", "Footer: ..."], '
-            '"issues": ["specific issue 1", "specific issue 2"], '
-            '"blocking_issues": ["what prevents approval — include file route + UI anchor"], '
-            '"missing_deliverables": ["missing artifact / section / interaction"], '
-            '"required_changes": ["Builder: exact change 1", "Polisher: exact change 2"], '
-            '"acceptance_criteria": ["how the resubmission will pass"], '
-            '"strengths": ["what is already strong enough to preserve"]}\n\n'
+            "## OUTPUT FORMAT (v4.6 — rich prose + JSON verdict)\n\n"
+            "Write your review as a DETAILED natural-language report. Use markdown headings, bullets, and prose.\n"
+            "Structure your report in these sections:\n\n"
+            "### Zone-by-Zone Analysis\n"
+            "For EACH page zone (hero/header, navigation, content sections, footer), write 2-3 sentences covering:\n"
+            "visual weight, whitespace rhythm, color consistency, typography, content completeness.\n"
+            "Name exact files (index.html, cities.html) and CSS selectors/UI anchors.\n\n"
+            "### Scoring Breakdown\n"
+            "For EACH of the 8 dimensions, write: **dimension** — score/10 — evidence + improvement suggestion.\n"
+            "Cite concrete CSS selectors, element counts, or screenshot regions as evidence.\n\n"
+            "### Blocking Issues\n"
+            "List EVERY issue that prevents approval. Include file route + UI anchor + exact fix instruction.\n"
+            "Prefix fixes with owner: 'Builder: ...' or 'Polisher: ...'.\n\n"
+            "### Strengths\n"
+            "List what is already strong enough to preserve. Cite CSS/function refs.\n\n"
+            "### JSON Verdict (MANDATORY — must be last)\n"
+            "End your report with exactly one JSON object on its own line. This is for machine parsing:\n"
+            '{"verdict":"APPROVED" or "REJECTED","scores":{"layout":N,"color":N,"typography":N,"animation":N,'
+            '"responsive":N,"functionality":N,"completeness":N,"originality":N},'
+            '"ship_readiness":N,"average":N.N,'
+            '"blocking_issues":["issue1","issue2"],"required_changes":["Builder: fix1"],'
+            '"missing_deliverables":[],"strengths":["strength1"]}\n\n'
             "Be STRICT. Professional products must score ≥ 7 average.\n"
             "Generic/student-quality work should be REJECTED.\n"
             "REPORT FAITHFULLY: Do NOT approve if blocking issues exist. "
-            "Do NOT reject without naming at least one file/route and one specific UI anchor.\n\n"
-            "## EVIDENCE-BASED REVIEW (v4.3)\n"
-            "- Every score must cite evidence (CSS selector, element count, screenshot region).\n"
-            "- 3 perspectives: USER (polish/fluency) + DEVELOPER (clean code) + QA (edge cases).\n"
-            "- APPROVED must cite ≥3 strengths with CSS/function refs. REJECTED must cite exact file:selector to fix.\n"
-            "- Rate findings 1-10: ≥7 → verdict, 4-6 → observations, ≤3 → suppress.\n"
-            "- Review ALL pages in plan. index.html only = review failure.\n"
-            "- If Builder 2 failed, review Builder 1 alone.\n"
-            "- Include 'confidence' (1-10) and 'observations' array in JSON output."
+            "Do NOT reject without naming at least one file/route and one specific UI anchor.\n"
+            "Review ALL pages in plan. index.html only = review failure.\n"
+            "If Builder 2 failed, review Builder 1 alone.\n"
+            "3 perspectives: USER (polish/fluency) + DEVELOPER (clean code) + QA (edge cases)."
         ),
     },
     "merger": {
@@ -947,6 +972,15 @@ AGENT_PRESETS = {
         ),
     },
 }
+
+# ── Override with YAML templates when available ──
+try:
+    from prompt_templates import load_agent_presets as _load_yaml_presets
+    _yaml_presets = _load_yaml_presets()
+    if _yaml_presets:
+        AGENT_PRESETS = _yaml_presets
+except Exception:
+    pass  # Keep inline fallback above
 
 
 class AIBridge:
@@ -1343,14 +1377,15 @@ class AIBridge:
         now = time.time()
         state["last_rejection_at"] = now
         state["last_error"] = _sanitize_error(str(error_message or "timeout"))[:200]
-        # V4.5: Node-type aware cooldown — analyst timeout shouldn't block builder
+        # V4.6 SPEED: Drastically reduced cooldowns — prioritize throughput.
+        # Old values (30/60/120) caused cascading idle time across nodes.
         _nt = normalize_node_role(str(node_type or "").strip())
         if _nt in ("analyst", "planner", "router"):
-            cooldown = 30.0
+            cooldown = 6.0
         elif _nt in ("builder", "polisher"):
-            cooldown = 60.0
+            cooldown = 10.0
         else:
-            cooldown = 120.0
+            cooldown = 10.0  # V4.6 SPEED: was 20s, reduced to 10s — relay transient failures resolve fast
         state["rejection_cooldown_until"] = max(
             float(state.get("rejection_cooldown_until") or 0.0),
             now + cooldown,
@@ -1359,6 +1394,25 @@ class AIBridge:
             "[GatewayTimeout] Marked %s unhealthy for %ds (node=%s): %s",
             model_key, int(cooldown), _nt or "unknown", state["last_error"][:100],
         )
+        # V4.6 SPEED: Propagate to gateway-level key so sibling models
+        # on the same host (e.g. gpt-5.4 on the same relay) are also
+        # deprioritized. Prevents cascading timeouts when the gateway is down.
+        gateway_key = self._compatible_gateway_key(info, model_specific=False)
+        if gateway_key and gateway_key != model_key:
+            gw_state = self._compat_gateway_health.setdefault(gateway_key, {
+                "consecutive_rejections": 0,
+                "last_rejection_at": 0.0,
+                "last_success_at": 0.0,
+                "last_error": "",
+                "rejection_cooldown_until": 0.0,
+                "circuit_open_until": 0.0,
+            })
+            gw_state["last_rejection_at"] = now
+            gw_state["last_error"] = state["last_error"]
+            gw_state["rejection_cooldown_until"] = max(
+                float(gw_state.get("rejection_cooldown_until") or 0.0),
+                now + cooldown,
+            )
 
     def _tail_compat_gateway_log_lines(self, max_lines: int = 1200) -> List[str]:
         path = Path(COMPAT_GATEWAY_LOG_FILE)
@@ -1577,7 +1631,7 @@ class AIBridge:
                 # clear it entirely (which would cause an immediate retry storm
                 # on startup against still-broken credentials).
                 remaining = blocked_until - now
-                _max_seeded = 60.0  # cap seeded cooldowns to 60s on restart
+                _max_seeded = 15.0  # V4.6 SPEED: cap seeded cooldowns to 15s on restart (was 60s)
                 if remaining > _max_seeded:
                     state["blocked_until"] = now + _max_seeded
                     logger.info(
@@ -1853,24 +1907,27 @@ class AIBridge:
         return not any(marker in error_lower for marker in request_rejection_markers)
 
     def _compatible_gateway_failure_threshold(self) -> int:
-        return self._read_int_env("EVERMIND_COMPAT_GATEWAY_FAILURE_THRESHOLD", 2, 1, 10)
+        # V4.6 SPEED: Raised from 2→5 — tolerate more transient failures before
+        # tripping circuit breaker. Prioritize throughput over caution.
+        return self._read_int_env("EVERMIND_COMPAT_GATEWAY_FAILURE_THRESHOLD", 5, 1, 20)
 
     def _compatible_gateway_circuit_open_seconds(self) -> float:
-        return self._read_float_env("EVERMIND_COMPAT_GATEWAY_CIRCUIT_OPEN_SEC", 45.0, 5.0, 300.0)
+        # V4.6 SPEED: Reduced from 45→10s — recover from circuit-open state
+        # much faster. With threshold=5, false trips are already rare.
+        return self._read_float_env("EVERMIND_COMPAT_GATEWAY_CIRCUIT_OPEN_SEC", 10.0, 3.0, 300.0)
 
     def _compatible_gateway_rejection_cooldown_seconds(self) -> float:
-        # P0 FIX 2026-04-04: 45s cooldown was too short — relay.cn rejections are
-        # policy-based, not rate-limit-based, so they don't resolve in 45s.
-        # V4.2: Lowered from 300s to 120s — 300s caused excessive downtime when
-        # gateway issues are transient (e.g. private-relay.com intermittent 503s).
-        return self._read_float_env("EVERMIND_COMPAT_GATEWAY_REJECTION_COOLDOWN_SEC", 120.0, 15.0, 1800.0)
+        # V4.6 SPEED: Reduced from 120→15s — the old 120s cooldown was the
+        # single biggest source of node idle time. Most gateway rejections
+        # are transient (503, rate-limit bursts) and resolve in seconds.
+        # For persistent policy blocks, the fallback chain handles it.
+        return self._read_float_env("EVERMIND_COMPAT_GATEWAY_REJECTION_COOLDOWN_SEC", 15.0, 5.0, 1800.0)
 
     def _compatible_gateway_recent_rejection_grace_seconds(self) -> float:
-        # Persist blocked-gateway memory across app restarts for much longer.
-        # In practice, policy blocks on third-party compatible gateways often
-        # remain for hours, not minutes, so a 1h grace period still causes the
-        # next desktop launch to waste a fresh request before falling back.
-        return self._read_float_env("EVERMIND_COMPAT_GATEWAY_RECENT_REJECTION_GRACE_SEC", 3600.0, 300.0, 172800.0)
+        # V4.6 SPEED: Reduced from 3600→300s — don't carry stale failure
+        # memory across restarts for an hour. 5 minutes is enough to avoid
+        # immediate retry storms while not blocking fresh attempts.
+        return self._read_float_env("EVERMIND_COMPAT_GATEWAY_RECENT_REJECTION_GRACE_SEC", 300.0, 60.0, 172800.0)
 
     def _compatible_gateway_error_trips_rejection_cooldown(self, error_message: str) -> bool:
         error_lower = str(error_message or "").lower()
@@ -2567,10 +2624,24 @@ class AIBridge:
         prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
         total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+        # V4.6 CACHE: Extract cached_tokens from OpenAI/Kimi prompt_tokens_details
+        cached_tokens = 0
+        ptd = usage.get("prompt_tokens_details") or {}
+        if isinstance(ptd, dict):
+            cached_tokens = int(ptd.get("cached_tokens") or 0)
+        elif hasattr(ptd, "cached_tokens"):
+            cached_tokens = int(getattr(ptd, "cached_tokens", 0) or 0)
+        if cached_tokens > 0:
+            logger.info(
+                "CACHE HIT: cached_tokens=%d prompt_tokens=%d (%.0f%% cached)",
+                cached_tokens, prompt_tokens,
+                (cached_tokens / max(prompt_tokens, 1)) * 100,
+            )
         return {
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "cached_tokens": cached_tokens,
         }
 
     def _merge_usage(self, base: Dict[str, int], delta: Any) -> Dict[str, int]:
@@ -3189,24 +3260,27 @@ class AIBridge:
         Use a shorter initial-activity deadline so nodes fail over before the full
         hard ceiling expires.
         """
+        # V4.6 SPEED: Ultra-aggressive initial-activity timeouts.
+        # Data shows relay first_chunk p50 is 4-5s for gpt-5.4-mini, 9-11s for gpt-5.4.
+        # If no activity in 12s, failover immediately — don't waste 18-25s.
         normalized_node_type = normalize_node_role(node_type)
         text = str(input_data or "")
         if normalized_node_type == "builder":
-            base = self._read_int_env("EVERMIND_COMPAT_GATEWAY_BUILDER_INITIAL_ACTIVITY_SEC", 55, 15, 180)
+            base = self._read_int_env("EVERMIND_COMPAT_GATEWAY_BUILDER_INITIAL_ACTIVITY_SEC", 14, 6, 120)
             if task_classifier.wants_multi_page(text):
                 base = max(
                     base,
-                    self._read_int_env("EVERMIND_COMPAT_GATEWAY_BUILDER_MULTI_PAGE_INITIAL_SEC", 55, 20, 240),
+                    self._read_int_env("EVERMIND_COMPAT_GATEWAY_BUILDER_MULTI_PAGE_INITIAL_SEC", 18, 8, 180),
                 )
             return base
         if normalized_node_type == "polisher":
-            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_POLISHER_INITIAL_ACTIVITY_SEC", 45, 15, 120)
+            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_POLISHER_INITIAL_ACTIVITY_SEC", 12, 6, 90)
         if normalized_node_type == "imagegen":
-            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_IMAGEGEN_INITIAL_ACTIVITY_SEC", 40, 15, 120)
+            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_IMAGEGEN_INITIAL_ACTIVITY_SEC", 12, 6, 90)
         if normalized_node_type in ("spritesheet", "assetimport"):
-            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_ASSET_INITIAL_ACTIVITY_SEC", 35, 10, 90)
+            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_ASSET_INITIAL_ACTIVITY_SEC", 10, 5, 60)
         if normalized_node_type in self._compatible_gateway_fail_fast_node_types():
-            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_INITIAL_ACTIVITY_SEC", 40, 10, 120)
+            return self._read_int_env("EVERMIND_COMPAT_GATEWAY_INITIAL_ACTIVITY_SEC", 12, 5, 90)
         return 0
 
     def _builder_input_wants_3d(self, input_data: str = "") -> bool:
@@ -8115,20 +8189,37 @@ class AIBridge:
             return None
         text = str(output_text or "").strip()
         if not text:
-            return "Your final reviewer answer is empty. Return one strict JSON verdict object only."
-        json_start = text.find("{")
-        json_end = text.rfind("}") + 1
-        if json_start >= 0 and json_end > json_start:
-            try:
-                parsed = json.loads(text[json_start:json_end])
-                verdict = str(parsed.get("verdict") or "").strip().upper()
-                if verdict in {"APPROVED", "REJECTED"}:
-                    return None
-            except Exception:
-                pass
+            return "Your final reviewer answer is empty. Write a detailed review and end with a JSON verdict."
+        # V4.6: Accept natural language with embedded JSON verdict anywhere in the text.
+        # Search for the LAST JSON object (most likely the verdict appendix).
+        json_end = text.rfind("}")
+        if json_end >= 0:
+            # Walk backwards to find the matching opening brace
+            depth = 0
+            json_start = -1
+            for i in range(json_end, -1, -1):
+                if text[i] == "}":
+                    depth += 1
+                elif text[i] == "{":
+                    depth -= 1
+                    if depth == 0:
+                        json_start = i
+                        break
+            if json_start >= 0:
+                try:
+                    parsed = json.loads(text[json_start:json_end + 1])
+                    verdict = str(parsed.get("verdict") or "").strip().upper()
+                    if verdict in {"APPROVED", "REJECTED"}:
+                        return None
+                except Exception:
+                    pass
+        # V4.6: Also accept plain text with clear verdict keywords
+        lower = text.lower()
+        if ("verdict" in lower or "conclusion" in lower) and ('"approved"' in lower or '"rejected"' in lower or "approved" in lower[-500:] or "rejected" in lower[-500:]):
+            return None
         return (
-            "Return the final reviewer result as ONE strict JSON object only with "
-            'verdict set to "APPROVED" or "REJECTED".'
+            "Your review is missing a clear verdict. End your report with a JSON verdict block:\n"
+            '{"verdict":"APPROVED" or "REJECTED","scores":{...},"blocking_issues":[...],"strengths":[...]}'
         )
 
     def _review_output_format_followup_message(self, reason: str) -> str:
@@ -8329,6 +8420,10 @@ class AIBridge:
         # ── Layer 0: OBSERVATION MASK — mask old tool results ──────
         # SWE-agent research: tool results are ~84% of context.
         # Replace tool results older than last 3 turns with short placeholders.
+        # V4.6 CACHE FIX: Work on a COPY — mutating the original messages array
+        # destroys prefix stability and kills prompt caching across iterations.
+        # Codex achieves 99% cache hits because it never mutates earlier messages.
+        messages = [dict(m) if isinstance(m, dict) else m for m in messages]
         _MASK_KEEP_RECENT = 2  # V4.5.1: 3→2 — only keep last 2 tool results intact
         _MASK_PLACEHOLDER = "[TOOL_RESULT_MASKED: see recent results for current state]"
         _tool_msg_indices = [
@@ -8726,10 +8821,21 @@ class AIBridge:
 
         # Builder system prompt is task-adaptive so game/dashboard/tool goals don't get
         # constrained by website-only guidance.
+        # V4.6 SPEED: Use split_deferred=True to move large reference blocks (CSS,
+        # design system, topic images) out of the system prompt. They get injected
+        # into the user message instead, keeping the system prefix small and stable
+        # for prompt caching. Saves ~10K chars from system prompt per request.
         adaptive_source = prompt_source
         if adaptive_source:
             try:
-                base_prompt = task_classifier.builder_system_prompt(adaptive_source)
+                result = task_classifier.builder_system_prompt(
+                    adaptive_source, split_deferred=True,
+                )
+                if isinstance(result, tuple):
+                    base_prompt, deferred_ctx = result
+                    self._builder_deferred_context = deferred_ctx or ""
+                else:
+                    base_prompt = result
             except Exception:
                 # Keep execution resilient if classifier has an unexpected runtime issue.
                 pass
@@ -8738,6 +8844,17 @@ class AIBridge:
             if skill_block:
                 return f"{base_prompt}{strategy_block}{runtime_output_block}\n\nLOADED NODE SKILLS:\n{skill_block}{skill_contract}{repo_block}" + EXECUTION_REPORT_TEMPLATE
             return base_prompt + strategy_block + runtime_output_block + repo_block + EXECUTION_REPORT_TEMPLATE
+
+        # V4.6 SPEED: When builder staging is active, tell the model its ACTUAL
+        # output directory so it doesn't try to write to /tmp/evermind_output/ root
+        # (which gets blocked and wastes 130-180s on path escape retries).
+        builder_staging_dir = str(node.get("builder_file_ops_output_dir") or node.get("builder_staging_output_dir") or "").strip()
+        if builder_staging_dir:
+            runtime_output_block += (
+                f"\n⚠️ IMPORTANT: Your output directory is {builder_staging_dir}/ (NOT the root output directory).\n"
+                f"All file_ops writes MUST target {builder_staging_dir}/. "
+                "Writing to the parent directory will be rejected.\n"
+            )
 
         has_browser_plugin = any(p and getattr(p, "name", "") == "browser" for p in (plugins or []))
         web_research_enabled = self._builder_web_research_enabled() and has_browser_plugin
@@ -9047,6 +9164,147 @@ class AIBridge:
         return any(marker in error_lower for marker in fallback_markers)
 
     # ─────────────────────────────────────────
+    # V4.6 SPEED: Speculative Execution
+    # Race requests to different providers in parallel.
+    # Uses first successful response, cancels the rest.
+    # ─────────────────────────────────────────
+    # V4.6 SPEED: Only worker nodes use speculative execution.
+    # Orchestrator nodes (planner, analyst) need strict structured output
+    # that kimi-k2.5 can't reliably produce — kimi wins the race but fails
+    # structure validation, causing infinite retry loops.
+    _SPECULATIVE_NODE_TYPES = frozenset({
+        "builder", "merger",
+        "assetimport", "imagegen", "spritesheet",
+    })
+
+    def _pick_speculative_pair(
+        self, node_type: str, candidates: List[str],
+    ) -> Optional[Tuple[str, str]]:
+        """Pick 2 candidates from different API endpoints for parallel racing."""
+        normalized = normalize_node_role(node_type)
+        if normalized not in self._SPECULATIVE_NODE_TYPES:
+            return None
+        if len(candidates) < 2:
+            return None
+        first = candidates[0]
+        first_info = self._resolve_model(first)
+        first_base = str(first_info.get("api_base") or first_info.get("provider") or "")
+        for other in candidates[1:]:
+            other_info = self._resolve_model(other)
+            other_base = str(other_info.get("api_base") or other_info.get("provider") or "")
+            if other_base != first_base:
+                return (first, other)
+        return None
+
+    async def _execute_speculative_race(
+        self,
+        node: Dict,
+        plugins: List[Plugin],
+        masked_input: str,
+        model_a: str,
+        model_b: str,
+        on_progress: Callable,
+        total_candidates: int,
+    ) -> Optional[Dict]:
+        """Race two models from different providers. Return first success or None."""
+        info_a = self._resolve_model(model_a)
+        info_b = self._resolve_model(model_b)
+        node_type = node.get("type", "")
+
+        logger.info(
+            "Speculative execution: node=%s racing %s(%s) vs %s(%s)",
+            node_type, model_a, info_a.get("api_base", "")[:30],
+            model_b, info_b.get("api_base", "")[:30],
+        )
+        if on_progress:
+            await self._emit_noncritical_progress(on_progress, {
+                "stage": "speculative_start",
+                "message": f"⚡ 并行竞速: {model_a} vs {model_b}",
+                "model_a": model_a,
+                "model_b": model_b,
+            })
+
+        task_a = asyncio.create_task(
+            self._execute_single_model(
+                node, plugins, masked_input,
+                model_name=model_a, model_info=info_a,
+                on_progress=on_progress,
+                total_candidate_count=total_candidates,
+            ),
+            name=f"spec_{model_a}",
+        )
+        task_b = asyncio.create_task(
+            self._execute_single_model(
+                node, plugins, masked_input,
+                model_name=model_b, model_info=info_b,
+                on_progress=None,  # secondary stays silent
+                total_candidate_count=total_candidates,
+            ),
+            name=f"spec_{model_b}",
+        )
+
+        try:
+            done, pending = await asyncio.wait(
+                {task_a, task_b}, return_when=asyncio.FIRST_COMPLETED,
+            )
+        except Exception as exc:
+            logger.warning("Speculative race wait error: %s", str(exc)[:200])
+            for t in (task_a, task_b):
+                t.cancel()
+            return None
+
+        winner_task = done.pop()
+        try:
+            result = winner_task.result()
+        except Exception as exc:
+            logger.warning("Speculative winner exception: %s", str(exc)[:200])
+            result = {"success": False, "error": str(exc)[:200]}
+
+        winner_model = model_a if winner_task is task_a else model_b
+        loser_model = model_b if winner_task is task_a else model_a
+
+        if result.get("success"):
+            for p in pending:
+                p.cancel()
+                try:
+                    await p
+                except (asyncio.CancelledError, Exception):
+                    pass
+            logger.info(
+                "Speculative winner: node=%s model=%s (cancelled %s)",
+                node_type, winner_model, loser_model,
+            )
+            if on_progress:
+                await self._emit_noncritical_progress(on_progress, {
+                    "stage": "speculative_winner",
+                    "message": f"⚡ {winner_model} 胜出 (取消 {loser_model})",
+                    "winner": winner_model,
+                    "cancelled": loser_model,
+                })
+            result["speculative_winner"] = winner_model
+            result["speculative_cancelled"] = loser_model
+            return result
+
+        # First finished but failed — wait for the second
+        if pending:
+            loser_task = pending.pop()
+            try:
+                result_b = await loser_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.warning("Speculative second task error: %s", str(exc)[:200])
+                return None
+            if result_b.get("success"):
+                logger.info(
+                    "Speculative fallback: node=%s %s failed, %s succeeded",
+                    node_type, winner_model, loser_model,
+                )
+                result_b["speculative_winner"] = loser_model
+                result_b["speculative_first_failed"] = winner_model
+                return result_b
+
+        return None  # Both failed, fall through to sequential
+
+    # ─────────────────────────────────────────
     # Main dispatch
     # ─────────────────────────────────────────
     async def _execute_single_model(
@@ -9289,15 +9547,18 @@ class AIBridge:
                         ):
                             is_rate_limit = True
                     else:
-                        # Legacy fallback — v3.0: reduced wait (was 2^attempt, now 1+attempt)
-                        base_wait = 1 + attempt  # 2s, 3s, 4s instead of 2s, 4s, 8s
-                        jitter = random.uniform(0, 0.5)
+                        # V4.6 SPEED: Minimal retry delays — we'd rather fire
+                        # requests fast and let the fallback chain handle failures
+                        # than sit idle waiting for a maybe-recovered gateway.
+                        # V4.6 SPEED: Ultra-fast retries — 0.2s/0.5s/0.8s
+                        base_wait = 0.2 + 0.3 * attempt
+                        jitter = random.uniform(0, 0.15)
                         is_rate_limit = last_error and any(
                             kw in str(last_error).lower()
                             for kw in ("429", "rate limit", "too many requests", "quota")
                         )
                         if is_rate_limit and attempt == 1:
-                            base_wait = 5  # Was 8s — still respectful but faster
+                            base_wait = 1.0  # V4.6: Was 2s — faster rate-limit retry
                         wait = base_wait + jitter
                     logger.info(f"Retry {attempt}/{max_retries} for {model_name}, waiting {wait:.1f}s...")
                     if on_progress:
@@ -9503,8 +9764,21 @@ class AIBridge:
             _cli_settings = (getattr(self, "config", {}) or {}).get("cli_mode") or {}
             if not isinstance(_cli_settings, dict):
                 _cli_settings = {}
+            # Fallback: if in-memory config lacks cli_mode details, load from persisted settings
+            if not _cli_settings.get("preferred_cli") and not _cli_settings.get("preferred_model"):
+                try:
+                    from settings import load_settings as _load_cli_settings
+                    _persisted = _load_cli_settings().get("cli_mode") or {}
+                    if isinstance(_persisted, dict) and _persisted.get("enabled"):
+                        _cli_settings = _persisted
+                except Exception:
+                    pass
             _cli_enabled = _cli_settings.get("enabled", False) or is_cli_mode_enabled()
-            if _cli_enabled:
+            # Only route "worker" nodes to CLI. Internal orchestrator nodes
+            # (planner, router, analyst) need structured output from AGENT_PRESETS,
+            # and asset nodes (imagegen, spritesheet, assetimport) need backend plugins.
+            _CLI_ALLOWED_NODES = {"builder", "merger", "reviewer", "tester", "debugger"}
+            if _cli_enabled and node_type in _CLI_ALLOWED_NODES:
                 _cli_executor = get_executor(self.config)
                 _preferred_cli = _cli_settings.get("preferred_cli", "")
                 _preferred_model = _cli_settings.get("preferred_model", "")
@@ -9518,11 +9792,14 @@ class AIBridge:
                     _cli_choice = _override or _preferred_cli
                     _model_choice = _preferred_model
                 _workspace = (self.config or {}).get("workspace", "")
-                _cli_timeout = 600
-                if node_type in ("analyst", "reviewer"):
-                    _cli_timeout = 300
-                elif node_type == "merger":
-                    _cli_timeout = 720
+                _CLI_TIMEOUTS = {
+                    "builder": 600,
+                    "merger": 720,
+                    "reviewer": 300,
+                    "tester": 300,
+                    "debugger": 600,
+                }
+                _cli_timeout = _CLI_TIMEOUTS.get(node_type, 600)
                 _cli_result = await _cli_executor.execute(
                     task=masked_input,
                     node_type=node_type,
@@ -9554,6 +9831,24 @@ class AIBridge:
                 "assignedProvider": first_info.get("provider", ""),
                 "candidateModels": candidate_models[:6],
             })
+
+        # V4.6 SPEED: Speculative execution — race top 2 different-provider candidates
+        _all_candidates_backup = candidate_models[:]
+        spec_pair = self._pick_speculative_pair(node_type, candidate_models)
+        if spec_pair:
+            spec_result = await self._execute_speculative_race(
+                node, plugins, masked_input,
+                model_a=spec_pair[0], model_b=spec_pair[1],
+                on_progress=on_progress,
+                total_candidates=len(candidate_models),
+            )
+            if spec_result and spec_result.get("success"):
+                spec_result["model_candidates"] = _all_candidates_backup
+                spec_result["attempted_models"] = list(spec_pair)
+                spec_result["model_chain_applied"] = True
+                spec_result["speculative_execution"] = True
+                result = spec_result
+                candidate_models = []  # skip sequential fallback
 
         for index, candidate_model in enumerate(candidate_models):
             model_info = self._resolve_model(candidate_model)
@@ -10108,9 +10403,26 @@ class AIBridge:
             )
             loop = asyncio.get_running_loop()
 
+            # V4.6 SPEED: Inject builder deferred context (CSS, design system, topic
+            # images) into user message instead of system prompt. This keeps the
+            # system prefix small and stable for prompt caching.
+            effective_user_input = input_data
+            builder_deferred = getattr(self, "_builder_deferred_context", "")
+            if builder_deferred and normalized_node_type == "builder":
+                effective_user_input = (
+                    "=== REFERENCE MATERIAL ===\n"
+                    + builder_deferred
+                    + "\n=== END REFERENCE ===\n\n"
+                    + input_data
+                )
+                self._builder_deferred_context = ""  # Clear after use
+                logger.info(
+                    "Builder deferred context injected: %d chars moved from system to user message",
+                    len(builder_deferred),
+                )
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": input_data},
+                {"role": "user", "content": effective_user_input},
             ]
             qa_task_type = self._classify_task_type(input_data)
             browser_action_events: List[Dict[str, Any]] = []
@@ -10162,13 +10474,14 @@ class AIBridge:
                 builder_stream_pending_write_started_at = 0.0
                 stream_tool_calls_map = {}
                 prepared_msgs = self._prepare_messages_for_request(msgs, model_name)
-                # V4.4: Prompt caching — inject cache_control breakpoints
-                # Anthropic: cache_control on system message content blocks
-                # OpenAI: automatic for >1024 tokens, no action needed
-                # Kimi/DeepSeek: cache via provider-side KV cache, no markers needed
-                _provider = str(model_info.get("provider") or "").lower()
-                if _provider in ("anthropic", "claude"):
-                    prepared_msgs = self._inject_prompt_cache_breakpoints(prepared_msgs)
+                # V4.6 SPEED: Inject cache_control breakpoints for ALL providers.
+                # Anthropic: explicit cache_control on system/user message blocks
+                # OpenAI: auto-caches >1024 tokens, but explicit markers help
+                # Kimi/DeepSeek/relay: cache_control is silently ignored if unsupported,
+                #   but some relay backends (e.g. OpenRouter) do honor it.
+                # Cost: zero risk (unknown fields ignored), benefit: cache hits on
+                # any backend that supports it.
+                prepared_msgs = self._inject_prompt_cache_breakpoints(prepared_msgs)
                 kwargs = {
                     "model": model_name,
                     "messages": prepared_msgs,
@@ -11939,6 +12252,13 @@ class AIBridge:
                 initial_activity_deadline = (
                     started_at + initial_activity_timeout if initial_activity_timeout > 0 else None
                 )
+                # V4.6 SPEED: Content rate check — gpt-5.4 on relay sends first token
+                # in ~1-2s but then generates extremely slowly (115-280s for a full response).
+                # After initial activity, check that content is actually progressing.
+                _CONTENT_RATE_CHECK_SEC = 30  # Check after 30s of content generation
+                _CONTENT_RATE_MIN_CHARS = 100  # Must have at least 100 chars
+                _content_rate_checked = False
+                _content_started_at: Optional[float] = None
                 while True:
                     now = time.time()
                     remaining_hard = hard_deadline - now
@@ -11957,6 +12277,28 @@ class AIBridge:
                     now = time.time()
                     if stream_has_initial_activity:
                         initial_activity_deadline = None
+                        if _content_started_at is None:
+                            _content_started_at = now
+                        # V4.6 SPEED: Content rate check for chat path
+                        if (
+                            custom_gateway
+                            and not _content_rate_checked
+                            and _content_started_at is not None
+                            and (now - _content_started_at) >= _CONTENT_RATE_CHECK_SEC
+                        ):
+                            _content_rate_checked = True
+                            _current_chars = len(latest_stream_text or "")
+                            if _current_chars < _CONTENT_RATE_MIN_CHARS:
+                                _request_stream_stop()
+                                node_label = normalize_node_role(node_type) or str(node_type or "node").strip().lower() or "node"
+                                logger.warning(
+                                    "Chat content rate too slow: node=%s model=%s chars=%d after %ds",
+                                    node_label, model_name, _current_chars, _CONTENT_RATE_CHECK_SEC,
+                                )
+                                raise TimeoutError(
+                                    f"{node_label} content-rate timeout: only {_current_chars} chars "
+                                    f"after {_CONTENT_RATE_CHECK_SEC}s of content generation."
+                                )
                         continue
                     if initial_activity_deadline is not None and now >= initial_activity_deadline:
                         _request_stream_stop()
@@ -11965,16 +12307,31 @@ class AIBridge:
                             f"{node_label} initial-activity timeout after {initial_activity_timeout}s: compatible gateway produced no content."
                         )
 
+            # V4.6 SPEED: Inject builder deferred context into user message (chat path)
+            effective_chat_input = input_data
+            builder_deferred_chat = getattr(self, "_builder_deferred_context", "")
+            if builder_deferred_chat and normalize_node_role(node_type) == "builder":
+                effective_chat_input = (
+                    "=== REFERENCE MATERIAL ===\n"
+                    + builder_deferred_chat
+                    + "\n=== END REFERENCE ===\n\n"
+                    + input_data
+                )
+                self._builder_deferred_context = ""
+                logger.info(
+                    "Builder deferred context injected (chat path): %d chars moved from system to user",
+                    len(builder_deferred_chat),
+                )
             logger.info(
                 "openai_compatible_chat: starting API call model=%s timeout=%ss stall=%ss multifile=%s",
                 model_name, timeout_sec, stall_timeout, direct_multifile,
             )
             response = await _call_chat(
-                self._builder_direct_multifile_initial_messages(system_prompt, input_data)
+                self._builder_direct_multifile_initial_messages(system_prompt, effective_chat_input)
                 if direct_multifile
                 else [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": input_data},
+                    {"role": "user", "content": effective_chat_input},
                 ]
             )
             usage = self._normalize_usage(getattr(response, "usage", None))
@@ -12431,7 +12788,22 @@ class AIBridge:
         available_tool_names = self._tool_names_from_defs(tools)
         qa_browser_use_available = self._qa_browser_use_available(node_type, available_tool_names)
 
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": input_data}]
+        # V4.6 SPEED: Inject builder deferred context into user message (litellm tool path)
+        effective_litellm_input = input_data
+        builder_deferred_litellm = getattr(self, "_builder_deferred_context", "")
+        if builder_deferred_litellm and normalized_node_type == "builder":
+            effective_litellm_input = (
+                "=== REFERENCE MATERIAL ===\n"
+                + builder_deferred_litellm
+                + "\n=== END REFERENCE ===\n\n"
+                + input_data
+            )
+            self._builder_deferred_context = ""
+            logger.info(
+                "Builder deferred context injected (litellm tool path): %d chars moved from system to user",
+                len(builder_deferred_litellm),
+            )
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": effective_litellm_input}]
         qa_task_type = self._classify_task_type(input_data)
         browser_action_events: List[Dict[str, Any]] = []
         await self._maybe_seed_qa_browser_use(
@@ -12468,9 +12840,13 @@ class AIBridge:
             )
 
         try:
+            # V4.6 SPEED: Inject cache breakpoints for litellm_tools path too
+            _prepared_msgs = self._inject_prompt_cache_breakpoints(
+                self._prepare_messages_for_request(messages, litellm_model)
+            )
             kwargs = {
                 "model": litellm_model,
-                "messages": self._prepare_messages_for_request(messages, litellm_model),
+                "messages": _prepared_msgs,
                 "timeout": timeout_sec,
                 "num_retries": 0,
                 "max_tokens": max_tokens,
@@ -13351,12 +13727,30 @@ class AIBridge:
 
             async def _call_chat(current_messages: List[Dict[str, str]]):
                 kwargs = dict(kwargs_base)
-                kwargs["messages"] = self._prepare_messages_for_request(current_messages, litellm_model)
+                # V4.6 SPEED: Inject cache breakpoints for litellm_chat path
+                kwargs["messages"] = self._inject_prompt_cache_breakpoints(
+                    self._prepare_messages_for_request(current_messages, litellm_model)
+                )
                 return await self._litellm_stream_completion(**kwargs)
 
+            # V4.6 SPEED: Inject builder deferred context (litellm chat path)
+            effective_litellm_chat_input = input_data
+            builder_deferred_lc = getattr(self, "_builder_deferred_context", "")
+            if builder_deferred_lc and normalize_node_role(node_type) == "builder":
+                effective_litellm_chat_input = (
+                    "=== REFERENCE MATERIAL ===\n"
+                    + builder_deferred_lc
+                    + "\n=== END REFERENCE ===\n\n"
+                    + input_data
+                )
+                self._builder_deferred_context = ""
+                logger.info(
+                    "Builder deferred context injected (litellm chat path): %d chars",
+                    len(builder_deferred_lc),
+                )
             response = await _call_chat([
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": input_data},
+                {"role": "user", "content": effective_litellm_chat_input},
             ])
             usage = self._normalize_usage(getattr(response, "usage", None))
             total_cost = self._estimate_litellm_cost(response, litellm_model)

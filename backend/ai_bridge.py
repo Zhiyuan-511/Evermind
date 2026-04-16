@@ -150,6 +150,16 @@ MAX_MESSAGE_CONTENT_CHARS = int(os.getenv("EVERMIND_MAX_MESSAGE_CONTENT_CHARS", 
 # V4.5.1: Lowered 80K→60K — relay shows 29K-51K input tokens causing 14-27s latency.
 # Target: keep requests under ~16K tokens (≈64K chars) to hit <8s TTFT.
 MAX_REQUEST_TOTAL_CHARS = int(os.getenv("EVERMIND_MAX_REQUEST_TOTAL_CHARS", "60000"))
+# V4.6 SPEED: Responses API migration flag. When True, use OpenAI Responses API
+# (/v1/responses) instead of Chat Completions (/v1/chat/completions).
+# Key benefits:
+#   1. previous_response_id: server-side context retention → no repeated system prompt
+#   2. Built-in tool orchestration → smaller request payloads
+#   3. Better prompt caching (40-80% improvement per OpenAI benchmarks)
+# Currently gated behind config flag — enable after validation with relay.
+USE_RESPONSES_API = str(
+    os.getenv("EVERMIND_USE_RESPONSES_API", "0")
+).strip().lower() in {"1", "true", "yes"}
 # V4.5.1: Reduced 6→4 — aggressive trim for multi-tool-call sessions.
 MAX_CONTEXT_KEEP_LAST_MESSAGES = int(os.getenv("EVERMIND_MAX_CONTEXT_KEEP_LAST_MESSAGES", "4"))
 CONTEXT_OMITTED_MARKER = "... [OLDER_CONTEXT_OMITTED_FOR_TOKEN_BUDGET]"
@@ -322,7 +332,15 @@ def compress_system_prompt(text: str) -> str:
 
 
 # ─────────────────────────────────────────────
-# Agent Presets
+# Agent Presets — loaded from YAML templates
+# ─────────────────────────────────────────────
+# Harness definitions are maintained as YAML files in
+# backend/prompt_templates/*.yaml.  Edit a node's system prompt by
+# modifying its YAML file — no Python changes needed.
+#
+# The inline dict below serves as a resilient fallback.  When YAML
+# templates load successfully, AGENT_PRESETS is overridden (see the
+# try/except block after the dict).
 # ─────────────────────────────────────────────
 AGENT_PRESETS = {
     "router": {
@@ -954,6 +972,15 @@ AGENT_PRESETS = {
         ),
     },
 }
+
+# ── Override with YAML templates when available ──
+try:
+    from prompt_templates import load_agent_presets as _load_yaml_presets
+    _yaml_presets = _load_yaml_presets()
+    if _yaml_presets:
+        AGENT_PRESETS = _yaml_presets
+except Exception:
+    pass  # Keep inline fallback above
 
 
 class AIBridge:
@@ -8794,10 +8821,21 @@ class AIBridge:
 
         # Builder system prompt is task-adaptive so game/dashboard/tool goals don't get
         # constrained by website-only guidance.
+        # V4.6 SPEED: Use split_deferred=True to move large reference blocks (CSS,
+        # design system, topic images) out of the system prompt. They get injected
+        # into the user message instead, keeping the system prefix small and stable
+        # for prompt caching. Saves ~10K chars from system prompt per request.
         adaptive_source = prompt_source
         if adaptive_source:
             try:
-                base_prompt = task_classifier.builder_system_prompt(adaptive_source)
+                result = task_classifier.builder_system_prompt(
+                    adaptive_source, split_deferred=True,
+                )
+                if isinstance(result, tuple):
+                    base_prompt, deferred_ctx = result
+                    self._builder_deferred_context = deferred_ctx or ""
+                else:
+                    base_prompt = result
             except Exception:
                 # Keep execution resilient if classifier has an unexpected runtime issue.
                 pass
@@ -10365,9 +10403,26 @@ class AIBridge:
             )
             loop = asyncio.get_running_loop()
 
+            # V4.6 SPEED: Inject builder deferred context (CSS, design system, topic
+            # images) into user message instead of system prompt. This keeps the
+            # system prefix small and stable for prompt caching.
+            effective_user_input = input_data
+            builder_deferred = getattr(self, "_builder_deferred_context", "")
+            if builder_deferred and normalized_node_type == "builder":
+                effective_user_input = (
+                    "=== REFERENCE MATERIAL ===\n"
+                    + builder_deferred
+                    + "\n=== END REFERENCE ===\n\n"
+                    + input_data
+                )
+                self._builder_deferred_context = ""  # Clear after use
+                logger.info(
+                    "Builder deferred context injected: %d chars moved from system to user message",
+                    len(builder_deferred),
+                )
             messages = [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": input_data},
+                {"role": "user", "content": effective_user_input},
             ]
             qa_task_type = self._classify_task_type(input_data)
             browser_action_events: List[Dict[str, Any]] = []
@@ -12252,16 +12307,31 @@ class AIBridge:
                             f"{node_label} initial-activity timeout after {initial_activity_timeout}s: compatible gateway produced no content."
                         )
 
+            # V4.6 SPEED: Inject builder deferred context into user message (chat path)
+            effective_chat_input = input_data
+            builder_deferred_chat = getattr(self, "_builder_deferred_context", "")
+            if builder_deferred_chat and normalize_node_role(node_type) == "builder":
+                effective_chat_input = (
+                    "=== REFERENCE MATERIAL ===\n"
+                    + builder_deferred_chat
+                    + "\n=== END REFERENCE ===\n\n"
+                    + input_data
+                )
+                self._builder_deferred_context = ""
+                logger.info(
+                    "Builder deferred context injected (chat path): %d chars moved from system to user",
+                    len(builder_deferred_chat),
+                )
             logger.info(
                 "openai_compatible_chat: starting API call model=%s timeout=%ss stall=%ss multifile=%s",
                 model_name, timeout_sec, stall_timeout, direct_multifile,
             )
             response = await _call_chat(
-                self._builder_direct_multifile_initial_messages(system_prompt, input_data)
+                self._builder_direct_multifile_initial_messages(system_prompt, effective_chat_input)
                 if direct_multifile
                 else [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": input_data},
+                    {"role": "user", "content": effective_chat_input},
                 ]
             )
             usage = self._normalize_usage(getattr(response, "usage", None))
@@ -12718,7 +12788,22 @@ class AIBridge:
         available_tool_names = self._tool_names_from_defs(tools)
         qa_browser_use_available = self._qa_browser_use_available(node_type, available_tool_names)
 
-        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": input_data}]
+        # V4.6 SPEED: Inject builder deferred context into user message (litellm tool path)
+        effective_litellm_input = input_data
+        builder_deferred_litellm = getattr(self, "_builder_deferred_context", "")
+        if builder_deferred_litellm and normalized_node_type == "builder":
+            effective_litellm_input = (
+                "=== REFERENCE MATERIAL ===\n"
+                + builder_deferred_litellm
+                + "\n=== END REFERENCE ===\n\n"
+                + input_data
+            )
+            self._builder_deferred_context = ""
+            logger.info(
+                "Builder deferred context injected (litellm tool path): %d chars moved from system to user",
+                len(builder_deferred_litellm),
+            )
+        messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": effective_litellm_input}]
         qa_task_type = self._classify_task_type(input_data)
         browser_action_events: List[Dict[str, Any]] = []
         await self._maybe_seed_qa_browser_use(
@@ -13648,9 +13733,24 @@ class AIBridge:
                 )
                 return await self._litellm_stream_completion(**kwargs)
 
+            # V4.6 SPEED: Inject builder deferred context (litellm chat path)
+            effective_litellm_chat_input = input_data
+            builder_deferred_lc = getattr(self, "_builder_deferred_context", "")
+            if builder_deferred_lc and normalize_node_role(node_type) == "builder":
+                effective_litellm_chat_input = (
+                    "=== REFERENCE MATERIAL ===\n"
+                    + builder_deferred_lc
+                    + "\n=== END REFERENCE ===\n\n"
+                    + input_data
+                )
+                self._builder_deferred_context = ""
+                logger.info(
+                    "Builder deferred context injected (litellm chat path): %d chars",
+                    len(builder_deferred_lc),
+                )
             response = await _call_chat([
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": input_data},
+                {"role": "user", "content": effective_litellm_chat_input},
             ])
             usage = self._normalize_usage(getattr(response, "usage", None))
             total_cost = self._estimate_litellm_cost(response, litellm_model)

@@ -1195,6 +1195,96 @@ MAX_WS_CONNECTIONS = 10
 connected_clients: Set[WebSocket] = set()
 _active_tasks: Dict[int, list] = {}  # client_id → [asyncio.Task, ...]
 _detached_tasks: Set[asyncio.Task] = set()  # long-lived tasks that survive sender WS disconnect
+
+# ── Session Memory: pipeline↔chat context sharing ──
+# Key: session_id → {pipeline_results: [...], chat_messages: [...]}
+_SESSION_MEMORY: Dict[str, Dict[str, list]] = {}
+_SESSION_MEMORY_MAX_PIPELINE_RESULTS = 5   # keep last N pipeline runs
+_SESSION_MEMORY_MAX_CHAT_MESSAGES = 60     # keep last N chat exchanges
+_SESSION_MEMORY_MAX_SESSIONS = 50          # evict oldest when exceeded
+
+
+def _get_session_memory(session_id: str) -> Dict[str, list]:
+    """Get or create session memory for a given session."""
+    if not session_id:
+        return {"pipeline_results": [], "chat_messages": []}
+    if session_id not in _SESSION_MEMORY:
+        # Evict oldest session if at capacity
+        if len(_SESSION_MEMORY) >= _SESSION_MEMORY_MAX_SESSIONS:
+            oldest_key = next(iter(_SESSION_MEMORY))
+            _SESSION_MEMORY.pop(oldest_key, None)
+        _SESSION_MEMORY[session_id] = {"pipeline_results": [], "chat_messages": []}
+    return _SESSION_MEMORY[session_id]
+
+
+def _store_pipeline_result_in_session(session_id: str, report: Dict[str, Any]) -> None:
+    """Store a pipeline execution result summary in session memory."""
+    if not session_id or not report:
+        return
+    mem = _get_session_memory(session_id)
+    summary = {
+        "goal": str(report.get("goal", ""))[:300],
+        "status": str(report.get("status", report.get("finalResult", ""))),
+        "difficulty": str(report.get("difficulty", "")),
+        "subtasks": [
+            {
+                "agent": st.get("agent", ""),
+                "status": st.get("status", ""),
+                "work_summary": st.get("work_summary", [])[:3],
+            }
+            for st in (report.get("subtasks", []) or [])[:8]
+        ],
+        "timestamp": int(time.time()),
+    }
+    mem["pipeline_results"].append(summary)
+    # Trim to max
+    if len(mem["pipeline_results"]) > _SESSION_MEMORY_MAX_PIPELINE_RESULTS:
+        mem["pipeline_results"] = mem["pipeline_results"][-_SESSION_MEMORY_MAX_PIPELINE_RESULTS:]
+
+
+def _store_chat_message_in_session(session_id: str, role: str, content: str) -> None:
+    """Store a chat message in session memory for context continuity."""
+    if not session_id or not content:
+        return
+    mem = _get_session_memory(session_id)
+    mem["chat_messages"].append({
+        "role": role,
+        "content": content[:2000],
+        "ts": int(time.time()),
+    })
+    if len(mem["chat_messages"]) > _SESSION_MEMORY_MAX_CHAT_MESSAGES:
+        _compress_chat_messages(mem)
+
+
+def _compress_chat_messages(mem: Dict[str, list]) -> None:
+    """Compress chat history by keeping recent messages and summarising older ones."""
+    msgs = mem.get("chat_messages", [])
+    if len(msgs) <= _SESSION_MEMORY_MAX_CHAT_MESSAGES:
+        return
+    # Keep the latest 40, drop the rest
+    mem["chat_messages"] = msgs[-40:]
+
+
+def _build_pipeline_context_for_chat(session_id: str) -> str:
+    """Build a context block from pipeline results for the chat system prompt."""
+    if not session_id:
+        return ""
+    mem = _SESSION_MEMORY.get(session_id)
+    if not mem or not mem.get("pipeline_results"):
+        return ""
+    lines = ["\n## Recent Pipeline Results (from this session)"]
+    for i, pr in enumerate(mem["pipeline_results"], 1):
+        status = pr.get("status", "unknown")
+        goal = pr.get("goal", "")
+        lines.append(f"\n### Run {i}: {goal}")
+        lines.append(f"Status: {status}")
+        for st in pr.get("subtasks", []):
+            agent = st.get("agent", "?")
+            st_status = st.get("status", "?")
+            summaries = st.get("work_summary", [])
+            summary_text = "; ".join(str(s) for s in summaries[:2]) if summaries else ""
+            lines.append(f"- {agent}: {st_status}" + (f" — {summary_text}" if summary_text else ""))
+    return "\n".join(lines)
 _openclaw_dispatch_watchdogs: Dict[str, asyncio.Task] = {}
 OPENCLAW_DISPATCH_ACK_TIMEOUT_S = coerce_int(
     os.getenv("EVERMIND_OPENCLAW_ACK_TIMEOUT_SEC", "12"),
@@ -2537,6 +2627,110 @@ async def workspace_sync(data: Dict = Body(...)):
         return JSONResponse(status_code=500, content={"error": f"Sync failed: {exc}"})
     return result
 
+
+# ── Workspace file management (VS Code-style) ──
+
+def _validate_workspace_path(root: str, rel_path: str) -> Path:
+    """Resolve and validate a workspace path. Raises ValueError if unsafe."""
+    root_p = Path(root).expanduser().resolve()
+    if not _is_safe_workspace_root(root_p):
+        raise ValueError(f"Root not allowed: {root}")
+    target = (root_p / rel_path).resolve()
+    # Prevent path traversal
+    if not str(target).startswith(str(root_p)):
+        raise ValueError("Path traversal detected")
+    return target
+
+
+@app.post("/api/workspace/mkdir")
+async def workspace_mkdir(data: Dict = Body(...)):
+    """Create a directory in the workspace."""
+    root = str(data.get("root", "")).strip()
+    rel_path = str(data.get("path", "")).strip()
+    if not root or not rel_path:
+        return JSONResponse(status_code=400, content={"error": "root and path required"})
+    try:
+        target = _validate_workspace_path(root, rel_path)
+        target.mkdir(parents=True, exist_ok=True)
+        return {"success": True, "path": str(target)}
+    except ValueError as e:
+        return JSONResponse(status_code=403, content={"error": str(e)})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/workspace/write")
+async def workspace_write(data: Dict = Body(...)):
+    """Write/save file content to workspace."""
+    root = str(data.get("root", "")).strip()
+    file_path = str(data.get("path", "")).strip()
+    content = data.get("content", "")
+    if not file_path:
+        return JSONResponse(status_code=400, content={"error": "path required"})
+    # If no root given, try to use the file_path as absolute
+    if not root:
+        target = Path(file_path).expanduser().resolve()
+        if not _is_safe_workspace_root(target.parent):
+            return JSONResponse(status_code=403, content={"error": "Path not in allowed workspace"})
+    else:
+        try:
+            target = _validate_workspace_path(root, file_path)
+        except ValueError as e:
+            return JSONResponse(status_code=403, content={"error": str(e)})
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(content), encoding="utf-8")
+        return {"success": True, "path": str(target), "size": target.stat().st_size}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/workspace/delete")
+async def workspace_delete(data: Dict = Body(...)):
+    """Delete a file or empty folder from workspace."""
+    root = str(data.get("root", "")).strip()
+    rel_path = str(data.get("path", "")).strip()
+    if not root or not rel_path:
+        return JSONResponse(status_code=400, content={"error": "root and path required"})
+    try:
+        target = _validate_workspace_path(root, rel_path)
+    except ValueError as e:
+        return JSONResponse(status_code=403, content={"error": str(e)})
+    if not target.exists():
+        return JSONResponse(status_code=404, content={"error": "Not found"})
+    try:
+        if target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            import shutil
+            shutil.rmtree(str(target))
+        return {"success": True}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/workspace/rename")
+async def workspace_rename(data: Dict = Body(...)):
+    """Rename a file or folder in workspace."""
+    root = str(data.get("root", "")).strip()
+    old_path = str(data.get("old_path", "")).strip()
+    new_name = str(data.get("new_name", "")).strip()
+    if not root or not old_path or not new_name:
+        return JSONResponse(status_code=400, content={"error": "root, old_path, and new_name required"})
+    try:
+        source = _validate_workspace_path(root, old_path)
+    except ValueError as e:
+        return JSONResponse(status_code=403, content={"error": str(e)})
+    if not source.exists():
+        return JSONResponse(status_code=404, content={"error": "Source not found"})
+    dest = source.parent / new_name
+    if dest.exists():
+        return JSONResponse(status_code=409, content={"error": "Target already exists"})
+    try:
+        source.rename(dest)
+        return {"success": True, "new_path": str(dest)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 @app.post("/api/preview/validate")
@@ -5474,6 +5668,12 @@ async def websocket_endpoint(ws: WebSocket):
                                     )
                                 except Exception as e:
                                     logger.warning(f"[P0-1] Failed to finalize canonical run: {e}")
+                            # Store pipeline result in session memory for chat context
+                            if report and session_id:
+                                try:
+                                    _store_pipeline_result_in_session(session_id, report)
+                                except Exception:
+                                    pass
                             return report
                         except asyncio.CancelledError:
                             if canonical_run_id and canonical_task_id:
@@ -6216,6 +6416,122 @@ async def websocket_endpoint(ws: WebSocket):
                         logger.info(f"[OpenClaw] Emitted preview_ready: {preview_url}")
                     except Exception as e:
                         logger.warning(f"[OpenClaw] preview_ready scan failed: {e}")
+
+            # ─────────────────────────────────────────
+            # Direct Chat Agent
+            # ─────────────────────────────────────────
+            elif msg_type == "chat_message":
+                chat_text = str(msg.get("message", "")).strip()
+                chat_model = str(msg.get("model", "")).strip() or "gpt-4o"
+                conv_id = str(msg.get("conversation_id", ""))
+                session_id = str(msg.get("session_id", ""))
+                chat_history = msg.get("history", [])
+
+                if not chat_text:
+                    await ws.send_json({"type": "chat_error", "conversation_id": conv_id, "error": "Empty message"})
+                    continue
+
+                # ACK immediately
+                await ws.send_json({"type": "chat_ack", "conversation_id": conv_id})
+
+                # Store user message in session memory
+                _store_chat_message_in_session(session_id, "user", chat_text)
+
+                # Build messages for LLM
+                pipeline_ctx = _build_pipeline_context_for_chat(session_id)
+                system_prompt = (
+                    "You are the Evermind Chat assistant — a direct conversation mode "
+                    "inside the Evermind multi-agent app builder.\n\n"
+                    "## Coding Skills\n"
+                    "When asked to write or modify code, follow this workflow:\n"
+                    "1. Understand: clarify the requirements before writing\n"
+                    "2. Plan: outline the approach in 2-3 sentences\n"
+                    "3. Execute: write complete, working code\n"
+                    "4. Verify: check for common issues before delivering\n\n"
+                    "## Code Quality Rules\n"
+                    "- Complete code only — no TODOs, placeholders, or stubs\n"
+                    "- Responsive design with CSS variables and semantic HTML5\n"
+                    "- No emoji as UI icons — use inline SVG\n"
+                    "- Balanced braces, null-guarded DOM queries, try/catch async\n\n"
+                    "## Language\n"
+                    "Respond in the same language the user writes in.\n"
+                    "If the user writes in Chinese, respond in Chinese.\n"
+                    "If the user writes in English, respond in English."
+                    + pipeline_ctx
+                )
+
+                llm_messages = [{"role": "system", "content": system_prompt}]
+                # Add conversation history
+                if isinstance(chat_history, list):
+                    for h in chat_history[-40:]:
+                        if isinstance(h, dict) and h.get("role") in ("user", "assistant"):
+                            llm_messages.append({"role": h["role"], "content": str(h.get("content", ""))})
+                llm_messages.append({"role": "user", "content": chat_text})
+
+                # Stream response in background thread
+                import threading
+                import queue as queue_mod
+
+                token_queue: queue_mod.Queue = queue_mod.Queue()
+
+                def _chat_worker():
+                    try:
+                        from openai import OpenAI
+                        api_key = os.getenv("OPENAI_API_KEY", "")
+                        base_url = os.getenv("OPENAI_BASE_URL", os.getenv("OPENAI_API_BASE", ""))
+                        client_kwargs = {"api_key": api_key} if api_key else {}
+                        if base_url:
+                            client_kwargs["base_url"] = base_url
+                        client = OpenAI(**client_kwargs)
+
+                        stream = client.chat.completions.create(
+                            model=chat_model,
+                            messages=llm_messages,
+                            stream=True,
+                            temperature=0.7,
+                            max_tokens=4096,
+                        )
+                        full_content = ""
+                        for chunk in stream:
+                            delta = chunk.choices[0].delta if chunk.choices else None
+                            if delta and delta.content:
+                                full_content += delta.content
+                                token_queue.put(("token", delta.content))
+                        token_queue.put(("done", full_content))
+                    except Exception as e:
+                        token_queue.put(("error", str(e)))
+
+                worker = threading.Thread(target=_chat_worker, daemon=True)
+                worker.start()
+
+                # Drain queue and send tokens via WS
+                import asyncio as _aio
+                full_response = ""
+                while True:
+                    try:
+                        kind, data = await _aio.get_event_loop().run_in_executor(
+                            None, lambda: token_queue.get(timeout=120)
+                        )
+                    except Exception:
+                        await ws.send_json({"type": "chat_error", "conversation_id": conv_id, "error": "Chat timeout"})
+                        break
+
+                    if kind == "token":
+                        await ws.send_json({"type": "chat_token", "conversation_id": conv_id, "token": data})
+                    elif kind == "done":
+                        full_response = data
+                        _store_chat_message_in_session(session_id, "assistant", full_response)
+                        await ws.send_json({"type": "chat_complete", "conversation_id": conv_id, "content": full_response})
+                        break
+                    elif kind == "error":
+                        await ws.send_json({"type": "chat_error", "conversation_id": conv_id, "error": data})
+                        break
+
+            elif msg_type == "chat_stop":
+                # Client requested stop — currently a no-op since we can't
+                # cancel the OpenAI stream from outside the thread, but the
+                # frontend will stop displaying tokens.
+                pass
 
     except WebSocketDisconnect:
         logger.info(f"Client {client_id} disconnected")

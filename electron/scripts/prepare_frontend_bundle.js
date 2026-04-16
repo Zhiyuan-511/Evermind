@@ -4,8 +4,29 @@ const path = require('path');
 const electronDir = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(electronDir, '..');
 const frontendRoot = path.join(repoRoot, 'frontend');
-const standaloneRoot = path.join(frontendRoot, '.next', 'standalone');
-const standaloneServer = path.join(standaloneRoot, 'server.js');
+let standaloneRoot = path.join(frontendRoot, '.next', 'standalone');
+let standaloneServer = path.join(standaloneRoot, 'server.js');
+
+// Next.js 16 + Turbopack may place the standalone output in a subdirectory
+// named after the project when it detects multiple lockfiles / workspace root.
+if (!fs.existsSync(standaloneServer)) {
+    // Search for server.js in immediate subdirectories
+    const candidates = fs.existsSync(standaloneRoot)
+        ? fs.readdirSync(standaloneRoot, { withFileTypes: true })
+            .filter(e => e.isDirectory())
+            .map(e => path.join(standaloneRoot, e.name))
+        : [];
+    for (const subdir of candidates) {
+        const candidate = path.join(subdir, 'server.js');
+        if (fs.existsSync(candidate)) {
+            console.log(`[prepare_frontend_bundle] Found standalone in subdirectory: ${subdir}`);
+            standaloneRoot = subdir;
+            standaloneServer = candidate;
+            break;
+        }
+    }
+}
+
 const staticRoot = path.join(frontendRoot, '.next', 'static');
 const publicRoot = path.join(frontendRoot, 'public');
 const bundleRoot = path.join(electronDir, '.packaged', 'frontend-standalone');

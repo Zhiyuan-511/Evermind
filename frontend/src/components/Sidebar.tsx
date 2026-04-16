@@ -12,20 +12,22 @@ interface SidebarProps {
     onOpenReports?: () => void;
     onOpenSkillsLibrary?: () => void;
     onOpenFile?: (filePath: string, root: string, content: string, ext: string) => void;
+    forcedMode?: 'nodes' | 'files';
 }
 
 const CATEGORIES = [
-    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['router', 'planner', 'analyst', 'uidesign', 'builder', 'polisher', 'reviewer', 'tester', 'deployer', 'debugger', 'scribe'] },
-    { key: 'tools', label_en: 'Local Execution', label_zh: '本地执行', types: ['localshell', 'fileread', 'filewrite', 'screenshot', 'browser', 'gitops', 'uicontrol'] },
-    { key: 'media', label_en: 'Art & Media', label_zh: '美术 & 媒体', types: ['imagegen', 'bgremove', 'spritesheet', 'assetimport', 'merger'] },
+    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['planner', 'analyst', 'uidesign', 'builder', 'polisher', 'reviewer', 'tester', 'deployer', 'debugger', 'scribe'] },
+    { key: 'media', label_en: 'Art & Media', label_zh: '美术 & 媒体', types: ['imagegen', 'spritesheet', 'assetimport'] },
 ];
 
-export default function Sidebar({ onDragStart, connected, lang, onOpenReports, onOpenSkillsLibrary, onOpenFile }: SidebarProps) {
+export default function Sidebar({ onDragStart, connected, lang, onOpenReports, onOpenSkillsLibrary, onOpenFile, forcedMode }: SidebarProps) {
 
     const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
     const [search, setSearch] = useState('');
     const [sidebarOpen, setSidebarOpen] = useState(true);
-    const [sidebarMode, setSidebarMode] = useState<'nodes' | 'files'>('nodes');
+    const [internalMode, setInternalMode] = useState<'nodes' | 'files'>('nodes');
+    const sidebarMode = forcedMode || internalMode;
+    const setSidebarMode = (m: 'nodes' | 'files') => setInternalMode(m);
 
     const matchesSearch = (type: string) => {
         if (!search) return true;

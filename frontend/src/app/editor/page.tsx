@@ -9,6 +9,11 @@ import '@xyflow/react/dist/style.css';
 import Sidebar from '@/components/Sidebar';
 import Toolbar from '@/components/Toolbar';
 import ChatPanel from '@/components/ChatPanel';
+import DirectChatPanel from '@/components/DirectChatPanel';
+import CodeEditorPanel from '@/components/CodeEditorPanel';
+import MonacoEditor from '@monaco-editor/react';
+import '@/lib/monaco-env'; // Electron-compatible Monaco worker setup
+import type { OpenFile } from '@/components/CodeEditorPanel';
 import AgentNode from '@/components/AgentNode';
 import SettingsModal from '@/components/SettingsModal';
 import TemplateGallery from '@/components/TemplateGallery';
@@ -171,6 +176,18 @@ function EditorPageInner() {
     });
     const [wsUrl, setWsUrl] = useState(process.env.NEXT_PUBLIC_WS_URL || 'ws://127.0.0.1:8765/ws');
     const [difficulty, setDifficulty] = useState<'simple' | 'standard' | 'pro'>('standard');
+    const [chatMode, setChatMode] = useState<'pipeline' | 'direct'>('pipeline');
+    // ── Right panel resizable width ──
+    const [rightPanelWidth, setRightPanelWidth] = useState(() => {
+        if (typeof window === 'undefined') return 380;
+        try { return Number(window.localStorage.getItem('evermind-rpw')) || 380; } catch { return 380; }
+    });
+    const [resizing, setResizing] = useState(false);
+    const resizeStartX = useRef(0);
+    const resizeStartW = useRef(380);
+    // ── File viewer state (Cursor-style IDE mode) ──
+    const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
+    const [activeFileIndex, setActiveFileIndex] = useState(0);
     const [selectedRuntime, setSelectedRuntime] = useState<'local' | 'openclaw'>(() => {
         if (!OPENCLAW_UI_ENABLED) return 'local';
         if (typeof window === 'undefined') return 'local';
@@ -199,6 +216,33 @@ function EditorPageInner() {
     useEffect(() => {
         try { window.localStorage.setItem(RUNTIME_STORAGE_KEY, effectiveSelectedRuntime); } catch { /* ignore */ }
     }, [effectiveSelectedRuntime]);
+
+    // ── Right panel resize handlers ──
+    const handleResizeStart = useCallback((e: React.MouseEvent) => {
+        e.preventDefault();
+        setResizing(true);
+        resizeStartX.current = e.clientX;
+        resizeStartW.current = rightPanelWidth;
+        const onMove = (ev: MouseEvent) => {
+            const delta = resizeStartX.current - ev.clientX; // dragging left = wider
+            const next = Math.max(300, Math.min(700, resizeStartW.current + delta));
+            setRightPanelWidth(next);
+        };
+        const onUp = () => {
+            setResizing(false);
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            try { window.localStorage.setItem('evermind-rpw', String(rightPanelWidth)); } catch { /* ignore */ }
+        };
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('mouseup', onUp);
+        document.body.style.cursor = 'col-resize';
+        document.body.style.userSelect = 'none';
+    }, [rightPanelWidth]);
+
+    // (File viewer handlers defined after runtime declaration below)
 
     // ── P0-1: Canonical state from context ──
     const taskCtx = useTaskContext();
@@ -351,6 +395,62 @@ function EditorPageInner() {
     const buildPlanNodes = workflow.buildPlanNodes;
     const updateNodeData = workflow.updateNodeData;
     const runtimeConnected = runtime.connected;
+
+    // ── File viewer handlers ──
+    const handleOpenFileInEditor = useCallback(async (filePath: string, rootFolder?: string, content?: string, ext?: string) => {
+        const existing = openFiles.findIndex(f => f.path === filePath);
+        if (existing >= 0) {
+            setActiveFileIndex(existing);
+            runtime.setCanvasView('files');
+            return;
+        }
+        let fileContent = content || '';
+        const fileExt = ext || filePath.split('.').pop() || '';
+        const fileName = filePath.split('/').pop() || filePath;
+        if (!fileContent) {
+            try {
+                const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+                const params = new URLSearchParams({ path: filePath });
+                if (rootFolder) params.set('root', rootFolder);
+                const res = await fetch(`${apiBase}/api/workspace/file?${params}`);
+                if (res.ok) {
+                    const data = await res.json();
+                    fileContent = data.content || '';
+                }
+            } catch { /* ignore */ }
+        }
+        const newFile: OpenFile = { path: filePath, name: fileName, content: fileContent, ext: fileExt, rootFolder: rootFolder || '' };
+        setOpenFiles(prev => [...prev, newFile]);
+        setActiveFileIndex(openFiles.length);
+        runtime.setCanvasView('files');
+    }, [openFiles, runtime]);
+
+    const handleCloseFileInEditor = useCallback((index: number) => {
+        setOpenFiles(prev => prev.filter((_, i) => i !== index));
+        setActiveFileIndex(prev => prev >= index && prev > 0 ? prev - 1 : prev);
+    }, []);
+
+    const handleSwitchFile = useCallback((index: number) => {
+        setActiveFileIndex(index);
+    }, []);
+
+    const handleUpdateFileContent = useCallback((index: number, content: string) => {
+        setOpenFiles(prev => prev.map((f, i) => i === index ? { ...f, content, modified: true } : f));
+    }, []);
+
+    const handleSaveFile = useCallback(async (file: OpenFile) => {
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+        try {
+            const res = await fetch(`${apiBase}/api/workspace/write`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ path: file.path, root: file.rootFolder || '', content: file.content }),
+            });
+            if (res.ok) {
+                setOpenFiles(prev => prev.map(f => f.path === file.path ? { ...f, modified: false } : f));
+            }
+        } catch { /* ignore */ }
+    }, []);
     const runtimePreviewUrl = runtime.previewUrl;
     const setCanvasView = runtime.setCanvasView;
 
@@ -466,7 +566,7 @@ function EditorPageInner() {
                     label: String(ne.node_label || ne.node_key || ''),
                     status: isWarmupLeadNode ? 'running' : String(ne.status || 'queued'),
                     runtime: selectedRun?.runtime === 'openclaw' ? 'openclaw' : 'local',
-                    ...(Number.isFinite(Number(ne.progress)) ? { progress: Number(ne.progress) } : (isWarmupLeadNode ? { progress: 5 } : {})),
+                    ...(Number.isFinite(Number(ne.progress)) ? { progress: Math.max(0, Math.min(100, Number(ne.progress))) } : (isWarmupLeadNode ? { progress: 5 } : {})),
                     ...(String(ne.assigned_model || '').trim() ? { assignedModel: String(ne.assigned_model || '').trim() } : {}),
                     ...(String(ne.input_summary || '').trim() ? { taskDescription: String(ne.input_summary || '').trim() } : {}),
                     ...(String(ne.output_summary || '').trim()
@@ -674,7 +774,10 @@ function EditorPageInner() {
                 onOpenArtifacts={() => setArtifactsOpen(true)}
                 onOpenReports={() => setReportsOpen(true)}
                 onOpenSkillsLibrary={() => setSkillsLibraryOpen(true)}
-                onOpenFile={handleOpenFile}
+                onOpenFile={(path: string, root: string, content: string, ext: string) => {
+                    handleOpenFileInEditor(path, root, content, ext);
+                }}
+                forcedMode={runtime.canvasView === 'files' ? 'files' : undefined}
             />
 
             <div className="flex-1 flex flex-col min-w-0">
@@ -699,6 +802,7 @@ function EditorPageInner() {
                     onOpenDiagnostics={() => setDiagnosticsOpen(true)}
                     canvasView={runtime.canvasView}
                     onToggleCanvasView={() => runtime.setCanvasView(v => v === 'editor' ? 'preview' : 'editor')}
+                    onSetCanvasView={(v) => runtime.setCanvasView(v)}
                     hasPreview={!!runtime.previewUrl}
                     activeRunStatus={connectorRunStatus}
                     runtimeModeLabel={connectorRuntimeMode}
@@ -801,6 +905,16 @@ function EditorPageInner() {
                                     maskColor="var(--minimap-mask)"
                                 />
                             </ReactFlow>
+                        ) : runtime.canvasView === 'files' ? (
+                            <CodeEditorPanel
+                                openFiles={openFiles}
+                                activeFileIndex={activeFileIndex}
+                                onSwitchFile={handleSwitchFile}
+                                onCloseFile={handleCloseFileInEditor}
+                                onSaveFile={handleSaveFile}
+                                onUpdateFileContent={handleUpdateFileContent}
+                                lang={lang}
+                            />
                         ) : (
                             <PreviewCenter
                                 previewUrl={runtime.previewUrl}
@@ -815,30 +929,99 @@ function EditorPageInner() {
                         )}
                         </div>
                     </div>
-                    <ChatPanel
-                        messages={chat.messages}
-                        onSendGoal={runtime.handleSendGoal}
-                        sessionId={chat.activeSessionId}
-                        connected={runtime.connected}
-                        running={runtime.running}
-                        onStop={runtime.handleStop}
-                        lang={lang}
-                        difficulty={difficulty}
-                        onDifficultyChange={setDifficulty}
-                        runtimeMode={connectorRuntimeMode}
-                        showOpenClawRuntime={OPENCLAW_UI_ENABLED}
-                        taskTitle={summaryTaskTitle}
-                        taskStatus={connectorRunStatus}
-                        activeNodeLabels={summaryActiveNodeLabels}
-                        completedNodes={summaryCompletedNodes}
-                        runningNodes={summaryRunningNodes}
-                        totalNodes={summaryTotalNodes}
-                        startedAt={activeRun?.started_at || activeRun?.created_at || null}
-                        onOpenReports={() => setReportsOpen(true)}
-                        onRevealInFinder={handleRevealInFinder}
-                        selectedRuntime={effectiveSelectedRuntime}
-                        onRuntimeChange={OPENCLAW_UI_ENABLED ? setSelectedRuntime : undefined}
+                    {/* Right panel resize handle */}
+                    <div
+                        onMouseDown={handleResizeStart}
+                        style={{
+                            width: 4, flexShrink: 0, cursor: 'col-resize',
+                            background: resizing ? 'var(--blue)' : 'transparent',
+                            transition: resizing ? 'none' : 'background 0.15s',
+                            zIndex: 10,
+                        }}
+                        onMouseEnter={(e) => { if (!resizing) (e.currentTarget as HTMLDivElement).style.background = 'rgba(79,143,255,0.4)'; }}
+                        onMouseLeave={(e) => { if (!resizing) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
                     />
+                    {/* Right panel: Pipeline / Chat mode switcher */}
+                    <div style={{ display: 'flex', flexDirection: 'column', flexShrink: 0, overflow: 'hidden', width: rightPanelWidth }}>
+                        {/* Tab bar */}
+                        <div style={{ display: 'flex', flexShrink: 0, borderLeft: '1px solid var(--glass-border)', borderBottom: '1px solid var(--glass-border)', background: 'rgba(255,255,255,0.02)' }}>
+                            <button
+                                onClick={() => setChatMode('pipeline')}
+                                style={{
+                                    flex: 1, padding: '7px 0', fontSize: 11, fontWeight: chatMode === 'pipeline' ? 700 : 400,
+                                    color: chatMode === 'pipeline' ? '#3b82f6' : 'var(--text3)',
+                                    background: 'transparent', border: 'none', cursor: 'pointer',
+                                    borderBottom: chatMode === 'pipeline' ? '2px solid #3b82f6' : '2px solid transparent',
+                                }}
+                            >
+                                Pipeline
+                            </button>
+                            <button
+                                onClick={() => setChatMode('direct')}
+                                style={{
+                                    flex: 1, padding: '7px 0', fontSize: 11, fontWeight: chatMode === 'direct' ? 700 : 400,
+                                    color: chatMode === 'direct' ? '#3b82f6' : 'var(--text3)',
+                                    background: 'transparent', border: 'none', cursor: 'pointer',
+                                    borderBottom: chatMode === 'direct' ? '2px solid #3b82f6' : '2px solid transparent',
+                                }}
+                            >
+                                Chat
+                            </button>
+                        </div>
+                        {/* Panel content */}
+                        <div style={{ flex: 1, overflow: 'hidden' }}>
+                            {chatMode === 'pipeline' ? (
+                                <ChatPanel
+                                    messages={chat.messages}
+                                    onSendGoal={runtime.handleSendGoal}
+                                    sessionId={chat.activeSessionId}
+                                    connected={runtime.connected}
+                                    running={runtime.running}
+                                    onStop={runtime.handleStop}
+                                    lang={lang}
+                                    difficulty={difficulty}
+                                    onDifficultyChange={setDifficulty}
+                                    runtimeMode={connectorRuntimeMode}
+                                    showOpenClawRuntime={OPENCLAW_UI_ENABLED}
+                                    taskTitle={summaryTaskTitle}
+                                    taskStatus={connectorRunStatus}
+                                    activeNodeLabels={summaryActiveNodeLabels}
+                                    completedNodes={summaryCompletedNodes}
+                                    runningNodes={summaryRunningNodes}
+                                    totalNodes={summaryTotalNodes}
+                                    startedAt={activeRun?.started_at || activeRun?.created_at || null}
+                                    onOpenReports={() => setReportsOpen(true)}
+                                    onRevealInFinder={handleRevealInFinder}
+                                    selectedRuntime={effectiveSelectedRuntime}
+                                    onRuntimeChange={OPENCLAW_UI_ENABLED ? setSelectedRuntime : undefined}
+                                />
+                            ) : (
+                                <DirectChatPanel
+                                    wsRef={runtime.wsRef}
+                                    connected={runtime.connected}
+                                    lang={lang}
+                                    sessionId={chat.activeSessionId}
+                                    onOpenFile={(path, root, content, ext) => handleOpenFileInEditor(path, root, content, ext)}
+                                    onFileDiffs={(diffs) => {
+                                        // Auto-open files with diff in CodeEditorPanel
+                                        for (const d of diffs) {
+                                            const ext = d.path.split('.').pop() || '';
+                                            const name = d.path.split('/').pop() || d.path;
+                                            const existing = openFiles.findIndex(f => f.path === d.path);
+                                            if (existing >= 0) {
+                                                // Update existing file with diff data
+                                                setOpenFiles(prev => prev.map((f, i) => i === existing ? { ...f, content: d.new_content || f.content, originalContent: d.original_content } : f));
+                                            } else {
+                                                setOpenFiles(prev => [...prev, { path: d.path, name, content: d.new_content || '', ext, originalContent: d.original_content }]);
+                                            }
+                                        }
+                                        setActiveFileIndex(openFiles.length > 0 ? openFiles.length - 1 : 0);
+                                        runtime.setCanvasView('files');
+                                    }}
+                                />
+                            )}
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -884,77 +1067,205 @@ function EditorPageInner() {
                 />
             )}
 
-            {/* ── File Viewer Overlay ── */}
-            {openedFile && (
+            {/* ── File Viewer Overlay (with Monaco syntax highlighting) ── */}
+            {openedFile && (() => {
+                const overlayExt = openedFile.ext.toLowerCase().replace(/^\./, '');
+                const OVERLAY_EXT_LANG: Record<string, string> = {
+                    js: 'javascript', jsx: 'javascript', mjs: 'javascript',
+                    ts: 'typescript', tsx: 'typescript',
+                    py: 'python', html: 'html', htm: 'html', xml: 'xml', svg: 'xml',
+                    css: 'css', scss: 'scss', less: 'less',
+                    json: 'json', md: 'markdown',
+                    sh: 'shell', bash: 'shell', zsh: 'shell',
+                    yaml: 'yaml', yml: 'yaml', sql: 'sql',
+                    go: 'go', rs: 'rust', java: 'java',
+                    c: 'c', cpp: 'cpp', h: 'c', hpp: 'cpp',
+                    lua: 'lua', rb: 'ruby', php: 'php', swift: 'swift',
+                    kt: 'kotlin', dart: 'dart', r: 'r',
+                    dockerfile: 'dockerfile', graphql: 'graphql',
+                    toml: 'ini', ini: 'ini', env: 'ini',
+                };
+                const overlayLang = OVERLAY_EXT_LANG[overlayExt] || 'plaintext';
+                const isImage = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(overlayExt);
+                const isHtml = ['html', 'htm'].includes(overlayExt);
+                const isCode = !isImage && !isHtml;
+
+                return (
                 <div style={{
                     position: 'fixed', inset: 0, zIndex: 9999,
-                    background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(6px)',
+                    background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(10px)',
                     display: 'flex', flexDirection: 'column',
                 }}>
-                    {/* Header */}
+                    {/* Header — Evermind dark glassmorphic */}
                     <div style={{
                         display: 'flex', alignItems: 'center', gap: 10,
                         padding: '10px 16px',
-                        background: 'rgba(15,17,23,0.95)',
-                        borderBottom: '1px solid rgba(255,255,255,0.08)',
+                        background: 'linear-gradient(180deg, rgba(13,17,23,0.98), rgba(22,27,34,0.96))',
+                        borderBottom: '1px solid rgba(79,143,255,0.12)',
                         flexShrink: 0,
                     }}>
-                        <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text1)', flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {openedFile.path}
+                        {/* Breadcrumb-style path */}
+                        <div style={{ flex: 1, display: 'flex', alignItems: 'center', gap: 4, overflow: 'hidden' }}>
+                            {openedFile.path.replace(/^\//, '').split('/').map((part, i, arr) => (
+                                <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: i < arr.length - 1 ? 1 : 0, minWidth: 0 }}>
+                                    {i > 0 && <span style={{ color: '#484f58', fontSize: 10 }}>/</span>}
+                                    <span style={{
+                                        fontSize: i === arr.length - 1 ? 13 : 11,
+                                        fontWeight: i === arr.length - 1 ? 700 : 400,
+                                        color: i === arr.length - 1 ? '#e6edf3' : '#8b949e',
+                                        whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                                    }}>{part}</span>
+                                </span>
+                            ))}
+                        </div>
+                        <span style={{
+                            fontSize: 9, color: '#58a6ff', textTransform: 'uppercase', fontWeight: 800,
+                            letterSpacing: '0.06em',
+                            padding: '2px 8px', borderRadius: 4,
+                            background: 'rgba(88,166,255,0.12)', border: '1px solid rgba(88,166,255,0.2)',
+                        }}>
+                            {overlayExt || '?'}
                         </span>
-                        <span style={{ fontSize: 10, color: 'var(--text4)', textTransform: 'uppercase', fontWeight: 700 }}>
-                            {openedFile.ext.replace('.', '')}
-                        </span>
+                        {isCode && (
+                            <button
+                                onClick={() => {
+                                    handleOpenFileInEditor(openedFile.path, openedFile.root, openedFile.content, openedFile.ext);
+                                    setOpenedFile(null);
+                                }}
+                                style={{
+                                    background: 'rgba(88,166,255,0.1)', border: '1px solid rgba(88,166,255,0.25)',
+                                    borderRadius: 6, padding: '4px 12px', cursor: 'pointer',
+                                    color: '#58a6ff', fontSize: 10, fontWeight: 600,
+                                }}
+                            >
+                                {lang === 'zh' ? '在编辑器打开' : 'Open in Editor'}
+                            </button>
+                        )}
                         <button
                             onClick={() => setOpenedFile(null)}
                             style={{
                                 background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.1)',
                                 borderRadius: 6, padding: '4px 12px', cursor: 'pointer',
-                                color: 'var(--text2)', fontSize: 11, fontWeight: 600,
+                                color: '#e6edf3', fontSize: 11, fontWeight: 600,
+                                transition: 'all 0.15s',
                             }}
+                            onMouseEnter={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.12)'; }}
+                            onMouseLeave={e => { e.currentTarget.style.background = 'rgba(255,255,255,0.06)'; }}
                         >
                             {lang === 'zh' ? '关闭' : 'Close'} ✕
                         </button>
                     </div>
                     {/* Content */}
-                    <div style={{ flex: 1, overflow: 'auto', background: 'rgba(15,17,23,0.98)' }}>
-                        {['.html', '.htm'].includes(openedFile.ext) ? (
+                    <div style={{ flex: 1, overflow: 'hidden', background: '#0d1117' }}>
+                        {isHtml ? (
                             <iframe
                                 srcDoc={openedFile.content}
                                 style={{ width: '100%', height: '100%', border: 'none', background: '#fff' }}
                                 sandbox="allow-scripts allow-same-origin allow-pointer-lock"
                                 title={openedFile.path}
                             />
-                        ) : ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg'].includes(openedFile.ext) ? (
+                        ) : isImage ? (
                             openedFile.ext === '.svg' ? (
-                                <div style={{ padding: 32, display: 'flex', justifyContent: 'center' }}>
+                                <div style={{ padding: 32, display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
                                     <div dangerouslySetInnerHTML={{ __html: openedFile.content }} style={{ maxWidth: '80%' }} />
                                 </div>
                             ) : (
-                                <div style={{ padding: 32, display: 'flex', justifyContent: 'center' }}>
+                                <div style={{ padding: 32, display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
                                     {/* eslint-disable-next-line @next/next/no-img-element */}
                                     <img
-                                        src={`data:image/${openedFile.ext.replace('.', '')};base64,${openedFile.content}`}
+                                        src={`data:image/${overlayExt};base64,${openedFile.content}`}
                                         alt={openedFile.path}
                                         style={{ maxWidth: '90%', maxHeight: '80vh', objectFit: 'contain', borderRadius: 8 }}
                                     />
                                 </div>
                             )
                         ) : (
-                            <pre style={{
-                                margin: 0, padding: '16px 20px',
-                                fontSize: 12, lineHeight: 1.7,
-                                fontFamily: 'var(--font-mono), "SF Mono", "Fira Code", monospace',
-                                color: 'var(--text1)',
-                                whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-                                minHeight: '100%',
-                            }}>
-                                {openedFile.content}
-                            </pre>
+                            <MonacoEditor
+                                language={overlayLang}
+                                value={openedFile.content}
+                                theme="evermind-dark"
+                                beforeMount={(monaco) => {
+                                    // Register evermind-dark if not already registered
+                                    try {
+                                        monaco.editor.defineTheme('evermind-dark', {
+                                            base: 'vs-dark',
+                                            inherit: true,
+                                            rules: [
+                                                { token: 'comment', foreground: '6a9955', fontStyle: 'italic' },
+                                                { token: 'keyword', foreground: 'c586c0' },
+                                                { token: 'keyword.control', foreground: 'c586c0' },
+                                                { token: 'storage', foreground: '569cd6' },
+                                                { token: 'storage.type', foreground: '569cd6' },
+                                                { token: 'string', foreground: 'ce9178' },
+                                                { token: 'number', foreground: 'b5cea8' },
+                                                { token: 'entity.name.function', foreground: 'dcdcaa' },
+                                                { token: 'support.function', foreground: 'dcdcaa' },
+                                                { token: 'variable', foreground: '9cdcfe' },
+                                                { token: 'type', foreground: '4ec9b0' },
+                                                { token: 'tag', foreground: '569cd6' },
+                                                { token: 'attribute.name', foreground: '9cdcfe' },
+                                                { token: 'attribute.value', foreground: 'ce9178' },
+                                                { token: 'constant', foreground: '4fc1ff' },
+                                                { token: 'delimiter.bracket', foreground: 'ffd700' },
+                                                { token: 'regexp', foreground: 'd16969' },
+                                                { token: 'annotation', foreground: 'dcdcaa' },
+                                            ],
+                                            colors: {
+                                                'editor.background': '#0d1117',
+                                                'editor.foreground': '#e6edf3',
+                                                'editor.selectionBackground': '#264f78',
+                                                'editor.lineHighlightBackground': '#161b2280',
+                                                'editorLineNumber.foreground': '#484f58',
+                                                'editorLineNumber.activeForeground': '#8b949e',
+                                                'editorGutter.background': '#0d1117',
+                                                'editorCursor.foreground': '#58a6ff',
+                                                'editorBracketMatch.background': '#3b82f633',
+                                                'editorBracketMatch.border': '#3b82f699',
+                                                'editorIndentGuide.background': '#21262d',
+                                                'scrollbar.shadow': '#00000000',
+                                                'scrollbarSlider.background': '#484f5833',
+                                                'minimap.background': '#0d1117',
+                                                'editorOverviewRuler.border': '#0d1117',
+                                                'editorWidget.background': '#161b22',
+                                                'editorWidget.border': '#30363d',
+                                            },
+                                        });
+                                    } catch { /* theme may already be defined */ }
+                                }}
+                                options={{
+                                    readOnly: true,
+                                    fontSize: 13,
+                                    fontFamily: "'JetBrains Mono','Fira Code','SF Mono','Cascadia Code',Menlo,monospace",
+                                    fontLigatures: true,
+                                    lineHeight: 20,
+                                    minimap: { enabled: true, scale: 1, showSlider: 'mouseover' },
+                                    scrollBeyondLastLine: false,
+                                    renderWhitespace: 'selection',
+                                    bracketPairColorization: { enabled: true },
+                                    guides: { bracketPairs: true, indentation: true },
+                                    smoothScrolling: true,
+                                    padding: { top: 8, bottom: 8 },
+                                    automaticLayout: true,
+                                    tabSize: 2,
+                                    wordWrap: 'off',
+                                    folding: true,
+                                    lineNumbers: 'on',
+                                    renderLineHighlight: 'line',
+                                    overviewRulerBorder: false,
+                                    scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10, useShadows: false },
+                                    domReadOnly: true,
+                                }}
+                                loading={
+                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#8b949e', background: '#0d1117' }}>
+                                        <span style={{ fontSize: 12 }}>{lang === 'zh' ? '加载中...' : 'Loading...'}</span>
+                                    </div>
+                                }
+                            />
                         )}
                     </div>
                 </div>
-            )}
+                );
+            })()}
         </div>
     );
 }

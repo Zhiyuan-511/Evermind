@@ -36,9 +36,23 @@ from .base import Plugin, PluginResult, PluginRegistry, SecurityLevel
 logger = logging.getLogger("evermind.plugins")
 
 
-_ACTIVE_FILE_OPS_WRITE_TOKENS: Dict[str, str] = {}
+# V4.9.7 FIX: Store (token, timestamp) to enable TTL-based cleanup and prevent memory leaks.
+_ACTIVE_FILE_OPS_WRITE_TOKENS: Dict[str, Tuple[str, float]] = {}
+_FILE_OPS_WRITE_TOKEN_TTL_SEC = 3600  # 1 hour
 _FILE_OPS_READ_HISTORY: Dict[str, set[str]] = {}
 _SHARED_ROOT_ASSET_NAMES = {"styles.css", "app.js", "style.css", "main.css", "main.js", "script.js"}
+
+
+def _cleanup_expired_write_tokens() -> None:
+    """Remove write tokens older than TTL to prevent unbounded memory growth."""
+    now = time.time()
+    expired = [k for k, (_, ts) in _ACTIVE_FILE_OPS_WRITE_TOKENS.items()
+               if now - ts > _FILE_OPS_WRITE_TOKEN_TTL_SEC]
+    for k in expired:
+        _ACTIVE_FILE_OPS_WRITE_TOKENS.pop(k, None)
+        for rk in list(_FILE_OPS_READ_HISTORY.keys()):
+            if rk == k or rk.startswith(f"{k}:"):
+                _FILE_OPS_READ_HISTORY.pop(rk, None)
 
 
 def set_active_file_ops_write_token(node_execution_id: str, token: str) -> None:
@@ -46,10 +60,11 @@ def set_active_file_ops_write_token(node_execution_id: str, token: str) -> None:
     token = str(token or "").strip()
     if not node_execution_id or not token:
         return
+    _cleanup_expired_write_tokens()
     for key in list(_FILE_OPS_READ_HISTORY.keys()):
         if key == node_execution_id or key.startswith(f"{node_execution_id}:"):
             _FILE_OPS_READ_HISTORY.pop(key, None)
-    _ACTIVE_FILE_OPS_WRITE_TOKENS[node_execution_id] = token
+    _ACTIVE_FILE_OPS_WRITE_TOKENS[node_execution_id] = (token, time.time())
 
 
 def clear_active_file_ops_write_token(node_execution_id: str, token: Optional[str] = None) -> None:
@@ -57,10 +72,11 @@ def clear_active_file_ops_write_token(node_execution_id: str, token: Optional[st
     token = str(token or "").strip()
     if not node_execution_id:
         return
-    current = _ACTIVE_FILE_OPS_WRITE_TOKENS.get(node_execution_id)
-    if current is None:
+    entry = _ACTIVE_FILE_OPS_WRITE_TOKENS.get(node_execution_id)
+    if entry is None:
         return
-    if token and current != token:
+    current_token = entry[0]
+    if token and current_token != token:
         return
     _ACTIVE_FILE_OPS_WRITE_TOKENS.pop(node_execution_id, None)
     for key in list(_FILE_OPS_READ_HISTORY.keys()):
@@ -2105,6 +2121,24 @@ class FileOpsPlugin(Plugin):
             return None
         if candidate == output_root or output_root in candidate.parents:
             return None
+        # V4.6 SPEED: Auto-correct path instead of rejecting.
+        # When model writes to parent dir (e.g. output/index.html instead of
+        # output/task_6/index.html), redirect into output_root automatically.
+        # This saves 2-3 minutes of wasted regeneration per occurrence.
+        try:
+            parent_of_root = output_root.parent
+            if parent_of_root in candidate.parents or candidate.parent == parent_of_root:
+                rel_from_parent = candidate.relative_to(parent_of_root)
+                corrected = output_root / rel_from_parent
+                logger.info(
+                    "Auto-corrected file_ops %s path: %s -> %s (output_root=%s)",
+                    action, candidate, corrected, output_root,
+                )
+                # Mutate the context so downstream code uses corrected path
+                context["_auto_corrected_path"] = str(corrected)
+                return None  # Allow the write to proceed with corrected path
+        except (ValueError, RuntimeError):
+            pass
         logger.warning(
             "Rejected file_ops %s escaping output dir: candidate=%s output_root=%s",
             action,
@@ -2312,7 +2346,8 @@ class FileOpsPlugin(Plugin):
         if not node_execution_id or not token:
             return None
 
-        active = _ACTIVE_FILE_OPS_WRITE_TOKENS.get(node_execution_id)
+        active_entry = _ACTIVE_FILE_OPS_WRITE_TOKENS.get(node_execution_id)
+        active = active_entry[0] if active_entry else None
         if active == token:
             return None
         if not active:
@@ -2719,6 +2754,10 @@ class FileOpsPlugin(Plugin):
             output_escape_guard = self._guard_output_dir_escape(str(path), str(action), context or {})
             if output_escape_guard is not None:
                 return output_escape_guard
+            # V4.6 SPEED: Apply auto-corrected path if guard redirected it
+            if context and context.get("_auto_corrected_path"):
+                path = context.pop("_auto_corrected_path")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
 
             # Security check: validate against allowed directories
             allowed_dirs = context.get("allowed_dirs", ["/tmp"]) if context else ["/tmp"]
@@ -2883,6 +2922,12 @@ class FileOpsPlugin(Plugin):
                 else:
                     return PluginResult(success=False, error=f"Path not found: {search_path}")
             elif action == "delete":
+                # V4.9.7 FIX: Apply same security checks as write/edit before deleting.
+                if not self._is_allowed_path(path, allowed_dirs):
+                    return PluginResult(success=False, error=f"Delete blocked — path not allowed by security policy: {path}")
+                delete_escape_guard = self._guard_output_dir_escape(str(path), "delete", context or {})
+                if delete_escape_guard is not None:
+                    return delete_escape_guard
                 if os.path.exists(path):
                     os.remove(path)
                 return PluginResult(success=True, data={"deleted": path})
@@ -3402,7 +3447,24 @@ class ComputerUsePlugin(Plugin):
             if not api_key:
                 return PluginResult(success=False, error="OpenAI API key not configured")
 
-            client = AsyncOpenAI(api_key=api_key)
+            # V4.9.5 PERF: Reuse cached client with proper connection pool
+            # instead of creating a new one per request (default keepalive=5s).
+            _cache_key = f"cua_{api_key[:20]}"
+            if not hasattr(AsyncOpenAI, '_evermind_client_cache'):
+                AsyncOpenAI._evermind_client_cache = {}
+            client = AsyncOpenAI._evermind_client_cache.get(_cache_key)
+            if client is None:
+                try:
+                    import httpx as _httpx
+                    _hc = _httpx.AsyncClient(
+                        http2=True,
+                        timeout=_httpx.Timeout(120.0, connect=10.0),
+                        limits=_httpx.Limits(max_connections=10, max_keepalive_connections=6, keepalive_expiry=120),
+                    )
+                    client = AsyncOpenAI(api_key=api_key, http_client=_hc)
+                except Exception:
+                    client = AsyncOpenAI(api_key=api_key)
+                AsyncOpenAI._evermind_client_cache[_cache_key] = client
 
             instruction = params.get("instruction", "")
             display_w = params.get("display_width", 1920)
@@ -3545,7 +3607,15 @@ class UIControlPlugin(Plugin):
 
             elif action == "window_focus":
                 app_name = params.get("app", "")
-                os.system(f'osascript -e \'tell application "{app_name}" to activate\'')
+                # V4.9.7 FIX: Sanitize app_name to prevent osascript command injection.
+                # Strip quotes, backslashes, and control characters that could escape the AppleScript string.
+                app_name = re.sub(r'["\'\\\x00-\x1f]', '', str(app_name or "")).strip()
+                if not app_name:
+                    return PluginResult(success=False, error="window_focus requires a non-empty 'app' name")
+                subprocess.run(
+                    ["osascript", "-e", f'tell application "{app_name}" to activate'],
+                    capture_output=True, text=True, timeout=5,
+                )
                 return PluginResult(success=True, data={"focused": app_name})
 
             elif action == "window_minimize":

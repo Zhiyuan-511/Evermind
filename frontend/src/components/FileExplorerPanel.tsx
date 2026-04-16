@@ -155,74 +155,53 @@ function TreeItem({
     const childCount = isDir ? (node.children?.length || 0) : 0;
     const color = isDir ? '#4f8fff' : getExtColor(node.ext || '');
 
+    // VS Code Explorer style — compact, clean, indent guides
+    const extIcon = !isDir ? getExtLabel(node.ext || '') : '';
+    const fileColor = !isDir ? getExtColor(node.ext || '') : '';
+
     return (
         <>
             <div
                 onClick={() => isDir ? onToggleDir(fullPath) : onSelectFile(fullPath, node)}
                 style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: 8,
-                    paddingLeft,
-                    paddingRight: 8,
-                    paddingTop: 5,
-                    paddingBottom: 5,
-                    cursor: 'pointer',
-                    fontSize: 11,
-                    color: isSelected ? 'var(--blue)' : 'var(--text1)',
-                    background: isSelected ? 'rgba(79,143,255,0.10)' : 'transparent',
-                    borderRadius: 6,
-                    transition: 'background 0.12s',
+                    display: 'flex', alignItems: 'center', gap: 0,
+                    height: 22, paddingRight: 8, cursor: 'pointer',
+                    fontSize: 12, lineHeight: '22px',
+                    color: isSelected ? '#e6edf3' : '#c9d1d9',
+                    background: isSelected ? 'rgba(79,143,255,0.12)' : 'transparent',
                     userSelect: 'none',
-                    margin: '1px 4px',
                 }}
-                onMouseEnter={(e) => {
-                    if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.04)';
-                }}
-                onMouseLeave={(e) => {
-                    if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'transparent';
-                }}
+                onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = 'rgba(255,255,255,0.04)'; }}
+                onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.background = isSelected ? 'rgba(79,143,255,0.12)' : 'transparent'; }}
                 title={fullPath}
             >
-                <div style={{
-                    width: 24, height: 24, borderRadius: 6, flexShrink: 0,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: `linear-gradient(135deg, ${color}40, ${color}20)`,
-                }}>
-                    {isDir ? (
-                        <span style={{ fontSize: 9, fontWeight: 800, color }}>{isExpanded ? '▾' : '▸'}</span>
-                    ) : (
-                        <span style={{ fontSize: 7, fontWeight: 800, color, letterSpacing: 0.3 }}>{getExtLabel(node.ext || '')}</span>
-                    )}
-                </div>
-
-                <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{
-                        fontSize: 11,
-                        fontWeight: isDir ? 600 : 500,
-                        whiteSpace: 'nowrap',
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        lineHeight: 1.3,
-                    }}>
-                        {node.name}
-                    </div>
-                    {isDir && childCount > 0 && (
-                        <div style={{ fontSize: 8, color: 'var(--text4)', lineHeight: 1.2 }}>
-                            {childCount} {lang === 'zh' ? '项' : 'items'}
-                        </div>
-                    )}
-                    {!isDir && node.size !== undefined && (
-                        <div style={{ fontSize: 8, color: 'var(--text4)', lineHeight: 1.2 }}>
-                            {formatSize(node.size)}
-                        </div>
-                    )}
-                </div>
-
+                {/* Indent guides */}
+                {Array.from({ length: depth }).map((_, d) => (
+                    <span key={d} style={{ width: 16, height: 22, flexShrink: 0, borderLeft: d > 0 ? '1px solid rgba(255,255,255,0.06)' : 'none' }} />
+                ))}
+                {/* Chevron for dirs */}
+                <span style={{ width: 16, flexShrink: 0, textAlign: 'center', fontSize: 10, color: '#8b949e' }}>
+                    {isDir ? (isExpanded ? '▾' : '▸') : ''}
+                </span>
+                {/* Icon */}
+                {isDir ? (
+                    <span style={{ width: 16, flexShrink: 0, textAlign: 'center', fontSize: 12 }}>
+                        {isExpanded ? '📂' : '📁'}
+                    </span>
+                ) : (
+                    <span style={{ width: 16, flexShrink: 0, textAlign: 'center', fontSize: 8, fontWeight: 700, color: fileColor || '#8b949e', letterSpacing: 0.2 }}>
+                        {extIcon}
+                    </span>
+                )}
+                {/* Name */}
                 <span style={{
-                    width: 7, height: 7, borderRadius: '50%',
-                    background: color, flexShrink: 0, opacity: 0.8,
-                }} />
+                    flex: 1, minWidth: 0, marginLeft: 4,
+                    whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
+                    fontWeight: isDir ? 500 : 400,
+                    fontFamily: isDir ? 'inherit' : 'var(--font-mono, monospace)',
+                }}>
+                    {node.name}
+                </span>
             </div>
 
             {isDir && isExpanded && node.children?.map((child) => (
@@ -700,63 +679,79 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
         return t('FOLDER', '文件夹');
     }, [t]);
 
+    // Antigravity-style handlers
+    const handleNewFolder = useCallback(async () => {
+        if (!activeFolder) { alert(lang === 'zh' ? '请先选择一个文件夹' : 'Select a folder first'); return; }
+        const name = prompt(lang === 'zh' ? '输入文件夹名称:' : 'Enter folder name:');
+        if (!name?.trim()) return;
+        try {
+            const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+            const res = await fetch(`${apiBase}/api/workspace/mkdir`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root: activeFolder, path: name.trim() }) });
+            if (res.ok) window.dispatchEvent(new CustomEvent('evermind:workspace-updated'));
+            else alert('Failed: ' + (await res.text()));
+        } catch (e) { alert('Error: ' + e); }
+    }, [activeFolder, lang]);
+
+    const handleNewFile = useCallback(async () => {
+        if (!activeFolder) { alert(lang === 'zh' ? '请先选择一个文件夹' : 'Select a folder first'); return; }
+        const name = prompt(lang === 'zh' ? '输入文件名:' : 'Enter file name:');
+        if (!name?.trim()) return;
+        try {
+            const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+            const res = await fetch(`${apiBase}/api/workspace/write`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root: activeFolder, path: name.trim(), content: '' }) });
+            if (res.ok) window.dispatchEvent(new CustomEvent('evermind:workspace-updated'));
+            else alert('Failed: ' + (await res.text()));
+        } catch (e) { alert('Error: ' + e); }
+    }, [activeFolder, lang]);
+
+    const handleCollapseAll = useCallback(() => setExpandedDirs(new Set()), []);
+
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-            <div style={{ padding: '8px 10px 6px', flexShrink: 0, display: 'grid', gap: 6 }}>
-                <button
-                    onClick={handleAddFolder}
-                    style={{
-                        width: '100%',
-                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-                        padding: '8px 12px', borderRadius: 8,
-                        fontSize: 11, fontWeight: 600,
-                        color: '#6c5ce7',
-                        background: 'rgba(108,92,231,0.08)',
-                        border: '1px dashed rgba(108,92,231,0.3)',
-                        cursor: 'pointer',
-                        transition: 'all 0.15s',
-                    }}
-                >
-                    + {t('Add Folder', '添加文件夹')}
-                </button>
-
-                <div style={{ display: 'grid', gridTemplateColumns: showSetDeliveryButton ? '1fr 1fr' : '1fr', gap: 6 }}>
-                    {showSetDeliveryButton && (
-                        <button
-                            onClick={() => void handleSetDeliveryFolder()}
-                            style={{
-                                padding: '7px 10px',
-                                borderRadius: 8,
-                                fontSize: 10,
-                                fontWeight: 700,
-                                color: activeFolder === artifactSyncDir ? '#16a34a' : '#f59e0b',
-                                background: activeFolder === artifactSyncDir ? 'rgba(34,197,94,0.10)' : 'rgba(245,158,11,0.10)',
-                                border: `1px solid ${activeFolder === artifactSyncDir ? 'rgba(34,197,94,0.25)' : 'rgba(245,158,11,0.25)'}`,
-                                cursor: 'pointer',
-                            }}
-                            title={t('Save this folder as the final delivery destination', '把当前文件夹保存为最终交付目录')}
-                        >
-                            {activeFolder === artifactSyncDir ? t('Delivery Folder', '当前为交付目录') : t('Set Delivery', '设为交付目录')}
-                        </button>
-                    )}
-
-                    <button
-                        onClick={() => void handleSyncNow()}
-                        disabled={!currentSyncTarget}
-                        style={{
-                            padding: '7px 10px',
-                            borderRadius: 8,
-                            fontSize: 10,
-                            fontWeight: 700,
-                            color: currentSyncTarget ? '#22c55e' : 'var(--text4)',
-                            background: currentSyncTarget ? 'rgba(34,197,94,0.10)' : 'rgba(255,255,255,0.04)',
-                            border: `1px solid ${currentSyncTarget ? 'rgba(34,197,94,0.22)' : 'rgba(255,255,255,0.08)'}`,
-                            cursor: currentSyncTarget ? 'pointer' : 'not-allowed',
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden', background: '#0d1117' }}>
+            {/* Explorer header — Antigravity style */}
+            <div style={{ display: 'flex', alignItems: 'center', padding: '6px 12px', borderBottom: '1px solid #21262d', flexShrink: 0 }}>
+                <span style={{ fontSize: 11, fontWeight: 600, color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px', flex: 1 }}>Explorer</span>
+                <div style={{ display: 'flex', gap: 2 }}>
+                    {[
+                        { icon: '📄', title: t('New File', '新建文件'), action: handleNewFile },
+                        { icon: '📁', title: t('New Folder', '新建文件夹'), action: handleNewFolder },
+                        { icon: '🔄', title: t('Refresh', '刷新'), action: () => window.dispatchEvent(new CustomEvent('evermind:workspace-updated')) },
+                        { icon: '⊟', title: t('Collapse All', '全部折叠'), action: handleCollapseAll },
+                    ].map((btn, i) => (
+                        <button key={i} onClick={btn.action} title={btn.title} style={{
+                            width: 22, height: 22, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: 11, background: 'transparent', border: 'none', cursor: 'pointer', borderRadius: 3,
+                            color: '#8b949e', opacity: 0.7,
                         }}
-                        title={t('Copy the latest deliverable into the configured delivery folder', '把最新成品同步到交付目录')}
-                    >
-                        {t('Sync Deliverable', '同步成品')}
-                    </button>
+                        onMouseEnter={e => (e.currentTarget.style.opacity = '1', e.currentTarget.style.background = 'rgba(255,255,255,0.06)')}
+                        onMouseLeave={e => (e.currentTarget.style.opacity = '0.7', e.currentTarget.style.background = 'transparent')}
+                        >{btn.icon}</button>
+                    ))}
+                </div>
+            </div>
+
+            {/* Workspace folder selector — compact */}
+            <div style={{ padding: '4px 8px', borderBottom: '1px solid #21262d', flexShrink: 0 }}>
+                <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                    {folderEntries.map((folder) => {
+                        const isActive = activeFolder === folder.path;
+                        const label = folder.path.split('/').pop() || folder.path;
+                        return (
+                            <button key={folder.path} onClick={() => setActiveFolder(folder.path)} title={folder.path}
+                                style={{
+                                    fontSize: 10, padding: '2px 8px', borderRadius: 3, border: 'none', cursor: 'pointer',
+                                    background: isActive ? 'rgba(88,166,255,0.15)' : 'rgba(255,255,255,0.04)',
+                                    color: isActive ? '#58a6ff' : '#8b949e', fontWeight: isActive ? 600 : 400,
+                                    maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                }}>
+                                {label}
+                            </button>
+                        );
+                    })}
+                    <button onClick={handleAddFolder} title={t('Add folder', '添加文件夹')} style={{
+                        fontSize: 10, padding: '2px 6px', borderRadius: 3, border: '1px dashed rgba(255,255,255,0.15)',
+                        background: 'transparent', color: '#8b949e', cursor: 'pointer',
+                    }}>+</button>
                 </div>
             </div>
 
@@ -841,31 +836,18 @@ export default function FileExplorerPanel({ lang, onOpenFile }: FileExplorerPane
                 </div>
             )}
 
+            {/* Search — compact Antigravity style */}
             {activeFolder && (
-                <div style={{ padding: '0 10px 6px', flexShrink: 0, display: 'grid', gap: 6 }}>
-                    <div style={{
-                        padding: '8px 10px',
-                        borderRadius: 8,
-                        background: activeFolder === outputDir ? 'rgba(79,143,255,0.08)' : 'rgba(255,255,255,0.04)',
-                        border: `1px solid ${activeFolder === outputDir ? 'rgba(79,143,255,0.18)' : 'rgba(255,255,255,0.08)'}`,
-                    }}>
-                        <div style={{ fontSize: 9, fontWeight: 700, color: activeFolder === outputDir ? '#4f8fff' : 'var(--text2)', marginBottom: 3 }}>
-                            {activeEntry?.kind === 'runtime_output'
-                                ? t('This is the real live builder output folder', '这里就是 builder 当前真实写入的输出目录')
-                                : activeEntry?.kind === 'artifact_sync'
-                                    ? t('This folder mirrors the latest valid builder output in real time', '这里会实时接收 builder 最新有效产物，不需要手动同步')
-                                    : t('Custom folder', '自定义文件夹')}
-                        </div>
-                        <div style={{ fontSize: 8, color: 'var(--text4)', lineHeight: 1.5, wordBreak: 'break-all' }}>
-                            {activeFolder}
-                        </div>
-                    </div>
-
+                <div style={{ padding: '4px 8px', borderBottom: '1px solid #21262d', flexShrink: 0 }}>
                     <input
                         value={search}
                         onChange={(e) => setSearch(e.target.value)}
                         placeholder={t('Search files...', '搜索文件...')}
-                        className="w-full bg-white/5 border border-white/10 rounded-md px-3 py-1.5 text-[10px] text-[var(--text1)] placeholder:text-[var(--text3)] focus:outline-none focus:border-[var(--blue)] transition-colors"
+                        style={{
+                            width: '100%', padding: '4px 8px', fontSize: 11,
+                            background: 'rgba(255,255,255,0.04)', border: '1px solid #30363d',
+                            borderRadius: 4, color: '#e6edf3', outline: 'none',
+                        }}
                     />
                 </div>
             )}
