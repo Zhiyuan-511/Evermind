@@ -25411,17 +25411,45 @@ class Orchestrator:
                         else:
                             _root_complete = False
                         # Find secondary builder dirs that have only support files
+                        # v7.7: when peer builder ignores focus_map and writes its own
+                        # index.html (LLM compliance issue — observed Round 8 PvZ pro
+                        # builder2 wrote task_7/index.html instead of module_b2.js),
+                        # the previous logic treated this as "non-support content" and
+                        # bailed to LLM merge (10-15 min). Now: if primary index.html
+                        # is already a complete shippable artifact AND the secondary's
+                        # HTML is smaller (clear "loser" of the merge), atomically
+                        # rename it out of the consideration scope so fast path can
+                        # still trigger. The renamed file is preserved as `_secondary_<name>.html.bak`
+                        # for forensic inspection but no longer blocks SKIP-LLM.
+                        _primary_size = _root_idx.stat().st_size if _root_complete else 0
                         _secondaries_support_only = True
                         _support_files: List[str] = []
                         for _sec_info in _survey or []:
                             _sec_dir = OUTPUT_DIR / str(_sec_info.get("dir") or "")
                             if not _sec_dir.is_dir() or _sec_dir == _primary:
                                 continue
-                            for _sf in _sec_dir.iterdir():
+                            for _sf in list(_sec_dir.iterdir()):
                                 if _sf.is_file() and not _sf.name.startswith("."):
                                     if _sf.suffix.lower() == ".html":
-                                        _secondaries_support_only = False
-                                        break
+                                        _sf_size = _sf.stat().st_size
+                                        # Reclassify when primary is the clear winner
+                                        if _root_complete and _primary_size >= max(_sf_size, 30_000):
+                                            try:
+                                                _bak = _sf.with_name(f"_secondary_{_sf.name}.bak")
+                                                _sf.rename(_bak)
+                                                logger.info(
+                                                    "[v7.7] Secondary %s/%s (%dB) renamed → %s; "
+                                                    "primary at root is %dB, fast path can proceed",
+                                                    _sec_dir.name, _sf.name, _sf_size, _bak.name, _primary_size,
+                                                )
+                                                continue  # treat as removed from this iteration
+                                            except Exception as _ren_err:
+                                                logger.debug("[v7.7] rename secondary html failed: %s", _ren_err)
+                                                _secondaries_support_only = False
+                                                break
+                                        else:
+                                            _secondaries_support_only = False
+                                            break
                                     if _sf.suffix.lower() in (".js", ".css", ".json"):
                                         # copy it to root + record for auto-wire
                                         _dst = OUTPUT_DIR / _sf.name
