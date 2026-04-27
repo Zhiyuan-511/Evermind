@@ -149,7 +149,7 @@ export interface UseChatHistoryReturn {
     workflowName: string;
     addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: ChatMessage['completionData'], attachments?: ChatAttachment[]) => void;
     handleCreateSession: () => void;
-    handleSelectSession: (sessionId: string) => void;
+    handleSelectSession: (sessionId: string, fallbackTitle?: string) => void;
     handleDeleteSession: (sessionId: string) => void;
     handleRenameSession: (sessionId: string, title: string) => void;
     handleWorkflowNameChange: (name: string) => void;
@@ -313,16 +313,38 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
         setWorkflowName(newSession.title);
     }, [lang]);
 
-    const handleSelectSession = useCallback((sessionId: string) => {
+    const handleSelectSession = useCallback((sessionId: string, fallbackTitle?: string) => {
         const session = historySessions.find((s) => s.id === sessionId);
-        if (!session) return;
-        setActiveSessionId(session.id);
-        setMessages(session.messages || []);
-        setWorkflowName(session.title || workflowName);
-        setHistorySessions((prev) => prev.map((item) => (
-            item.id === session.id ? { ...item, updatedAt: Date.now() } : item
-        )).sort((a, b) => b.updatedAt - a.updatedAt));
-    }, [historySessions, workflowName]);
+        if (session) {
+            setActiveSessionId(session.id);
+            setMessages(session.messages || []);
+            setWorkflowName(session.title || workflowName);
+            setHistorySessions((prev) => prev.map((item) => (
+                item.id === session.id ? { ...item, updatedAt: Date.now() } : item
+            )).sort((a, b) => b.updatedAt - a.updatedAt));
+            return;
+        }
+        // v7.6: session id came from a backend task whose chat history doesn't
+        // live in this browser (e.g. agent-created task, fresh install,
+        // localStorage cleared, or task created in another window). Was:
+        // silent return → chat panel kept showing previous active session,
+        // making it look like the user clicked task A but saw task B's chat.
+        // Now: synthesize a placeholder session bound to the requested ID
+        // so future messages stay scoped to it and re-clicking the task is
+        // reproducible.
+        const ts = Date.now();
+        const placeholder: ChatHistorySession = {
+            id: sessionId,
+            title: (fallbackTitle || defaultSessionTitle(lang)).slice(0, 80),
+            createdAt: ts,
+            updatedAt: ts,
+            messages: [],
+        };
+        setHistorySessions((prev) => [placeholder, ...prev.filter((s) => s.id !== sessionId)].slice(0, MAX_HISTORY_SESSIONS));
+        setActiveSessionId(sessionId);
+        setMessages([]);
+        setWorkflowName(placeholder.title);
+    }, [historySessions, workflowName, lang]);
 
     const handleDeleteSession = useCallback((sessionId: string) => {
         let nextActiveId = activeSessionId;

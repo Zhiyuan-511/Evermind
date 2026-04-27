@@ -493,35 +493,50 @@ function EditorPageInner() {
         }
     }, [preferredTaskForHydration?.id, runtimeConnected, selectTask, selectedTask, selectedTask?.id, selectedTask?.status]);
 
-    // v7.5: when the selected task changes, sync the chat panel to its
-    // sessionId. Was missing entirely — clicking Recent task A on launchpad
-    // changed selectedTask to A but the chat panel still displayed whatever
-    // session was last active, so the user reported "看到的是之前的旧会话".
-    // If the task has a sessionId, switch chat to it; otherwise create a new
-    // empty chat session bound to this task so the user starts clean.
+    // v7.5/v7.6: when the selected task changes, sync chat panel + canvas
+    // to that task. Was missing — clicking Recent task A on launchpad
+    // changed selectedTask to A but chat panel still showed previous
+    // active session AND canvas kept old task's nodes, so the user saw
+    // "B's chat with B's nodes" after clicking A. Two-agent audit
+    // (af4ff6edfd147ce01 + a4fae0fdf56433665) cross-validated:
+    //   1) handleSelectSession was silent no-op when sessionId not in
+    //      localStorage (fixed in useChatHistory.ts).
+    //   2) selectedRun could be left pointing at a different task's
+    //      active run via preferredRunForHydration.
+    //   3) workflow.nodes were not cleared on task switch.
+    // This effect now: (a) synthesises a stable task-bound chat session
+    // id when task has none, (b) clears canvas, (c) drops selectedRun so
+    // the next effect re-picks within THIS task only.
     const lastTaskChatSyncRef = useRef<string>('');
+    const hydrationDoneRef = useRef<string>(''); // declared early so we can reset it on task switch
     useEffect(() => {
         if (!selectedTask?.id) return;
         if (lastTaskChatSyncRef.current === selectedTask.id) return;
         lastTaskChatSyncRef.current = selectedTask.id;
-        const tsid = String((selectedTask as any).sessionId || (selectedTask as any).session_id || '').trim();
-        if (tsid) {
-            try { chat.handleSelectSession(tsid); } catch { /* ignore */ }
-        } else {
-            try { chat.handleCreateSession(); } catch { /* ignore */ }
-        }
-    }, [selectedTask, chat]);
+        const rawSid = String((selectedTask as any).sessionId || (selectedTask as any).session_id || '').trim();
+        const tsid = rawSid || `task-${selectedTask.id}`; // synthesise stable id for sessionless tasks
+        try { chat.handleSelectSession(tsid, selectedTask.title); } catch { /* ignore */ }
+        try { workflow.handleClear(); } catch { /* ignore */ } // drop prior task's canvas residue
+        hydrationDoneRef.current = ''; // allow re-hydration for the new run
+        try { selectRun(null); } catch { /* ignore */ } // force re-pick from THIS task's runs only
+    }, [selectedTask?.id, selectedTask?.title, chat, workflow, selectRun]);
 
     // Once runs are available, auto-select the active run when the current selection is stale.
+    // v7.6: never cross-task — preferred run MUST belong to the currently
+    // selected task. Previous code relied on `selectedRunMatchesTask` AFTER
+    // already deciding to swap, but if `selectedRun` was null (initial load)
+    // it would happily pick a foreign-task active run.
     useEffect(() => {
         if (!runtimeConnected) return;
+        if (!selectedTask?.id) return;
         if (!preferredRunForHydration?.id) return;
+        if (preferredRunForHydration.task_id && preferredRunForHydration.task_id !== selectedTask.id) return;
         if (selectedRun?.id === preferredRunForHydration.id) return;
-        const selectedRunMatchesTask = selectedRun?.task_id === selectedTask?.id;
+        const selectedRunMatchesTask = selectedRun?.task_id === selectedTask.id;
         if (!selectedRun || !isActiveRunStatus(selectedRun.status) || !selectedRunMatchesTask) {
             selectRun(preferredRunForHydration.id);
         }
-    }, [preferredRunForHydration?.id, runtimeConnected, selectRun, selectedRun, selectedRun?.id, selectedRun?.status, selectedRun?.task_id, selectedTask?.id]);
+    }, [preferredRunForHydration?.id, preferredRunForHydration?.task_id, runtimeConnected, selectRun, selectedRun, selectedRun?.id, selectedRun?.status, selectedRun?.task_id, selectedTask?.id]);
 
     // Re-pull node executions for the selected run after reconnect so the timeline/canvas catch up immediately.
     useEffect(() => {
@@ -533,7 +548,8 @@ function EditorPageInner() {
     // §3.1: Rebuild canvas from existing NEs ONLY when reconnecting or restoring state.
     // Skip when canvas already has agent nodes (plan_created already built them).
     // This prevents hydration from overwriting live status updates (e.g., subtask_start → running).
-    const hydrationDoneRef = useRef<string>(''); // Track which run we already hydrated
+    // v7.6: hydrationDoneRef declared earlier (line ~511) so the task-switch
+    // effect can reset it. No re-declaration here.
     useEffect(() => {
         if (!selectedRun?.id) return;
         const runId = selectedRun.id;
