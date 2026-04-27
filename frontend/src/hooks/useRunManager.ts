@@ -300,12 +300,17 @@ export function useRunManager({
             // Reset state when task scope changes
             setSelectedRunId(null);
             setNodeExecutions([]);
+            // v7.7: was leaving `runs` populated when switching from task A
+            // to task B with explicit fetch — the stale A-runs lingered until
+            // fetchRuns resolved. Combined with mergeNodeExecution's
+            // knownRunIds fallback, this leaked A's WS NE updates into B's
+            // pipeline panel ("看到的是上个 task 的事件"). Now: always clear
+            // runs synchronously on task switch; fetchRuns repopulates after.
+            setRuns([]);
             knownRunIdsRef.current.clear();
             setError(null);
             if (taskId) {
                 fetchRuns();
-            } else {
-                setRuns([]);
             }
         }
     }, [taskId, fetchRuns]);
@@ -528,9 +533,12 @@ export function useRunManager({
                 return prev;
             }
             // §FIX-1: Accept runs even when no task is selected (taskId is null).
-            // Only reject if we HAVE a selected task AND the incoming run belongs
-            // to a different task.
-            const inferredTaskId = run.task_id || taskId || '';
+            // v7.7: tightened — when taskId IS set, the incoming run must
+            // either name the same task or omit task_id (legacy events).
+            // Previous logic let cross-task runs slip in when their task_id
+            // happened to be empty/missing, which leaked A's events into B's
+            // panel after a task switch.
+            const inferredTaskId = run.task_id || '';
             if (taskId && inferredTaskId && inferredTaskId !== taskId) return prev;
             shouldAutoSelect = true;
             return sortRunsDesc([buildRunFromPatch(run, taskId), ...prev]);
@@ -546,16 +554,18 @@ export function useRunManager({
         }
     }, [taskId]);
 
-    // §FIX-3: Accept NEs for the selected run OR any known run when nothing is selected.
-    // During run_goal_ack, NEs arrive in the same tick as the run merge,
-    // before React re-renders the auto-select effects. Without this fix,
-    // all NEs are silently dropped and the canvas stays blank.
+    // §FIX-3 (v7.7 hardened): accept NEs only when the run is in the current
+    // task scope. Was using `knownRunIdsRef` as fallback when selectedRunId
+    // is null — but that ref accumulated old runs across task switches and
+    // never cleaned them, so cross-task NE updates leaked into the active
+    // pipeline panel. The current `runs` array IS task-scoped (cleared on
+    // task switch in the effect at line ~298), so use it as the truth source.
     const mergeNodeExecution = useCallback((ne: NodeExecutionMergePatch) => {
         const matchesSelected = selectedRunId && ne.run_id === selectedRunId;
-        // When no run is selected yet, accept NEs only from runs we know about
-        // (§FIX-4: uses knownRunIdsRef to prevent leaks from unrelated runs)
-        const matchesKnownRun = !selectedRunId && knownRunIdsRef.current.has(ne.run_id);
-        if (!matchesSelected && !matchesKnownRun) return;
+        // When no run is selected yet, accept NEs only from runs that are
+        // part of the current task's `runs` list (task-scoped).
+        const knownInScope = !selectedRunId && runs.some((r) => r.id === ne.run_id);
+        if (!matchesSelected && !knownInScope) return;
         setNodeExecutions((prev) => {
             const idx = prev.findIndex((n) => n.id === ne.id);
             if (idx >= 0) {
@@ -579,7 +589,7 @@ export function useRunManager({
             // New — insert in chronological order
             return sortNodeExecutionsAsc([...prev, buildNodeExecutionFromPatch(ne)]);
         });
-    }, [selectedRunId]);
+    }, [selectedRunId, runs]);
 
     return {
         runs,

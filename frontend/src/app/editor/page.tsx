@@ -518,8 +518,15 @@ function EditorPageInner() {
         try { chat.handleSelectSession(tsid, selectedTask.title); } catch { /* ignore */ }
         try { workflow.handleClear(); } catch { /* ignore */ } // drop prior task's canvas residue
         hydrationDoneRef.current = ''; // allow re-hydration for the new run
-        try { selectRun(null); } catch { /* ignore */ } // force re-pick from THIS task's runs only
-    }, [selectedTask?.id, selectedTask?.title, chat, workflow, selectRun]);
+        // v7.7: selectRun(null) was unconditional — created a deadlock when
+        // the new task already had a valid run that just hadn't propagated
+        // yet (selectedRun = null → preferredRun gate rejects → stays null
+        // forever → hydration effect never fires → canvas blank). Now: only
+        // null when current selection is from a different task.
+        if (selectedRun && selectedRun.task_id !== selectedTask.id) {
+            try { selectRun(null); } catch { /* ignore */ }
+        }
+    }, [selectedTask?.id, selectedTask?.title, chat, workflow, selectRun, selectedRun]);
 
     // Once runs are available, auto-select the active run when the current selection is stale.
     // v7.6: never cross-task — preferred run MUST belong to the currently
