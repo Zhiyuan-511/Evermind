@@ -493,6 +493,25 @@ function EditorPageInner() {
         }
     }, [preferredTaskForHydration?.id, runtimeConnected, selectTask, selectedTask, selectedTask?.id, selectedTask?.status]);
 
+    // v7.5: when the selected task changes, sync the chat panel to its
+    // sessionId. Was missing entirely — clicking Recent task A on launchpad
+    // changed selectedTask to A but the chat panel still displayed whatever
+    // session was last active, so the user reported "看到的是之前的旧会话".
+    // If the task has a sessionId, switch chat to it; otherwise create a new
+    // empty chat session bound to this task so the user starts clean.
+    const lastTaskChatSyncRef = useRef<string>('');
+    useEffect(() => {
+        if (!selectedTask?.id) return;
+        if (lastTaskChatSyncRef.current === selectedTask.id) return;
+        lastTaskChatSyncRef.current = selectedTask.id;
+        const tsid = String((selectedTask as any).sessionId || (selectedTask as any).session_id || '').trim();
+        if (tsid) {
+            try { chat.handleSelectSession(tsid); } catch { /* ignore */ }
+        } else {
+            try { chat.handleCreateSession(); } catch { /* ignore */ }
+        }
+    }, [selectedTask, chat]);
+
     // Once runs are available, auto-select the active run when the current selection is stale.
     useEffect(() => {
         if (!runtimeConnected) return;
