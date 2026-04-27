@@ -475,9 +475,17 @@ function EditorPageInner() {
         void fetchRuns();
     }, [fetchRuns, runtimeConnected, selectedTask?.id]);
 
+    // v7.5: when launchpad navigates here with ?task=<id>, that user choice
+    // wins over the auto-refocus heuristic. Without this guard, clicking a
+    // Recent task whose status was `done`/`failed`/`cancelled` got immediately
+    // replaced by `preferredTaskForHydration` (the most active task) — user
+    // saw "I clicked task A but the editor opened task B".
+    const urlTaskOverrideRef = useRef<string | null>(null);
+
     // If the current selection is stale or inactive after reconnect, refocus the most active task.
     useEffect(() => {
         if (!runtimeConnected) return;
+        if (urlTaskOverrideRef.current) return; // URL choice locks selection until user navigates again
         if (!preferredTaskForHydration?.id) return;
         if (selectedTask?.id === preferredTaskForHydration.id) return;
         if (!selectedTask || !isHydratableTaskStatus(selectedTask.status)) {
@@ -511,7 +519,21 @@ function EditorPageInner() {
         if (!selectedRun?.id) return;
         const runId = selectedRun.id;
         const runStatus = String(selectedRun.status || '').trim().toLowerCase();
-        if (!HYDRATION_ACTIVE_STATUSES.has(runStatus)) return; // Skip terminal runs
+        // v7.5: was `if (!HYDRATION_ACTIVE_STATUSES.has(runStatus)) return;` —
+        // that meant clicking a Recent task whose run was `done`/`failed`/
+        // `cancelled` left the canvas empty (or with the default planner
+        // node), so the user couldn't see what nodes ran or their results.
+        // Now we also hydrate terminal runs IF the canvas has no agent
+        // nodes linked to this run yet — purely for read-only display.
+        const isTerminal = !HYDRATION_ACTIVE_STATUSES.has(runStatus);
+        if (isTerminal) {
+            const linked = workflowNodes.some(
+                (n) => n.type === 'agent' && nodeExecutions.some(
+                    (ne) => ne.run_id === runId && String(ne.id || '').trim() === String(n.data?.nodeExecutionId || '').trim()
+                )
+            );
+            if (linked) return; // already showing this run, leave it alone
+        }
 
         // If we already hydrated this run, don't rebuild — live events handle updates
         if (hydrationDoneRef.current === runId) return;
@@ -688,8 +710,11 @@ function EditorPageInner() {
         // v7.5: also honour `?task=<id>` so launchpad → Recent → editor
         // actually opens that task's run/canvas (was: param ignored, editor
         // showed an empty canvas regardless of which Recent item was clicked).
+        // urlTaskOverrideRef locks the selection so the auto-refocus effect
+        // doesn't immediately replace it with `preferredTaskForHydration`.
         const taskParam = (params.get('task') || '').trim();
         if (taskParam) {
+            urlTaskOverrideRef.current = taskParam;
             try { selectTask(taskParam); } catch { /* selectTask hydrates async */ }
         }
         // Strip the param from the URL so refreshing the page doesn't
