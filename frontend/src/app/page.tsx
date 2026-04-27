@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 const API_BASE =
     typeof window !== 'undefined' && (window as any).__EVERMIND_API_BASE__
@@ -61,56 +61,111 @@ export default function Home() {
     const [loaded, setLoaded] = useState(false);
     const [showAll, setShowAll] = useState(false);
 
+    // v7.4.3: extracted fetch so it can be re-invoked on window focus,
+    // 15-s background poll, and on WS task_created/run_created events.
+    // Was: empty-dep useEffect that fetched ONCE on mount, so any task
+    // created via API / WS / chat / external window was invisible until
+    // the user manually left and re-entered launchpad.
+    const fetchRecent = useCallback(async (signal?: AbortSignal) => {
+        try {
+            const r = await fetch(`${API_BASE}/api/tasks?limit=20`, { signal });
+            if (!r.ok) return;
+            const j = await r.json();
+            const list: any[] = Array.isArray(j?.tasks) ? j.tasks : Array.isArray(j) ? j : [];
+            const mapped: RecentTask[] = list
+                .map((t) => ({
+                    id: String(t?.id || ''),
+                    title: String(t?.title || t?.description || '(untitled)').slice(0, 80),
+                    description: String(t?.description || '').slice(0, 200),
+                    status: String(t?.status || ''),
+                    updatedAt: Number(t?.updatedAt || t?.updated_at || 0),
+                    runIds: Array.isArray(t?.runIds) ? t.runIds : t?.run_ids,
+                }))
+                .filter((t) => t.id && t.title)
+                .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+            setRecent((prev) => {
+                // Preserve existing fileCount values when the same task is
+                // refetched, so the chip doesn't flicker to 0 between polls.
+                const fcMap = new Map(prev.map((t) => [t.id, t.fileCount]));
+                return mapped.map((t) => fcMap.has(t.id) ? { ...t, fileCount: fcMap.get(t.id) } : t);
+            });
+            // Best-effort enrich top 8 with workspace file count
+            Promise.allSettled(
+                mapped.slice(0, 8).map(async (t) => {
+                    try {
+                        const wr = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(t.id)}/workspace`, { signal });
+                        if (!wr.ok) return null;
+                        const wj = await wr.json();
+                        return { id: t.id, fc: Number(wj?.stats?.file_count || 0) };
+                    } catch { return null; }
+                }),
+            ).then((results) => {
+                const fcMap = new Map<string, number>();
+                for (const res of results) {
+                    if (res.status === 'fulfilled' && res.value) {
+                        fcMap.set(res.value.id, res.value.fc);
+                    }
+                }
+                if (fcMap.size > 0) {
+                    setRecent((prev) =>
+                        prev.map((t) => (fcMap.has(t.id) ? { ...t, fileCount: fcMap.get(t.id)! } : t)),
+                    );
+                }
+            }).catch(() => { /* ignore */ });
+        } catch { /* offline backend ok */ }
+    }, []);
+
     useEffect(() => {
         const ctrl = new AbortController();
         (async () => {
             try {
-                const r = await fetch(`${API_BASE}/api/tasks?limit=20`, { signal: ctrl.signal });
-                if (!r.ok) { setLoaded(true); return; }
-                const j = await r.json();
-                const list: any[] = Array.isArray(j?.tasks) ? j.tasks : Array.isArray(j) ? j : [];
-                const mapped: RecentTask[] = list
-                    .map((t) => ({
-                        id: String(t?.id || ''),
-                        title: String(t?.title || t?.description || '(untitled)').slice(0, 80),
-                        description: String(t?.description || '').slice(0, 200),
-                        status: String(t?.status || ''),
-                        updatedAt: Number(t?.updatedAt || t?.updated_at || 0),
-                        runIds: Array.isArray(t?.runIds) ? t.runIds : t?.run_ids,
-                    }))
-                    .filter((t) => t.id && t.title)
-                    .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-                setRecent(mapped);
-                // v7.3: enrich top 8 visible tasks with workspace file count
-                // (best-effort, ignore failures so launchpad still loads).
-                Promise.allSettled(
-                    mapped.slice(0, 8).map(async (t) => {
-                        try {
-                            const wr = await fetch(`${API_BASE}/api/tasks/${encodeURIComponent(t.id)}/workspace`, { signal: ctrl.signal });
-                            if (!wr.ok) return null;
-                            const wj = await wr.json();
-                            const fc = Number(wj?.stats?.file_count || 0);
-                            return { id: t.id, fc };
-                        } catch { return null; }
-                    }),
-                ).then((results) => {
-                    const fcMap = new Map<string, number>();
-                    for (const res of results) {
-                        if (res.status === 'fulfilled' && res.value) {
-                            fcMap.set(res.value.id, res.value.fc);
-                        }
-                    }
-                    if (fcMap.size > 0) {
-                        setRecent((prev) =>
-                            prev.map((t) => (fcMap.has(t.id) ? { ...t, fileCount: fcMap.get(t.id)! } : t)),
-                        );
-                    }
-                }).catch(() => { /* ignore */ });
-            } catch { /* offline backend ok */ }
-            finally { setLoaded(true); }
+                await fetchRecent(ctrl.signal);
+            } finally {
+                setLoaded(true);
+            }
         })();
-        return () => ctrl.abort();
-    }, []);
+
+        // Refetch when window/tab regains focus
+        const onFocus = () => { fetchRecent(); };
+        window.addEventListener('focus', onFocus);
+        const onVisibility = () => { if (document.visibilityState === 'visible') fetchRecent(); };
+        document.addEventListener('visibilitychange', onVisibility);
+
+        // Background poll every 15s while page is visible (the launchpad
+        // isn't expensive — task list is bounded to 20 items).
+        const pollId = window.setInterval(() => {
+            if (document.visibilityState === 'visible') fetchRecent();
+        }, 15000);
+
+        // Subscribe to backend WS events so a task created by chat/API/another
+        // window appears immediately. We open a lightweight read-only socket
+        // here rather than reusing the editor's runtime hook (launchpad ships
+        // before the editor scope is created).
+        let ws: WebSocket | null = null;
+        try {
+            const wsUrl = (typeof window !== 'undefined' && (window as any).__EVERMIND_WS_URL__)
+                ? (window as any).__EVERMIND_WS_URL__
+                : `ws://${window.location.hostname || '127.0.0.1'}:8765/ws`;
+            ws = new WebSocket(wsUrl);
+            ws.onmessage = (ev) => {
+                try {
+                    const data = JSON.parse(ev.data);
+                    const t = data?.type;
+                    if (t === 'task_created' || t === 'run_created' || t === 'task_updated' || t === 'run_status') {
+                        fetchRecent();
+                    }
+                } catch { /* ignore */ }
+            };
+        } catch { /* ws optional */ }
+
+        return () => {
+            ctrl.abort();
+            window.removeEventListener('focus', onFocus);
+            document.removeEventListener('visibilitychange', onVisibility);
+            window.clearInterval(pollId);
+            if (ws) { try { ws.close(); } catch { /* ignore */ } }
+        };
+    }, [fetchRecent]);
 
     const visible = showAll ? recent : recent.slice(0, 5);
 
