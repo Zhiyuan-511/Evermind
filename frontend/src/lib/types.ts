@@ -120,6 +120,11 @@ export interface ChatMessage {
     timestamp: string;
     borderColor?: string;
     attachments?: ChatAttachment[];
+    /** v7.7: session this message belongs to. Tagged at creation by
+     *  addMessage so the sync-to-history effect can refuse to persist a
+     *  message into the wrong session (cross-task contamination). Optional
+     *  for backwards compatibility with messages persisted before tagging. */
+    sessionId?: string;
     /** Structured completion data for RunCompletionCard (P2-3) */
     completionData?: {
         success: boolean;

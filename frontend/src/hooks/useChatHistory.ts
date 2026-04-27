@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ChatAttachment, ChatMessage, ChatHistorySession } from '@/lib/types';
 import { normalizeChatAttachment } from '@/lib/chatAttachments';
 
@@ -234,7 +234,17 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
         setHistorySessions((prev) => {
             let changed = false;
             const nowTs = Date.now();
-            const normalizedMessages = messages.slice(-MAX_MESSAGES_PER_SESSION);
+            // v7.7: filter out messages whose sessionId doesn't match the
+            // active session. Was unconditionally writing the entire
+            // `messages` array — when handleSelectSession switched the
+            // active session, any in-flight WS events (still tagged with
+            // the OLD session via stale closure) got persisted into the
+            // NEW session's storage, permanently polluting it. Tagged
+            // messages now refuse the wrong session; legacy untagged
+            // messages still pass through (backwards compat).
+            const normalizedMessages = messages
+                .filter((m) => !m.sessionId || m.sessionId === activeSessionId)
+                .slice(-MAX_MESSAGES_PER_SESSION);
             const updated = prev.map((session) => {
                 if (session.id !== activeSessionId) return session;
                 const sameMessages =
@@ -257,6 +267,12 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
         });
     }, [activeSessionId, lang, messages]);
 
+    // v7.7: ref the active session ID so addMessage can tag every new
+    // message with its CURRENT owner — even when WS callbacks fire from
+    // a stale closure that captured the previous activeSessionId.
+    const activeSessionIdRef = useRef<string>('');
+    useEffect(() => { activeSessionIdRef.current = activeSessionId || ''; }, [activeSessionId]);
+
     // ── Add message ──
     const addMessage = useCallback((
         role: 'user' | 'system' | 'agent',
@@ -275,6 +291,10 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
             timestamp: now(),
             completionData,
             attachments: attachments && attachments.length > 0 ? attachments : undefined,
+            // v7.7: tag with current session at creation time. Sync effect
+            // uses this to refuse persisting messages into the wrong session
+            // when activeSessionId changes mid-flight.
+            sessionId: activeSessionIdRef.current,
         };
         // §FIX: Apply separate caps for console logs vs visible messages
         // to prevent heartbeat log flooding from evicting milestone messages.
