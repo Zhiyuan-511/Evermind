@@ -8002,6 +8002,27 @@ class Orchestrator:
         except Exception:
             pass
 
+    def _resolve_user_familiar_max_retries(self) -> int:
+        """v7.7: read user's `max_retries` setting as the canonical retry budget.
+        Used as fallback when reviewer_max_rejections is unset, since users
+        commonly think of "max retries" as covering reviewer rejection rounds too.
+        """
+        cfg = getattr(self.ai_bridge, "config", None)
+        if isinstance(cfg, dict):
+            try:
+                raw = cfg.get("max_retries")
+                if raw is not None:
+                    return max(1, min(int(raw), 8))
+            except Exception:
+                pass
+        try:
+            raw = os.getenv("EVERMIND_MAX_RETRIES")
+            if raw:
+                return max(1, min(int(raw), 8))
+        except Exception:
+            pass
+        return 3
+
     def _configured_max_reviewer_rejections(self) -> int:
         """Max times reviewer can reject builder and trigger re-run.
 
@@ -8037,8 +8058,13 @@ class Orchestrator:
                     _ultra_rej = 5
                 default = str(max(1, min(_ultra_rej, 10)))
             else:
-                # v6.7 TIGHT SINGLE-LOOP CLOSURE for non-ultra modes.
-                default = "1"
+                # v7.7 (maintainer 2026-04-27): users commonly conflate
+                # "Max Retries" (the visible Settings control) with the
+                # reviewer reject budget. Honor that mental model — let
+                # max_retries be the default ceiling for reviewer
+                # rejections too. Users who explicitly set
+                # reviewer_max_rejections in cfg / env override this.
+                default = str(self._resolve_user_familiar_max_retries())
             raw = os.getenv("EVERMIND_REVIEWER_MAX_REJECTIONS", default)
         try:
             # v7.1 extend cap 5→10 for ultra long-task runs

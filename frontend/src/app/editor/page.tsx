@@ -358,11 +358,19 @@ function EditorPageInner() {
         return count > 0 ? count : (isRouterWarmup ? 1 : 0);
     }, [activeRun, activeRunNodeExecutions, isRouterWarmup, selectedRun]);
     const summaryCompletedNodes = useMemo(() => {
-        if (!activeRun || selectedRun?.id !== activeRun.id) return 0;
+        // v7.7: was gated on `selectedRun?.id === activeRun.id` — that gate
+        // returned 0 whenever the user toggled tasks or React state lagged
+        // (selectedRun mid-update, autoPoll re-fetch). The pipeline header
+        // showed "0/12" even when 8 NEs were already passed in store.
+        // Now we count terminal NEs against the active run regardless of
+        // whether selectedRun has caught up — `nodeExecutions` is already
+        // task-scoped (cleared on task switch by useRunManager), so this
+        // never bleeds across tasks.
+        if (!activeRun) return 0;
         return nodeExecutions.filter((node) =>
             node.run_id === activeRun.id && TERMINAL_NE_STATUSES.has(String(node.status || '').trim().toLowerCase())
         ).length;
-    }, [activeRun, nodeExecutions, selectedRun]);
+    }, [activeRun, nodeExecutions]);
     const summaryTotalNodes = activeRun?.node_execution_ids?.length
         || (activeRun ? nodeExecutions.filter(ne => ne.run_id === activeRun.id).length : 0);
 
