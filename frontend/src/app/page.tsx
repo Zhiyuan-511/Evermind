@@ -59,7 +59,11 @@ function statusTone(status: string): { color: string; label: string } {
 export default function Home() {
     const [recent, setRecent] = useState<RecentTask[]>([]);
     const [loaded, setLoaded] = useState(false);
-    const [showAll, setShowAll] = useState(false);
+    // v7.7: default true so all tasks (16+) are visible immediately when the
+    // user has many. Was false → only first 5 shown, "Show more" button
+    // existed but the parent had `overflow: 'hidden'` so even after expand
+    // the additional rows fell off-screen and the user couldn't reach them.
+    const [showAll, setShowAll] = useState(true);
 
     // v7.4.3: extracted fetch so it can be re-invoked on window focus,
     // 15-s background poll, and on WS task_created/run_created events.
@@ -172,15 +176,33 @@ export default function Home() {
     return (
         <div
             style={{
-                minHeight: '100vh',
+                height: '100vh',
                 background: C.bg,
                 color: C.primary,
                 fontFamily: '-apple-system, "SF Pro Display", "PingFang SC", "Inter", system-ui, sans-serif',
                 fontFeatureSettings: '"ss01", "cv01", "cv11"',
                 position: 'relative',
-                overflow: 'hidden',
+                overflowY: 'auto', // v7.7: was 'hidden' — clipped Recent list past 5 items
+                overflowX: 'hidden',
             }}
         >
+            {/* v7.7: macOS title-bar drag region. main.js sets
+                titleBarStyle:'hiddenInset' so only a thin strip is draggable
+                by default. Add a sticky 36px transparent zone covering the
+                whole top so users can move the window from anywhere up there. */}
+            <div
+                aria-hidden
+                style={{
+                    position: 'sticky',
+                    top: 0,
+                    height: 36,
+                    width: '100%',
+                    zIndex: 50,
+                    pointerEvents: 'none',
+                    // @ts-expect-error vendor CSS prop
+                    WebkitAppRegion: 'drag',
+                }}
+            />
             {/* Atmosphere */}
             <div aria-hidden style={{
                 position: 'absolute', width: 640, height: 640,

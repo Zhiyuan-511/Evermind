@@ -93,6 +93,12 @@
                     "runtime_vendor/**",
                     "requirements.txt",
                     ".env.example",
+                    "!.env",
+                    "!**/.env",
+                    "!**/.env.local",
+                    "!**/.env.*.local",
+                    "!**/secrets.json",
+                    "!**/credentials.json",
                     "plugins/**",
                     "prompt_templates/**/*.yaml",
                     "prompt_templates/**/*.yml"

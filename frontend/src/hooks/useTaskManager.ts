@@ -112,10 +112,20 @@ export function useTaskManager(): UseTaskManagerReturn {
     }, [tasks, selectedTaskId]);
 
     useEffect(() => {
+        // v7.7: was clearing selectedTaskId whenever it wasn't found in tasks
+        // — but `tasks` starts empty before fetchTasks resolves. URL handler
+        // calls selectTask(X) on mount; this validate effect saw tasks=[]
+        // and immediately reset selectedTaskId to null, breaking the entire
+        // task→run→canvas hydration chain. Now: only validate AFTER first
+        // fetch settles AND tasks is non-empty (don't clear during empty
+        // states — the placeholder is harmless and the URL handler will
+        // re-set if needed).
+        if (loading) return;
+        if (tasks.length === 0) return;
         if (selectedTaskId && !tasks.some((task) => task.id === selectedTaskId)) {
             setSelectedTaskId(null);
         }
-    }, [selectedTaskId, tasks]);
+    }, [selectedTaskId, tasks, loading]);
 
     const tasksByStatus = useCallback(
         (status: TaskStatus): TaskCard[] =>

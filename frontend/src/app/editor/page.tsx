@@ -1,5 +1,6 @@
 'use client';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useSearchParams } from 'next/navigation';
 import {
     ReactFlow, MiniMap, Controls, Background, BackgroundVariant,
     type Node,
@@ -743,39 +744,37 @@ function EditorPageInner() {
     }, []);
     const [templatesOpen, setTemplatesOpen] = useState(false);
 
-    // v7.2 (maintainer 2026-04-26): respond to ?panel= URL param so launchpad
-    // links can deep-link straight into Templates / GitHub / Settings panels
-    // instead of dropping users on a bare canvas.
+    // v7.7: was empty-deps useEffect that read window.location.search ONCE
+    // on mount + then `replaceState` to strip the param. Result: clicking
+    // task A from launchpad → editor mounted, URL=?task=A, effect fired
+    // selectTask(A). Then user goes back, clicks task B → editor route is
+    // SAME segment in App Router, NO remount. URL becomes ?task=B but the
+    // mount-only effect never re-runs, AND we already stripped ?task= last
+    // time, so even on remount the URL is bare. selectTask(B) never called.
+    // Now use Next's useSearchParams() so the effect tracks live URL state
+    // and re-fires on every navigation. Don't strip the param — let the URL
+    // stay authoritative; multiple clicks on the same task become idempotent
+    // via lastTaskParamRef.
+    const searchParams = useSearchParams();
+    const taskParam = (searchParams?.get('task') || '').trim();
+    const panelParam = (searchParams?.get('panel') || '').toLowerCase().trim();
+    const lastPanelOpenedRef = useRef<string>('');
     useEffect(() => {
-        if (typeof window === 'undefined') return;
-        const params = new URLSearchParams(window.location.search);
-        const panel = (params.get('panel') || '').toLowerCase().trim();
-        if (panel === 'templates') {
-            setTemplatesOpen(true);
-        } else if (panel === 'github' || panel === 'clone') {
-            setGithubOpen(true);
-        } else if (panel === 'settings') {
-            setSettingsOpen(true);
+        if (panelParam && lastPanelOpenedRef.current !== panelParam) {
+            lastPanelOpenedRef.current = panelParam;
+            if (panelParam === 'templates') setTemplatesOpen(true);
+            else if (panelParam === 'github' || panelParam === 'clone') setGithubOpen(true);
+            else if (panelParam === 'settings') setSettingsOpen(true);
         }
-        // v7.5: also honour `?task=<id>` so launchpad → Recent → editor
-        // actually opens that task's run/canvas (was: param ignored, editor
-        // showed an empty canvas regardless of which Recent item was clicked).
-        // urlTaskOverrideRef locks the selection so the auto-refocus effect
-        // doesn't immediately replace it with `preferredTaskForHydration`.
-        const taskParam = (params.get('task') || '').trim();
-        if (taskParam) {
-            urlTaskOverrideRef.current = taskParam;
-            try { selectTask(taskParam); } catch { /* selectTask hydrates async */ }
-        }
-        // Strip the param from the URL so refreshing the page doesn't
-        // re-open the modal indefinitely.
-        if (panel || taskParam) {
-            const url = new URL(window.location.href);
-            url.searchParams.delete('panel');
-            url.searchParams.delete('task');
-            window.history.replaceState({}, '', url.toString());
-        }
-    }, []);
+    }, [panelParam]);
+    const lastTaskParamRef = useRef<string>('');
+    useEffect(() => {
+        if (!taskParam) return;
+        if (lastTaskParamRef.current === taskParam) return; // idempotent
+        lastTaskParamRef.current = taskParam;
+        urlTaskOverrideRef.current = taskParam;
+        try { selectTask(taskParam); } catch { /* selectTask hydrates async */ }
+    }, [taskParam, selectTask]);
     // v7.3 (maintainer 2026-04-26) — per-task workspace banner. When the selected
     // task has zero files in its isolated workspace, show a non-blocking
     // banner inviting the user to add input files. Uses sessionStorage to
