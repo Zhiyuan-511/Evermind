@@ -58,12 +58,7 @@
             "gatekeeperAssess": false,
             "identity": null,
             "extendInfo": {
-                "NSDesktopFolderUsageDescription": "Evermind saves exported workflow outputs and previews to the Desktop.",
-                "NSDocumentsFolderUsageDescription": "Evermind reads project assets referenced by your prompts and writes generated results to Documents.",
-                "NSDownloadsFolderUsageDescription": "Evermind exports packaged builds to the Downloads folder.",
-                "NSAppleEventsUsageDescription": "Evermind uses AppleScript to launch the browser preview after a run completes.",
-                "NSNetworkVolumesUsageDescription": "Evermind reads and writes project workspaces on network volumes you select.",
-                "NSRemovableVolumesUsageDescription": "Evermind reads and writes project workspaces on external drives you select.",
+                "NSAppleEventsUsageDescription": "Evermind uses AppleScript only to open the preview URL in your default browser after a run completes.",
                 "LSEnvironment": {
                     "EVERMIND_TCC_BUNDLE": "1"
                 }

@@ -5606,13 +5606,10 @@ async def signing_status():
     except Exception:
         pass
     out["can_apply"] = out["stable_identity_installed"]
-    app_path = os.path.expanduser("~/Desktop/Evermind.app")
-    if os.path.exists(app_path):
-        try:
-            r = _sp.run(["codesign", "-dvv", app_path], capture_output=True, text=True, timeout=5)
-            out["current_app_signature"] = (r.stderr or r.stdout)[-400:]
-        except Exception:
-            pass
+    # v7.7: was eagerly probing ~/Desktop/Evermind.app + /Applications/Evermind.app
+    # which triggered macOS App Management TCC prompt at every endpoint call.
+    # Now: only probe when caller explicitly opts in via ?probe_apps=1. The
+    # status endpoint without that flag stays in the "no TCC dialog" zone.
     return out
 
 
