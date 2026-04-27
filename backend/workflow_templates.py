@@ -352,7 +352,18 @@ def pro_template_profile(goal: str = "") -> Dict[str, Any]:
     large_multi_page_website = task_type == "website" and multi_page and page_count >= 6
 
     if needs_uidesign and needs_scribe:
-        parallel_builders = large_multi_page_website
+        # v7.6: was `parallel_builders = large_multi_page_website` only —
+        # which forced dashboard / SaaS / complex creative tasks (which all
+        # trigger uidesign+scribe) into SEQUENTIAL builders, doubling pro
+        # mode wall time. Round 4 PvZ-dashboard sat 28 min on builder1
+        # while builder2 was queued. Now: any task with significant
+        # architecture complexity (dashboard/presentation/creative) also
+        # gets parallel builders. Single-page sites without complex arch
+        # remain serial (no benefit from 2 builders on a tiny brief).
+        parallel_builders = (
+            large_multi_page_website
+            or (architecture_complex and task_type in {"dashboard", "presentation", "creative", "game"})
+        )
         return {
             "node_count": (
                 12 if include_polisher else 11

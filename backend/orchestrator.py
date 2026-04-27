@@ -17442,7 +17442,15 @@ class Orchestrator:
                 "browser-native (no `require`/`module.exports`)."
             )
             return focus_map
-        if profile.task_type != "website" and builder_count >= 3:
+        # v7.6: was `if profile.task_type != "website" and builder_count >= 3` —
+        # which excluded the 2-builder pro template (the most common config).
+        # Result: pro PvZ / pro dashboard / pro game both ran builder1+builder2
+        # writing their own index.html → merger forced into LLM 3-way merge,
+        # 8-15 min stuck at 42% (Round 1 + Round 4 cancelled here). Now we
+        # apply peer-module focus to builder_count >= 2 too — builder2 writes
+        # module_b2.js, merger HARD-SKIP fast-path can use the existing
+        # auto-wire path.
+        if profile.task_type != "website" and builder_count >= 2:
             focus_map[1] = (
                 "YOUR JOB: Core-shell Builder 1. Own the first playable vertical slice in the live root artifact. "
                 "Ship the start screen, initialized scene/runtime loop, camera + input mapping, primary player controller, baseline combat/objective flow, "

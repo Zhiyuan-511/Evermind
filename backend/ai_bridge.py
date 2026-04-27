@@ -15282,18 +15282,23 @@ class AIBridge:
                 first_tool_call_at: Optional[float] = None
                 chunk_count = 0
 
-                # v5.8.6 REDESIGN: per-stream duration watchdog DISABLED by
-                # default. Was killing long-decode legit streams (model was
-                # producing chunks the whole time, but total elapsed > 180s).
-                # Philosophy: as long as chunks keep arriving (stall_timeout
-                # handles that), let the model work. Only opt in via env if
-                # you really want a hard cap on single-stream duration.
+                # v7.6: per-stream duration watchdog. Was disabled by default
+                # in v5.8.6 to prevent killing legit slow-decode streams. But
+                # in 8-round PvZ/dashboard/slides testing, 3 cancellations
+                # (Round 1, 4, 6) all came from kimi getting STUCK in a
+                # single tool_call stream for 14-28 minutes — chunks trickled
+                # in just often enough to escape `stall_timeout * 6 = 18min`.
+                # Set default to 900s (15min): if any single LLM stream call
+                # can't complete in 15 minutes, abort + force retry. Real
+                # builder code-gen on kimi-coding tops out around 5-7 min;
+                # 15 min is generous safety margin. Override via env if
+                # needed.  Applied to ALL streaming nodes, not just builder.
                 _stream_watchdog_sec = self._read_int_env(
                     "EVERMIND_STREAM_DECODE_WATCHDOG_SEC",
-                    0,   # default 0 = disabled
-                    0,
-                    1800,
-                ) if normalized_node_type in ("builder", "imagegen") else 0
+                    900,   # default 15 min (was: 0 = disabled)
+                    60,
+                    3600,
+                )
                 try:
                     stream = client.chat.completions.create(**kwargs)
                     for chunk in stream:
