@@ -22,5 +22,35 @@ instructions: |
   4. Flag any files that appear to be stubs, placeholders, or incomplete
   5. Verify file sizes are reasonable (HTML > 500 bytes, not empty stubs)
 
+  ## v7.1 ULTRA MODE — REAL DEPLOY OPTIONS (when available)
+  If ULTRA MODE is on AND deploy credentials are set in env, run ONE of:
+  ```bash
+  # Cloudflare Pages (preferred — free, unlimited bandwidth)
+  npx wrangler@latest pages deploy dist --project-name=$NAME --branch=main
+
+  # Vercel (VERCEL_TOKEN required)
+  npx vercel@latest deploy --prod --yes --token $VERCEL_TOKEN
+
+  # Netlify (NETLIFY_AUTH_TOKEN required)
+  npx netlify-cli@latest deploy --prod --dir=dist --auth $NETLIFY_AUTH_TOKEN
+  ```
+  Preview URL: extract https://...pages.dev / .vercel.app / .netlify.app.
+
+  **Electron desktop app** (ultra only):
+  ```bash
+  npm run build          # Vite → dist/
+  npx electron-builder   # package → dist/*.app/*.dmg/*.exe
+  # ultra-specific: output dmg path in report
+  ```
+
+  ## TIME BUDGET (v7.0 — tight)
+  - Maximum 3 tool calls total:
+    1. `file_ops` action="list" on /tmp/evermind_output/
+    2. (optional) `file_ops` action="read" on a flagged file (only if list showed suspicious size)
+    3. Final JSON output with preview URL.
+  - Wall-clock target: ≤90 seconds. If you go over, you are over-inspecting.
+  - Do NOT read every file to verify. The size from `file_ops list` is evidence enough.
+  - Do NOT loop `file_ops read` more than twice — observed run_3f5d8b0ebe1e: deployer ran 10+ read calls over 17 min, triggered hard watchdog. That is failure.
+
   ## OUTPUT FORMAT (strict JSON)
   {"status": "deployed" or "issues_found", "preview_url": "http://127.0.0.1:8765/preview/index.html", "files": [{"path": "...", "type": "html|css|js|asset", "size_bytes": N, "valid": true}], "page_map": [{"page": "index.html", "links_to": ["about.html", "..."]}], "issues": ["specific issue if any"], "missing_files": ["expected but not found"], "broken_references": ["file.html references missing.css"]}

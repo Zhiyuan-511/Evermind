@@ -86,7 +86,14 @@ class _FakePage:
     async def text_content(self, _selector: str):
         return "body text"
 
-    async def evaluate(self, _script: str):
+    async def evaluate(self, _script: str, *_args, **_kwargs):
+        # v6.0: AI-cursor overlay calls (scroll edge-glow, element highlight,
+        # typed-char float-up, move/click) use page.evaluate() too. They must
+        # not consume from the scroll-metrics fixture queue — filter those out
+        # so existing tests keep working after the overlay landed.
+        s = str(_script or "")
+        if "__evermindCursor" in s or "__evermindCursorInstalled" in s:
+            return True
         if self._evaluate_results:
             return self._evaluate_results.pop(0)
         return []
@@ -325,6 +332,95 @@ class TestSourceFetchPlugin(unittest.IsolatedAsyncioTestCase):
             artifact_types = [item.get("type") for item in result.artifacts]
             self.assertIn("image", artifact_types)
             self.assertIn("trace", artifact_types)
+
+
+class BrowserPluginV584SchemaTests(unittest.TestCase):
+    """v5.8.4 schema assertions — make sure new actions are discoverable."""
+
+    def setUp(self):
+        self.plugin = BrowserPlugin()
+        self.schema = self.plugin._get_parameters_schema()
+        self.actions = set(self.schema["properties"]["action"]["enum"])
+
+    def test_action_enum_includes_v584_additions(self):
+        expected = {
+            "find", "hover", "select", "upload",
+            "new_tab", "switch_tab", "close_tab",
+            "evaluate", "close_popups", "network_idle",
+        }
+        missing = expected - self.actions
+        self.assertFalse(missing, f"Missing v5.8.4 actions: {missing}")
+
+    def test_action_enum_keeps_legacy_actions(self):
+        expected = {
+            "navigate", "observe", "snapshot", "act", "click", "fill",
+            "extract", "scroll", "record_scroll", "press", "press_sequence", "wait_for",
+        }
+        missing = expected - self.actions
+        self.assertFalse(missing, f"Regressed legacy actions: {missing}")
+
+    def test_schema_exposes_v584_params(self):
+        props = self.schema["properties"]
+        for key in ("query", "case_sensitive", "files", "path", "index", "script", "max_len"):
+            self.assertIn(key, props, f"{key} param missing from schema")
+
+    def test_description_mentions_vision_grounding(self):
+        self.assertIn("vision grounding", self.plugin.description)
+        self.assertIn("numbered boxes", self.plugin.description)
+
+    def test_v585_mouse_keyboard_actions_available(self):
+        expected = {
+            "mouse_click", "mouse_move", "mouse_down", "mouse_up", "drag", "wheel",
+            "key_down", "key_up", "key_hold", "type_text",
+            "macro", "canvas_click", "screenshot_region",
+        }
+        missing = expected - self.actions
+        self.assertFalse(missing, f"Missing v5.8.5 precision actions: {missing}")
+
+    def test_v585_schema_params(self):
+        props = self.schema["properties"]
+        for key in ("button", "click_count", "from_x", "to_y", "dy", "duration_ms", "canvas", "w", "h", "macro_steps"):
+            self.assertIn(key, props, f"{key} param missing")
+
+    def test_description_mentions_virtuoso_and_cursor(self):
+        self.assertIn("Virtuoso-grade", self.plugin.description)
+        self.assertIn("mouse_click", self.plugin.description)
+        self.assertIn("canvas", self.plugin.description)
+        self.assertIn("key_hold", self.plugin.description)
+        self.assertIn("macro", self.plugin.description)
+
+    def test_cursor_overlay_enabled_by_default(self):
+        self.assertTrue(self.plugin._cursor_overlay_enabled({}))
+        self.assertFalse(self.plugin._cursor_overlay_enabled({"browser_show_ai_cursor": False}))
+        self.assertTrue(self.plugin._cursor_overlay_enabled({"browser_show_ai_cursor": True}))
+
+    def test_cursor_overlay_env_disable(self):
+        import os as _os
+        original = _os.environ.get("EVERMIND_BROWSER_SHOW_AI_CURSOR")
+        try:
+            _os.environ["EVERMIND_BROWSER_SHOW_AI_CURSOR"] = "0"
+            # Fresh plugin picks up env at resolve-time.
+            self.assertFalse(self.plugin._cursor_overlay_enabled(None))
+        finally:
+            if original is None:
+                _os.environ.pop("EVERMIND_BROWSER_SHOW_AI_CURSOR", None)
+            else:
+                _os.environ["EVERMIND_BROWSER_SHOW_AI_CURSOR"] = original
+
+    def test_annotate_screenshot_no_pil_returns_original(self):
+        # When PIL is unavailable _annotate_screenshot must fall back to the
+        # raw bytes — no crash. We simulate by temporarily blanking the globals.
+        import plugins.implementations as impl
+        original_pil = impl.PILImage
+        original_draw = impl.ImageDraw
+        try:
+            impl.PILImage = None
+            impl.ImageDraw = None
+            out = self.plugin._annotate_screenshot(b"\x89PNG", {"interactive": [{"bbox": {"x": 0, "y": 0, "w": 10, "h": 10}}]})
+            self.assertEqual(out, b"\x89PNG")
+        finally:
+            impl.PILImage = original_pil
+            impl.ImageDraw = original_draw
 
 
 if __name__ == "__main__":

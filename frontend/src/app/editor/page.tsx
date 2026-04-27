@@ -16,8 +16,10 @@ import '@/lib/monaco-env'; // Electron-compatible Monaco worker setup
 import type { OpenFile } from '@/components/CodeEditorPanel';
 import AgentNode from '@/components/AgentNode';
 import SettingsModal from '@/components/SettingsModal';
+import GitHubModal from '@/components/GitHubModal';
 import TemplateGallery from '@/components/TemplateGallery';
 import SkillsLibraryModal from '@/components/SkillsLibraryModal';
+import LessonsModal from '@/components/LessonsModal';
 import GuideModal from '@/components/GuideModal';
 import HistoryModal from '@/components/HistoryModal';
 import DiagnosticsModal from '@/components/DiagnosticsModal';
@@ -26,6 +28,7 @@ import ReportsModal from '@/components/ReportsModal';
 import NodeDetailPopup from '@/components/NodeDetailPopup';
 import PreviewCenter from '@/components/PreviewCenter';
 import OpenClawPanel from '@/components/OpenClawPanel';
+import WelcomeWizard, { shouldShowWelcomeWizard, markWelcomeWizardSeen } from '@/components/WelcomeWizard';
 import type { ConnectorEvent } from '@/components/OpenClawPanel';
 import { NODE_TYPES } from '@/lib/types';
 import { OPENCLAW_UI_ENABLED, normalizeRuntimeModeForDisplay } from '@/lib/runtimeDisplay';
@@ -175,7 +178,7 @@ function EditorPageInner() {
         } catch { return 'dark'; }
     });
     const [wsUrl, setWsUrl] = useState(process.env.NEXT_PUBLIC_WS_URL || 'ws://127.0.0.1:8765/ws');
-    const [difficulty, setDifficulty] = useState<'simple' | 'standard' | 'pro'>('standard');
+    const [difficulty, setDifficulty] = useState<'simple' | 'standard' | 'pro' | 'ultra' | 'custom'>('standard');
     const [chatMode, setChatMode] = useState<'pipeline' | 'direct'>('pipeline');
     // ── Right panel resizable width ──
     const [rightPanelWidth, setRightPanelWidth] = useState(() => {
@@ -183,8 +186,12 @@ function EditorPageInner() {
         try { return Number(window.localStorage.getItem('evermind-rpw')) || 380; } catch { return 380; }
     });
     const [resizing, setResizing] = useState(false);
-    const resizeStartX = useRef(0);
-    const resizeStartW = useRef(380);
+    // Keep the live width in a ref so the drag handler can read it without
+    // being rebuilt every time the state changes (the old behaviour caused a
+    // "must widen before narrowing" glitch because the handler closure stayed
+    // pinned to the initial width after the first mousemove re-render).
+    const rightPanelWidthRef = useRef(380);
+    useEffect(() => { rightPanelWidthRef.current = rightPanelWidth; }, [rightPanelWidth]);
     // ── File viewer state (Cursor-style IDE mode) ──
     const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
     const [activeFileIndex, setActiveFileIndex] = useState(0);
@@ -221,11 +228,11 @@ function EditorPageInner() {
     const handleResizeStart = useCallback((e: React.MouseEvent) => {
         e.preventDefault();
         setResizing(true);
-        resizeStartX.current = e.clientX;
-        resizeStartW.current = rightPanelWidth;
+        const startX = e.clientX;
+        const startW = rightPanelWidthRef.current;
         const onMove = (ev: MouseEvent) => {
-            const delta = resizeStartX.current - ev.clientX; // dragging left = wider
-            const next = Math.max(300, Math.min(700, resizeStartW.current + delta));
+            const delta = startX - ev.clientX; // dragging left = wider
+            const next = Math.max(300, Math.min(700, startW + delta));
             setRightPanelWidth(next);
         };
         const onUp = () => {
@@ -234,13 +241,13 @@ function EditorPageInner() {
             document.removeEventListener('mouseup', onUp);
             document.body.style.cursor = '';
             document.body.style.userSelect = '';
-            try { window.localStorage.setItem('evermind-rpw', String(rightPanelWidth)); } catch { /* ignore */ }
+            try { window.localStorage.setItem('evermind-rpw', String(rightPanelWidthRef.current)); } catch { /* ignore */ }
         };
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
         document.body.style.cursor = 'col-resize';
         document.body.style.userSelect = 'none';
-    }, [rightPanelWidth]);
+    }, []);
 
     // (File viewer handlers defined after runtime declaration below)
 
@@ -628,8 +635,286 @@ function EditorPageInner() {
 
     // ── Modal states ──
     const [settingsOpen, setSettingsOpen] = useState(false);
+    const [githubOpen, setGithubOpen] = useState(false);
+    // v7.1i (maintainer 2026-04-25): CLI mode toggle status — drives whether
+    // the "Ultra" difficulty button is enabled or dimmed/disabled.
+    const [cliEnabled, setCliEnabled] = useState(false);
+    useEffect(() => {
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+        const refreshCli = async () => {
+            try {
+                const r = await fetch(`${apiBase}/api/settings`, { credentials: 'omit' });
+                if (r.ok) {
+                    const d = await r.json();
+                    setCliEnabled(Boolean((d?.cli_mode || {}).enabled));
+                }
+            } catch { /* keep default false */ }
+        };
+        refreshCli();
+        // Poll every 4s so toggle from Settings reflects in <5s.
+        const id = setInterval(refreshCli, 4000);
+        return () => clearInterval(id);
+    }, [settingsOpen]);
+    // If user disables CLI mode while Ultra is selected, downgrade to Pro.
+    useEffect(() => {
+        if (!cliEnabled && difficulty === 'ultra') {
+            setDifficulty('pro');
+        }
+    }, [cliEnabled, difficulty]);
+    // v6.2 (maintainer 2026-04-20): welcome wizard shown on first run, guarded by
+    // localStorage.evermind_onboarded_v62. Skip button marks seen.
+    const [wizardOpen, setWizardOpen] = useState(false);
+    useEffect(() => {
+        if (shouldShowWelcomeWizard()) {
+            setWizardOpen(true);
+        }
+    }, []);
     const [templatesOpen, setTemplatesOpen] = useState(false);
+
+    // v7.2 (maintainer 2026-04-26): respond to ?panel= URL param so launchpad
+    // links can deep-link straight into Templates / GitHub / Settings panels
+    // instead of dropping users on a bare canvas.
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const params = new URLSearchParams(window.location.search);
+        const panel = (params.get('panel') || '').toLowerCase().trim();
+        if (panel === 'templates') {
+            setTemplatesOpen(true);
+        } else if (panel === 'github' || panel === 'clone') {
+            setGithubOpen(true);
+        } else if (panel === 'settings') {
+            setSettingsOpen(true);
+        }
+        // Strip the param from the URL so refreshing the page doesn't
+        // re-open the modal indefinitely.
+        if (panel) {
+            const url = new URL(window.location.href);
+            url.searchParams.delete('panel');
+            window.history.replaceState({}, '', url.toString());
+        }
+    }, []);
+    // v7.3 (maintainer 2026-04-26) — per-task workspace banner. When the selected
+    // task has zero files in its isolated workspace, show a non-blocking
+    // banner inviting the user to add input files. Uses sessionStorage to
+    // remember dismissals so we don't pester users on every tab return.
+    const [workspaceBanner, setWorkspaceBanner] = useState<
+        | { taskId: string; fileCount: number; path: string; dismissed: boolean }
+        | null
+    >(null);
+    useEffect(() => {
+        const tid = (selectedTask as any)?.id;
+        if (!tid || typeof window === 'undefined') {
+            setWorkspaceBanner(null);
+            return;
+        }
+        const dismissedKey = `evermind:ws-banner-dismissed:${tid}`;
+        const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+        const ctrl = new AbortController();
+        let cancelled = false;
+        const probe = async () => {
+            if (cancelled) return;
+            try {
+                // v7.3.3 (maintainer 2026-04-26) — banner detection now correctly
+                // queries both stores:
+                //   1. task-scoped: GET /api/tasks/<id>/workspace (file_count)
+                //   2. global FileExplorer: GET /api/workspace/roots → resolve
+                //      "output" root path → GET /api/workspace/tree?root=<path>
+                //      (server expects an absolute path, not the symbolic
+                //      name "output"). Earlier code passed "?root=output"
+                //      which the server tried to Path.resolve() — that
+                //      always 404'd, making the banner falsely report 0
+                //      files even when the user had already added files.
+                const [taskRes, rootsRes] = await Promise.allSettled([
+                    fetch(`${apiBase}/api/tasks/${encodeURIComponent(tid)}/workspace`, { signal: ctrl.signal }),
+                    fetch(`${apiBase}/api/workspace/roots`, { signal: ctrl.signal }),
+                ]);
+                let taskFileCount = 0;
+                let taskPath = '';
+                if (taskRes.status === 'fulfilled' && taskRes.value.ok) {
+                    const tj = await taskRes.value.json();
+                    taskFileCount = Number(tj?.stats?.file_count || 0);
+                    taskPath = String(tj?.path || '');
+                }
+                // v7.3.5 (maintainer 2026-04-26) — banner now also recognises the
+                // `artifact_sync_dir` (Delivery Folder) configured via
+                // FileExplorerPanel's "添加文件夹". Earlier code only walked
+                // `output_dir` which is the runtime build directory, NOT the
+                // user-uploaded source folder. Observed: user added
+                // `/path/to/Desktop/测试` as Delivery Folder ✅ but
+                // banner kept saying "workspace empty" because output_dir
+                // had no user files. Now: any of (a) task-scoped files,
+                // (b) artifact_sync_dir set + has files, (c) any custom
+                // user-added root in `folders[]` with files → banner hides.
+                let globalUserFileCount = 0;
+                if (rootsRes.status === 'fulfilled' && rootsRes.value.ok) {
+                    const rootsJson = await rootsRes.value.json();
+                    // Hidden underscore-prefixed dirs are always Evermind system dirs.
+                    const SYSTEM_PREFIXES = [
+                        '_evermind_runtime', '_previous_run_', '_stable_previews',
+                        '_browser_records', '_visual_regression',
+                    ];
+                    // v7.3.9 audit-fix CRITICAL — `task_` was too greedy; user
+                    // folders like `task_manager`, `task_app`, `task_tracker`
+                    // would be hidden, banner falsely sticks at 0. Match ONLY
+                    // the orchestrator's runtime shape: `task_<int>` (single
+                    // digit / small int; orchestrator uses task_1, task_5,
+                    // task_12 etc. for SubTask.id). Real user folders almost
+                    // always include letters or longer strings.
+                    const SYSTEM_TASK_RE = /^task_\d{1,4}$/;
+                    const isSystemDir = (name: string) =>
+                        SYSTEM_PREFIXES.some((p) => name.startsWith(p)) ||
+                        SYSTEM_TASK_RE.test(name);
+                    // Bounded recursion protects against pathological cyclic JSON.
+                    const walk = (nodes: any[], depth: number = 0): number => {
+                        if (depth > 20) return 0;
+                        let n = 0;
+                        for (const node of (nodes || [])) {
+                            const name = String(node?.name || '');
+                            if (isSystemDir(name)) continue;
+                            if (node?.type === 'file' || node?.kind === 'file') n += 1;
+                            else if (Array.isArray(node?.children)) n += walk(node.children, depth + 1);
+                        }
+                        return n;
+                    };
+                    // Build the union of paths to probe: output_dir + every
+                    // entry in folders[]. Skip system-controlled `runtime_output`
+                    // because those auto-populate during a run and would
+                    // false-trigger the banner once a run starts.
+                    const pathsToProbe: { path: string; alwaysCount: boolean }[] = [];
+                    const outputPath = String(rootsJson?.output_dir || rootsJson?.output || '').trim();
+                    if (outputPath) pathsToProbe.push({ path: outputPath, alwaysCount: false });
+                    const folders: any[] = Array.isArray(rootsJson?.folders) ? rootsJson.folders : [];
+                    for (const f of folders) {
+                        const fp = String(f?.path || '').trim();
+                        if (!fp) continue;
+                        // User-added folders (artifact_sync, workspace, custom)
+                        // are de-facto evidence the user already set up a
+                        // workspace — count them as ≥1 even if currently empty,
+                        // so the banner hides as soon as the user clicks "添加文件夹".
+                        const isUserAdded = (f?.kind || '') !== 'runtime_output';
+                        if (isUserAdded) {
+                            // First, count actual files inside; if 0, still
+                            // grant +1 because the folder being registered IS
+                            // the user's intent.
+                            pathsToProbe.push({ path: fp, alwaysCount: true });
+                        }
+                    }
+                    // Probe each path in parallel; sum file counts.
+                    const treeResults = await Promise.allSettled(
+                        pathsToProbe.map((p) => fetch(
+                            `${apiBase}/api/workspace/tree?root=${encodeURIComponent(p.path)}`,
+                            { signal: ctrl.signal },
+                        )),
+                    );
+                    for (let i = 0; i < treeResults.length; i++) {
+                        const tr = treeResults[i];
+                        if (tr.status !== 'fulfilled') continue;
+                        try {
+                            if (!tr.value.ok) {
+                                // Folder may not exist yet (just registered).
+                                // alwaysCount entries still count as 1.
+                                if (pathsToProbe[i].alwaysCount) globalUserFileCount += 1;
+                                continue;
+                            }
+                            const gj = await tr.value.json();
+                            const tree = Array.isArray(gj?.tree) ? gj.tree : [];
+                            const fc = walk(tree);
+                            globalUserFileCount += Math.max(fc, pathsToProbe[i].alwaysCount ? 1 : 0);
+                        } catch {
+                            if (pathsToProbe[i].alwaysCount) globalUserFileCount += 1;
+                        }
+                    }
+                }
+                const fc = taskFileCount + globalUserFileCount;
+                // v7.3.3 audit fix CRITICAL: re-check cancelled after awaits
+                // to prevent setState on unmounted component / wrong-task race.
+                if (cancelled) return;
+                // v7.3.3 audit fix MAJOR-1: when files appear, clear the
+                // sessionStorage dismissed flag so the banner reappears
+                // properly if the user later deletes everything back to 0.
+                if (fc > 0) {
+                    window.sessionStorage.removeItem(dismissedKey);
+                }
+                const dismissed = window.sessionStorage.getItem(dismissedKey) === '1';
+                setWorkspaceBanner({
+                    taskId: tid,
+                    fileCount: fc,
+                    path: taskPath,
+                    dismissed,
+                });
+            } catch { /* ignore */ }
+        };
+        // Initial probe + re-probe every 8s so the banner reflects newly
+        // uploaded files (from FileExplorer or banner button) within seconds
+        // instead of requiring a full editor re-mount.
+        // v7.3.9 audit-fix MAJOR — gate the polling on `document.visibilityState`.
+        // Without it, a backgrounded editor tab fires 6+ requests every 8s
+        // (=2700/h per tab), wasting network + relay budget.
+        probe();
+        const intervalProbe = () => {
+            if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+                probe();
+            }
+        };
+        const interval = setInterval(intervalProbe, 8000);
+        return () => {
+            cancelled = true;
+            clearInterval(interval);
+            ctrl.abort();
+        };
+    }, [(selectedTask as any)?.id]);
+
+    const dismissWorkspaceBanner = () => {
+        if (workspaceBanner && typeof window !== 'undefined') {
+            window.sessionStorage.setItem(`evermind:ws-banner-dismissed:${workspaceBanner.taskId}`, '1');
+            setWorkspaceBanner({ ...workspaceBanner, dismissed: true });
+        }
+    };
+
+    const triggerAddFiles = () => {
+        if (!workspaceBanner) return;
+        // Use a hidden input to let the user pick local files; uploaded
+        // contents are POSTed to /api/tasks/<id>/workspace/upload.
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.multiple = true;
+        input.style.display = 'none';
+        input.onchange = async () => {
+            const files = Array.from(input.files || []);
+            if (!files.length) return;
+            const apiBase = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
+            const payloads: any[] = [];
+            for (const f of files.slice(0, 32)) {
+                try {
+                    const buf = await f.arrayBuffer();
+                    const bin = btoa(
+                        Array.from(new Uint8Array(buf))
+                            .map((b) => String.fromCharCode(b))
+                            .join(''),
+                    );
+                    payloads.push({ name: f.name, encoding: 'base64', content: bin });
+                } catch { /* skip */ }
+            }
+            if (!payloads.length) return;
+            try {
+                const r = await fetch(`${apiBase}/api/tasks/${encodeURIComponent(workspaceBanner.taskId)}/workspace/upload`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ files: payloads }),
+                });
+                const j = await r.json();
+                if (j?.ok) {
+                    setWorkspaceBanner({ ...workspaceBanner, fileCount: workspaceBanner.fileCount + (j.saved?.length || 0) });
+                }
+            } catch { /* ignore */ }
+        };
+        document.body.appendChild(input);
+        input.click();
+        setTimeout(() => input.remove(), 0);
+    };
+
     const [skillsLibraryOpen, setSkillsLibraryOpen] = useState(false);
+    const [lessonsOpen, setLessonsOpen] = useState(false);
     const [guideOpen, setGuideOpen] = useState(false);
     const [historyOpen, setHistoryOpen] = useState(false);
     const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
@@ -767,6 +1052,59 @@ function EditorPageInner() {
 
     return (
         <div className="flex h-screen relative overflow-hidden">
+            {/* v7.3: per-task workspace banner — shown when the selected task
+                has zero files in its isolated workspace and hasn't been
+                dismissed in this session. Sits above everything as a slim
+                strip, doesn't push layout. */}
+            {workspaceBanner && workspaceBanner.fileCount === 0 && !workspaceBanner.dismissed && (
+                <div
+                    style={{
+                        position: 'fixed', top: 0, left: 0, right: 0, zIndex: 60,
+                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12,
+                        padding: '8px 16px',
+                        background: 'linear-gradient(180deg, rgba(111,138,255,0.12) 0%, rgba(111,138,255,0.06) 100%)',
+                        borderBottom: '1px solid rgba(111,138,255,0.20)',
+                        backdropFilter: 'blur(8px)',
+                        fontSize: 12,
+                        color: '#d4dcef',
+                        animation: 'wsBannerSlideIn 0.3s ease-out',
+                    }}
+                >
+                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path d="M2 4.5C2 3.67 2.67 3 3.5 3h3.1l1.6 2H12.5C13.33 5 14 5.67 14 6.5v5C14 12.33 13.33 13 12.5 13h-9C2.67 13 2 12.33 2 11.5v-7Z" stroke="currentColor" strokeWidth="1.4" />
+                    </svg>
+                    <span>
+                        {lang === 'zh' ? '此会话工作区为空。' : "This session's workspace is empty."}
+                        <span style={{ color: '#7d8aa3', marginLeft: 6 }}>
+                            {lang === 'zh'
+                                ? '不同会话的文件互相独立，是否要添加输入文件？'
+                                : 'Each session has an isolated folder — add input files?'}
+                        </span>
+                    </span>
+                    <button
+                        onClick={triggerAddFiles}
+                        style={{
+                            padding: '4px 14px', borderRadius: 6, fontSize: 12,
+                            background: '#6f8aff', color: '#fff', border: 'none',
+                            cursor: 'pointer', fontWeight: 500,
+                        }}
+                    >
+                        {lang === 'zh' ? '＋ 添加文件' : '+ Add Files'}
+                    </button>
+                    <button
+                        onClick={dismissWorkspaceBanner}
+                        title={lang === 'zh' ? '本次跳过' : 'Skip for now'}
+                        style={{
+                            padding: '4px 8px', borderRadius: 6, fontSize: 12,
+                            background: 'transparent', color: '#7d8aa3', border: '1px solid rgba(255,255,255,0.08)',
+                            cursor: 'pointer',
+                        }}
+                    >
+                        {lang === 'zh' ? '跳过' : 'Skip'}
+                    </button>
+                    <style jsx>{`@keyframes wsBannerSlideIn { from { transform: translateY(-100%); opacity: 0; } to { transform: translateY(0); opacity: 1; } }`}</style>
+                </div>
+            )}
             <Sidebar
                 onDragStart={workflow.handleSidebarDragStart}
                 connected={runtime.connected}
@@ -791,12 +1129,31 @@ function EditorPageInner() {
                     running={runtime.running}
                     connected={runtime.connected}
                     lang={lang}
-                    onLangToggle={() => setLang(l => l === 'en' ? 'zh' : 'en')}
+                    onLangToggle={() => {
+                        const next: 'en' | 'zh' = lang === 'en' ? 'zh' : 'en';
+                        setLang(next);
+                        // v5.8.6: auto-sync UI language to backend so node reports
+                        // match the user's current language WITHOUT requiring an
+                        // explicit "Save to Backend" click. Previously the lang
+                        // toggle only changed UI, leaving `ai_bridge.config.ui_language`
+                        // stale → reports in Chinese when UI was English and vice versa.
+                        try {
+                            const ws = runtime.wsRef?.current;
+                            if (ws && ws.readyState === WebSocket.OPEN) {
+                                ws.send(JSON.stringify({
+                                    type: 'update_config',
+                                    config: { ui_language: next },
+                                }));
+                            }
+                        } catch { /* non-fatal: user can still save via settings */ }
+                    }}
                     theme={theme}
                     onThemeToggle={handleThemeToggle}
                     onOpenSettings={() => setSettingsOpen(true)}
+                    onOpenGitHub={() => setGithubOpen(true)}
                     onOpenTemplates={() => setTemplatesOpen(true)}
                     onOpenSkillsLibrary={() => setSkillsLibraryOpen(true)}
+                onOpenLessons={() => setLessonsOpen(true)}
                     onOpenGuide={() => setGuideOpen(true)}
                     onOpenHistory={() => setHistoryOpen(true)}
                     onOpenDiagnostics={() => setDiagnosticsOpen(true)}
@@ -929,18 +1286,26 @@ function EditorPageInner() {
                         )}
                         </div>
                     </div>
-                    {/* Right panel resize handle */}
+                    {/* Right panel resize handle — 8px hit zone so users can grab it reliably.
+                        The inner 2px indicator brightens on hover/drag; outside of those states
+                        the visible line is the neighbouring panel border. */}
                     <div
                         onMouseDown={handleResizeStart}
                         style={{
-                            width: 4, flexShrink: 0, cursor: 'col-resize',
-                            background: resizing ? 'var(--blue)' : 'transparent',
-                            transition: resizing ? 'none' : 'background 0.15s',
-                            zIndex: 10,
+                            width: 8, flexShrink: 0, cursor: 'col-resize',
+                            position: 'relative', zIndex: 50,
+                            background: 'transparent',
                         }}
-                        onMouseEnter={(e) => { if (!resizing) (e.currentTarget as HTMLDivElement).style.background = 'rgba(79,143,255,0.4)'; }}
-                        onMouseLeave={(e) => { if (!resizing) (e.currentTarget as HTMLDivElement).style.background = 'transparent'; }}
-                    />
+                        title="拖动调整宽度 / drag to resize"
+                        onMouseEnter={(e) => { if (!resizing) (e.currentTarget.querySelector('[data-indicator]') as HTMLDivElement).style.background = 'rgba(91,140,255,0.55)'; }}
+                        onMouseLeave={(e) => { if (!resizing) (e.currentTarget.querySelector('[data-indicator]') as HTMLDivElement).style.background = 'transparent'; }}
+                    >
+                        <div data-indicator style={{
+                            position: 'absolute', top: 0, bottom: 0, left: 3, width: 2,
+                            background: resizing ? 'var(--blue)' : 'transparent',
+                            transition: resizing ? 'none' : 'background 0.12s',
+                        }} />
+                    </div>
                     {/* Right panel: Pipeline / Chat mode switcher */}
                     <div style={{ display: 'flex', flexDirection: 'column', flexShrink: 0, overflow: 'hidden', width: rightPanelWidth }}>
                         {/* Tab bar */}
@@ -981,6 +1346,8 @@ function EditorPageInner() {
                                     lang={lang}
                                     difficulty={difficulty}
                                     onDifficultyChange={setDifficulty}
+                                    cliEnabled={cliEnabled}
+                                    customCanvasNodeCount={workflowNodes.length}
                                     runtimeMode={connectorRuntimeMode}
                                     showOpenClawRuntime={OPENCLAW_UI_ENABLED}
                                     taskTitle={summaryTaskTitle}
@@ -1026,10 +1393,63 @@ function EditorPageInner() {
             </div>
 
             {/* Modals */}
+            {wizardOpen && (
+                <WelcomeWizard
+                    lang={lang}
+                    onPickTemplate={(tpl) => {
+                        // Load the template's node graph into the canvas
+                        try { workflow.handleLoadTemplate(tpl); } catch { /* ignore */ }
+                        // Pre-fill the chat input with the template's goal (if any)
+                        if (tpl.goal) {
+                            try {
+                                window.dispatchEvent(new CustomEvent('evermind-prefill-goal', { detail: { goal: tpl.goal } }));
+                            } catch { /* ignore */ }
+                        }
+                    }}
+                    onConfigureKey={() => setSettingsOpen(true)}
+                    onSkip={() => { markWelcomeWizardSeen(); setWizardOpen(false); }}
+                />
+            )}
             <SettingsModal open={settingsOpen} onClose={() => setSettingsOpen(false)} lang={lang} onLangChange={setLang} theme={theme} onThemeChange={setTheme} connected={runtime.connected} wsUrl={wsUrl} onWsUrlChange={setWsUrl} wsRef={runtime.wsRef} />
-            <TemplateGallery open={templatesOpen} onClose={() => setTemplatesOpen(false)} onLoadTemplate={workflow.handleLoadTemplate} lang={lang} />
+            {githubOpen && <GitHubModal onClose={() => setGithubOpen(false)} lang={lang} />}
+            <TemplateGallery
+                open={templatesOpen}
+                onClose={() => setTemplatesOpen(false)}
+                onLoadTemplate={workflow.handleLoadTemplate}
+                lang={lang}
+                currentCanvas={{
+                    nodes: (workflow.nodes || []).map((n: any) => ({
+                        id: String(n.id ?? ''),
+                        type: String(n.type ?? n.data?.type ?? 'agent'),
+                        x: Number(n.x ?? n.position?.x ?? 0),
+                        y: Number(n.y ?? n.position?.y ?? 0),
+                        data: n.data || { label: n.label, task: n.task },
+                    })),
+                    // v7.3.9 audit-fix CRITICAL — only use ReactFlow's
+                    // canonical {source, target} edge shape. Earlier code
+                    // also accepted {from, to} which is undefined for
+                    // ReactFlow edges; that caused `findIndex(n => n.id ===
+                    // undefined)` to silently return 0 if any node had a
+                    // missing id, producing phantom edges in saved templates.
+                    edges: (workflow.edges || []).flatMap((e: any) => {
+                        const src = e?.source ?? e?.from;
+                        const dst = e?.target ?? e?.to;
+                        if (!src || !dst) return [];
+                        const fromIdx = (workflow.nodes || []).findIndex((n: any) => n.id === src);
+                        const toIdx = (workflow.nodes || []).findIndex((n: any) => n.id === dst);
+                        if (fromIdx < 0 || toIdx < 0) return [];
+                        return [[fromIdx, toIdx] as [number, number]];
+                    }),
+                }}
+            />
             <SkillsLibraryModal open={skillsLibraryOpen} onClose={() => setSkillsLibraryOpen(false)} lang={lang} />
-            <GuideModal open={guideOpen} onClose={() => setGuideOpen(false)} lang={lang} />
+            <LessonsModal open={lessonsOpen} onClose={() => setLessonsOpen(false)} lang={lang === 'en' ? 'en' : 'zh'} />
+            <GuideModal
+                open={guideOpen}
+                onClose={() => setGuideOpen(false)}
+                lang={lang}
+                onShowWelcomeWizard={() => setWizardOpen(true)}
+            />
             <HistoryModal
                 open={historyOpen} onClose={() => setHistoryOpen(false)} lang={lang}
                 sessions={chat.historySessions} activeSessionId={chat.activeSessionId}
@@ -1101,7 +1521,7 @@ function EditorPageInner() {
                         display: 'flex', alignItems: 'center', gap: 10,
                         padding: '10px 16px',
                         background: 'linear-gradient(180deg, rgba(13,17,23,0.98), rgba(22,27,34,0.96))',
-                        borderBottom: '1px solid rgba(79,143,255,0.12)',
+                        borderBottom: '1px solid rgba(91,140,255,0.14)',
                         flexShrink: 0,
                     }}>
                         {/* Breadcrumb-style path */}

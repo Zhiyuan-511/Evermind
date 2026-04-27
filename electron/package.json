@@ -39,18 +39,42 @@
             "icon": "icon.icns",
             "target": [
                 {
+                    "target": "dmg",
+                    "arch": [
+                        "arm64"
+                    ]
+                },
+                {
                     "target": "dir",
                     "arch": [
                         "arm64"
                     ]
                 }
             ],
-            "darkModeSupport": true
+            "darkModeSupport": true,
+            "hardenedRuntime": true,
+            "entitlements": "build/entitlements.mac.plist",
+            "entitlementsInherit": "build/entitlements.mac.plist",
+            "gatekeeperAssess": false,
+            "identity": null,
+            "extendInfo": {
+                "NSDesktopFolderUsageDescription": "Evermind saves exported workflow outputs and previews to the Desktop.",
+                "NSDocumentsFolderUsageDescription": "Evermind reads project assets referenced by your prompts and writes generated results to Documents.",
+                "NSDownloadsFolderUsageDescription": "Evermind exports packaged builds to the Downloads folder.",
+                "NSAppleEventsUsageDescription": "Evermind uses AppleScript to launch the browser preview after a run completes.",
+                "NSNetworkVolumesUsageDescription": "Evermind reads and writes project workspaces on network volumes you select.",
+                "NSRemovableVolumesUsageDescription": "Evermind reads and writes project workspaces on external drives you select.",
+                "LSEnvironment": {
+                    "EVERMIND_TCC_BUNDLE": "1"
+                }
+            }
         },
         "protocols": [
             {
                 "name": "Evermind",
-                "schemes": ["evermind"]
+                "schemes": [
+                    "evermind"
+                ]
             }
         ],
         "files": [
@@ -67,16 +91,17 @@
                 "to": "backend",
                 "filter": [
                     "**/*.py",
+                    "!bench/**",
+                    "!tests/**",
+                    "!scripts/desktop_run_goal_monitor.py",
                     "agent_skills/**",
                     "runtime_vendor/**",
                     "requirements.txt",
                     ".env.example",
-                    "plugins/**"
+                    "plugins/**",
+                    "prompt_templates/**/*.yaml",
+                    "prompt_templates/**/*.yml"
                 ]
-            },
-            {
-                "from": "../OPENCLAW_GUIDE.md",
-                "to": "OPENCLAW_GUIDE.md"
             },
             {
                 "from": ".packaged/frontend-standalone",

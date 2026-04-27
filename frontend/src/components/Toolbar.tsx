@@ -16,11 +16,14 @@ interface ToolbarProps {
     theme: 'dark' | 'light';
     onThemeToggle: () => void;
     onOpenSettings: () => void;
+    onOpenGitHub?: () => void;
     onOpenTemplates: () => void;
     onOpenSkillsLibrary: () => void;
     onOpenGuide: () => void;
     onOpenHistory: () => void;
     onOpenDiagnostics: () => void;
+    /** v5.5 Compound Engineering lessons modal */
+    onOpenLessons?: () => void;
     /* Canvas view toggle */
     canvasView: 'editor' | 'preview' | 'files';
     onToggleCanvasView: () => void;
@@ -42,9 +45,9 @@ interface ToolbarProps {
 export default function Toolbar({
     workflowName, onNameChange, onRun, onStop, onExport, onClear,
     running, connected, lang, onLangToggle, theme, onThemeToggle,
-    onOpenSettings, onOpenTemplates, onOpenGuide,
+    onOpenSettings, onOpenGitHub, onOpenTemplates, onOpenGuide,
     onOpenSkillsLibrary,
-    onOpenHistory, onOpenDiagnostics,
+    onOpenHistory, onOpenDiagnostics, onOpenLessons,
     canvasView, onToggleCanvasView, onSetCanvasView, hasPreview,
     activeRunStatus, runtimeModeLabel, activeTaskLabel, activeRunId, lastEventAt, wsUrl, envTag, onOpenConnectorPanel, showOpenClaw = true,
 }: ToolbarProps) {
@@ -145,7 +148,7 @@ export default function Toolbar({
                         style={{
                             padding: '4px 10px', fontSize: 10, fontWeight: 600,
                             border: 'none', cursor: canvasView === 'editor' ? 'default' : 'pointer',
-                            background: canvasView === 'editor' ? 'rgba(79,143,255,0.15)' : 'transparent',
+                            background: canvasView === 'editor' ? 'rgba(91,140,255,0.15)' : 'transparent',
                             color: canvasView === 'editor' ? 'var(--blue)' : 'var(--text3)',
                             transition: 'all 0.15s',
                         }}
@@ -208,6 +211,20 @@ export default function Toolbar({
                 <button onClick={onOpenDiagnostics} className="btn text-[10px]" style={{ padding: '3px 6px', flexShrink: 0 }}>
                     {tr('诊断', 'Diag')}
                 </button>
+                {onOpenLessons && (
+                    <button
+                        onClick={onOpenLessons}
+                        className="btn text-[10px]"
+                        style={{ padding: '3px 8px', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: 4 }}
+                        title={tr('查看 Evermind 从过往任务中学到的教训', 'Lessons Evermind has learned from past runs')}
+                    >
+                        <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M8 2a4.5 4.5 0 0 0-2.5 8.25V11a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-.75A4.5 4.5 0 0 0 8 2Z"/>
+                            <path d="M6 13.5h4M6.5 15h3"/>
+                        </svg>
+                        {tr('经验', 'Lessons')}
+                    </button>
+                )}
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0, minWidth: 0, paddingLeft: 8, borderLeft: '1px solid rgba(255,255,255,0.06)' }}>
@@ -225,6 +242,25 @@ export default function Toolbar({
                 <button onClick={onOpenSettings} className="btn text-[10px]" style={{ padding: '3px 6px', flexShrink: 0 }} title={tr('设置', 'Settings')}>
                     {tr('设置', '⚙')}
                 </button>
+
+                {/* GitHub (v6.4.5) */}
+                {onOpenGitHub && (
+                    <button
+                        onClick={onOpenGitHub}
+                        className="btn text-[10px]"
+                        style={{
+                            padding: '3px 10px',
+                            flexShrink: 0,
+                            background: 'linear-gradient(135deg,#0071e3 0%,#af52de 100%)',
+                            color: '#fff',
+                            border: 'none',
+                            fontWeight: 600,
+                        }}
+                        title={tr('发布到 GitHub', 'Publish to GitHub')}
+                    >
+                        {tr('GitHub', 'GitHub')}
+                    </button>
+                )}
 
                 {/* Help */}
                 <button onClick={onOpenGuide} className="btn text-[10px]" style={{ padding: '3px 6px', flexShrink: 0 }} title={tr('帮助', 'Help')}>

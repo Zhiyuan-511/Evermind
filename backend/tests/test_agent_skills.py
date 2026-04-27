@@ -118,6 +118,21 @@ class TestAgentSkills(unittest.TestCase):
         names = resolve_skill_names_for_goal("analyst", "做一个像苹果一样高级的品牌官网")
         self.assertIn("source-first-research-loop", names)
 
+    def test_uidesign_website_goal_stays_on_core_design_skills_by_default(self):
+        names = resolve_skill_names_for_goal("uidesign", "做一个像苹果一样高级的奢侈品官网")
+        self.assertIn("commercial-ui-polish", names)
+        self.assertIn("design-system-consistency", names)
+        self.assertNotIn("cinematic-visual-narrative", names)
+        self.assertNotIn("evermind-atlas-surface-system", names)
+        self.assertNotIn("evermind-editorial-layout-composer", names)
+
+    def test_uidesign_website_keyword_skills_are_clamped_to_core_defaults(self):
+        names = resolve_skill_names_for_goal(
+            "uidesign",
+            "做一个像苹果一样高级的奢侈品品牌官网，要有滚动动画、品牌视觉和插画 hero。",
+        )
+        self.assertEqual(names, ["commercial-ui-polish", "design-system-consistency"])
+
     def test_polisher_loads_finish_and_scroll_skills(self):
         names = resolve_skill_names_for_goal("polisher", "把现有奢侈品官网做得更高级，补充转场和滚动动效")
         self.assertIn("commercial-ui-polish", names)

@@ -47,7 +47,6 @@ RUNTIME_FILES = [
     "connector_idempotency.py",
     "executor.py",
     "html_postprocess.py",
-    "knowledge_base.py",
     "node_roles.py",
     "orchestrator.py",
     "preview_validation.py",

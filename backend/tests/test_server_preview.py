@@ -9,6 +9,37 @@ from unittest.mock import patch
 import server
 
 
+class TestChatBrowserBridge(unittest.TestCase):
+    """v6.0: chat-mode browser tool integration smoke tests."""
+
+    def setUp(self):
+        # Clear any cached plugin between tests
+        server._CHAT_BROWSER_PLUGIN = None
+        server._MAIN_ASYNCIO_LOOP = None
+
+    def test_get_chat_browser_plugin_lazy_init(self):
+        first = server._get_chat_browser_plugin()
+        second = server._get_chat_browser_plugin()
+        self.assertIsNotNone(first)
+        self.assertIs(first, second)  # cached
+
+    def test_invoke_without_main_loop_returns_error(self):
+        result = server._invoke_chat_browser_tool(
+            {"action": "navigate", "url": "about:blank"}, timeout_sec=1.0
+        )
+        self.assertFalse(result.get("success"))
+        self.assertIn("main loop", result.get("error", "").lower())
+
+    def test_invoke_with_unavailable_plugin_returns_error(self):
+        server._CHAT_BROWSER_PLUGIN = False  # simulate init failure
+        try:
+            result = server._invoke_chat_browser_tool({"action": "navigate", "url": "about:blank"})
+            self.assertFalse(result.get("success"))
+            self.assertIn("unavailable", result.get("error", "").lower())
+        finally:
+            server._CHAT_BROWSER_PLUGIN = None
+
+
 class TestNodeInputSummaryFormatting(unittest.TestCase):
     def test_compose_node_input_summary_includes_goal_and_session_context(self):
         summary = server._compose_node_input_summary(

@@ -139,20 +139,41 @@ async def tool_file_read(path: str, start_line: int = 0, end_line: int = 0, **_k
         return ToolResult(False, error=str(exc)[:500], elapsed_ms=_elapsed(t0))
 
 
-async def tool_file_write(path: str, content: str, overwrite: bool = True, **_kwargs) -> ToolResult:
-    """Write content to a file. Creates parent directories if needed."""
+async def tool_file_write(path: str, content: str, overwrite: bool = True, allow_empty: bool = False, **_kwargs) -> ToolResult:
+    """Write content to a file. Creates parent directories if needed.
+
+    v5.8: refuse to write zero-byte / whitespace-only files unless the caller
+    explicitly passes ``allow_empty=True``. AI models sometimes emit
+    ``file_ops write`` with empty content for asset briefs (e.g. leaving
+    ``monster_primary_brief.md`` as a 0-byte placeholder). Returning an error
+    forces the model to produce real content on retry instead of shipping
+    empty files to the delivery folder.
+    """
     t0 = time.monotonic()
     try:
         abs_path = _resolve_safe_path(path)
         if not abs_path:
             return ToolResult(False, error=f"Path not allowed: {path}", elapsed_ms=_elapsed(t0))
 
+        # Refuse empty writes unless explicitly allowed.
+        content_str = str(content or "")
+        if not allow_empty and not content_str.strip():
+            return ToolResult(
+                False,
+                error=(
+                    f"Refused to write zero-byte file: {path}. Provide real "
+                    f"content for this file, or pass allow_empty=true if you "
+                    f"genuinely want an empty placeholder (e.g. .gitkeep)."
+                ),
+                elapsed_ms=_elapsed(t0),
+            )
+
         if abs_path.exists() and not overwrite:
             return ToolResult(False, error=f"File already exists: {path}", elapsed_ms=_elapsed(t0))
 
         existed_before = abs_path.exists()
         abs_path.parent.mkdir(parents=True, exist_ok=True)
-        abs_path.write_text(content, encoding="utf-8")
+        abs_path.write_text(content_str, encoding="utf-8")
 
         return ToolResult(
             True,
@@ -627,6 +648,87 @@ async def tool_context_compress(
     )
 
 
+
+# ═══════════════════════════════════════════════
+# Tool: recall_tool_result (Drill-down on compressed history)
+# ═══════════════════════════════════════════════
+
+# Disk cache for full tool_results. When the context compressor trims an
+# older result to a 200-char summary, the full payload is kept here so the
+# model can recall it on demand. This is the "recoverable summarization"
+# pattern from Headroom (github.com/chopratejas/headroom) — aggressive
+# compression becomes safe because the model has a drill-down path.
+_RECALL_CACHE_DIR = Path.home() / ".evermind" / "tool_cache"
+
+
+def _recall_cache_path(step_id: str) -> Path:
+    """Return the disk path for a cached tool_result. step_id is the
+    tool_call_id (stable across retries) or a (subtask_id, seq) tuple."""
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(step_id or "unknown"))[:120]
+    return _RECALL_CACHE_DIR / f"{safe}.json"
+
+
+def persist_tool_result_for_recall(step_id: str, payload: Dict[str, Any]) -> str:
+    """Store a full tool_result to disk so `recall_tool_result` can retrieve
+    it after the context compressor replaces the inline version with a
+    200-char summary. Returns the step_id used for recall."""
+    try:
+        _RECALL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        p = _recall_cache_path(step_id)
+        p.write_text(json.dumps(payload, ensure_ascii=False, default=str)[:5_000_000], encoding="utf-8")
+        return str(step_id)
+    except Exception as exc:
+        logger.debug("persist_tool_result_for_recall failed: %s", exc)
+        return ""
+
+
+async def tool_recall_tool_result(
+    step_id: str = "",
+    max_chars: int = 12000,
+    **_kwargs,
+) -> ToolResult:
+    """Drill down into a previously-compressed tool_result.
+
+    When the orchestrator's context compressor replaces an older tool_result
+    with ``[TOOL_RESULT_MASKED...]``, the original content is still on disk
+    under ``~/.evermind/tool_cache/<step_id>.json``. Call this tool with the
+    step_id mentioned in the mask (or shown in the step list) to retrieve
+    the full original. This lets the compressor be aggressive without
+    losing recoverability — the model has a drill-down path.
+
+    Args:
+        step_id: Identifier for the cached result (tool_call_id or subtask_id).
+        max_chars: Cap on returned content length (default 12000).
+    """
+    t0 = time.monotonic()
+    sid = str(step_id or "").strip()
+    if not sid:
+        return ToolResult(False, error="step_id is required (tool_call_id of the earlier step)", elapsed_ms=_elapsed(t0))
+    path = _recall_cache_path(sid)
+    if not path.exists():
+        return ToolResult(
+            False,
+            error=f"No cached result for step_id={sid}. It may have been evicted or never cached.",
+            elapsed_ms=_elapsed(t0),
+        )
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        if len(raw) > max_chars:
+            raw = raw[:max_chars] + "\n... [truncated to max_chars — call again with larger max_chars or read the file directly]"
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = {"content": raw}
+        return ToolResult(
+            True,
+            output=json.dumps(payload, ensure_ascii=False)[:max_chars] if not isinstance(payload, str) else payload,
+            metadata={"step_id": sid, "bytes_returned": len(raw), "cache_path": str(path)},
+            elapsed_ms=_elapsed(t0),
+        )
+    except Exception as exc:
+        return ToolResult(False, error=f"Recall failed: {exc}", elapsed_ms=_elapsed(t0))
+
+
 # ═══════════════════════════════════════════════
 # Tool: multi_file_read (Batch file reading)
 # ═══════════════════════════════════════════════
@@ -738,7 +840,7 @@ ROLE_TOOL_ACCESS: Dict[str, List[str]] = {
     "imagegen": ["file_write", "file_list", "web_fetch", "web_search"],
     "spritesheet": ["file_read", "file_list"],
     "assetimport": ["file_read", "file_list"],
-    "uidesign": ["web_fetch", "web_search", "file_read", "file_list", "glob"],
+    "uidesign": ["web_fetch", "file_read", "file_list", "glob"],
     "scribe": ["file_read", "file_write", "file_list", "grep_search"],
 }
 

@@ -130,11 +130,12 @@ class TestProviderAuthFailureMemory(unittest.TestCase):
 
 class TestBuilderPresetContracts(unittest.TestCase):
     def test_builder_preset_mentions_game_boot_sequence_guards(self):
+        # v6.1.5 (maintainer 2026-04-19): game-specific rules moved to
+        # agent_skills/gameplay-foundation + godogen-tps-control-sanity-lock
+        # (loaded conditionally). Core builder preset now keeps only the
+        # cross-domain "null-guard JS, return FULL merged file" contracts.
         instructions = AGENT_PRESETS["builder"]["instructions"]
-        self.assertIn("Init game state before first HUD render", instructions)
-        self.assertIn("null-guard player/camera/HUD until startGame completes", instructions)
         self.assertIn("undeclared globals", instructions)
-        self.assertIn("start menu", instructions)
         self.assertIn("FULL merged file", instructions)
 
 
@@ -149,6 +150,70 @@ class TestPartialOutputEvents(unittest.TestCase):
         self.assertEqual(event["partial_output"], full_text)
         self.assertNotEqual(event["preview"], full_text)
         self.assertIn("...", event["preview"])
+
+
+class TestAIBridgePerRunStateReset(unittest.TestCase):
+    """v6.0: per-run state must not leak kill switch across pipeline runs."""
+
+    def test_reset_clears_kill_switch_and_counter(self):
+        bridge = AIBridge(config={})
+        bridge._builder_direct_multifile_disabled = True
+        bridge._builder_empty_batch_count = 7
+        bridge._builder_deferred_context = "stale context from prior run"
+
+        bridge.reset_per_run_state()
+
+        self.assertFalse(bridge._builder_direct_multifile_disabled)
+        self.assertEqual(bridge._builder_empty_batch_count, 0)
+        self.assertEqual(bridge._builder_deferred_context, "")
+
+    def test_reset_preserves_provider_auth_health(self):
+        """Auth cooldowns should survive a new run (bad key is still bad)."""
+        bridge = AIBridge(config={})
+        bridge._provider_auth_health["kimi"] = {"strikes": 2, "cooldown_until": 1234}
+        bridge.reset_per_run_state()
+        self.assertEqual(bridge._provider_auth_health.get("kimi", {}).get("strikes"), 2)
+
+    def test_fresh_bridge_starts_clean(self):
+        """A brand-new AIBridge must NOT have a latent kill switch."""
+        bridge = AIBridge(config={})
+        self.assertFalse(getattr(bridge, "_builder_direct_multifile_disabled", False))
+        self.assertEqual(getattr(bridge, "_builder_empty_batch_count", 0), 0)
+
+
+class TestBuilderNarrationOnlyGuard(unittest.TestCase):
+    """v5.8.7: empty-prose batches must be rejected before they burn continuations."""
+
+    def setUp(self):
+        self.bridge = AIBridge(config={})
+
+    def test_empty_string_is_narration(self):
+        self.assertTrue(self.bridge._builder_response_looks_like_narration_only(""))
+
+    def test_short_planning_prose_is_narration(self):
+        content = (
+            "Here is my plan: first I will design the layout, then I'll build "
+            "the navigation and finally the hero. I'll iterate if anything breaks."
+        )
+        self.assertTrue(self.bridge._builder_response_looks_like_narration_only(content))
+
+    def test_minimax_failure_sample_is_narration(self):
+        content = "Plan:\n1. Build layout\n2. Style hero\n3. Add interactions\n" * 20
+        self.assertLess(len(content), 5000)
+        self.assertTrue(self.bridge._builder_response_looks_like_narration_only(content))
+
+    def test_real_html_block_is_not_narration(self):
+        content = (
+            "```html index.html\n"
+            "<!DOCTYPE html><html><head><title>x</title></head>"
+            "<body><main>hello world</main></body></html>\n"
+            "```"
+        )
+        self.assertFalse(self.bridge._builder_response_looks_like_narration_only(content))
+
+    def test_bare_doctype_html_without_fences_is_not_narration(self):
+        content = "<!DOCTYPE html><html><head></head><body>" + ("<p>x</p>" * 120) + "</body></html>"
+        self.assertFalse(self.bridge._builder_response_looks_like_narration_only(content))
 
 
 class TestGameContinuationHeuristics(unittest.TestCase):
@@ -275,6 +340,23 @@ game.animate();
         files = bridge._extract_html_files_from_text_output(output, input_data)
 
         self.assertEqual(files, {})
+
+    def test_builder_is_support_lane_node_requires_explicit_flag(self):
+        bridge = AIBridge(config={})
+        self.assertFalse(
+            bridge._builder_is_support_lane_node(
+                {"type": "builder", "can_write_root_index": False}
+            )
+        )
+        self.assertTrue(
+            bridge._builder_is_support_lane_node(
+                {
+                    "type": "builder",
+                    "can_write_root_index": False,
+                    "builder_is_support_lane_node": True,
+                }
+            )
+        )
 
     def test_attempt_builder_game_text_continuation_repairs_shell_only_game_page(self):
         bridge = AIBridge(config={})
@@ -481,6 +563,14 @@ class TestNodeModelPreferences(unittest.TestCase):
                 "DEEPSEEK_API_KEY": "",
                 "QWEN_API_KEY": "",
                 "KIMI_API_KEY": "",
+                # v6.1.3: also clear zhipu/minimax/doubao/yi/aigate env keys
+                # so tests are isolated from other suites that may have set
+                # them — glm-4-plus now inserts into position 3 otherwise.
+                "ZHIPU_API_KEY": "",
+                "MINIMAX_API_KEY": "",
+                "DOUBAO_API_KEY": "",
+                "YI_API_KEY": "",
+                "AIGATE_API_KEY": "",
             },
         ):
             bridge = AIBridge(config={
@@ -493,14 +583,21 @@ class TestNodeModelPreferences(unittest.TestCase):
                 "gpt-5.4",
             )
 
-            self.assertEqual(candidates[:3], ["gpt-5.4", "kimi-coding", "gpt-5.3-codex"])
+            self.assertEqual(candidates[:3], ["gpt-5.4", "kimi-k2.6-code-preview", "gpt-5.3-codex"])  # v5.8.2
             self.assertNotIn("claude-4-sonnet", candidates)
             self.assertNotIn("deepseek-v3", candidates)
             self.assertNotIn("gemini-2.5-pro", candidates)
             self.assertNotIn("qwen-max", candidates)
 
     def test_resolve_candidates_appends_resilience_fallbacks_for_custom_gateway_singleton(self):
-        with patch.dict("os.environ", {"OPENAI_API_BASE": "https://gateway.example/v1"}, clear=False):
+        with patch.dict("os.environ", {
+            "OPENAI_API_BASE": "https://gateway.example/v1",
+            "ZHIPU_API_KEY": "",
+            "MINIMAX_API_KEY": "",
+            "DOUBAO_API_KEY": "",
+            "YI_API_KEY": "",
+            "AIGATE_API_KEY": "",
+        }, clear=False):
             bridge = AIBridge(config={
                 "openai_api_key": "sk-openai-test",
                 "kimi_api_key": "sk-kimi-test",
@@ -514,10 +611,17 @@ class TestNodeModelPreferences(unittest.TestCase):
                 "gpt-5.4",
             )
 
-            self.assertEqual(candidates[:3], ["gpt-5.4", "kimi-coding", "gpt-5.3-codex"])
+            self.assertEqual(candidates[:3], ["gpt-5.4", "kimi-k2.6-code-preview", "gpt-5.3-codex"])  # v5.8.2
 
     def test_resolve_candidates_appends_resilience_fallbacks_for_custom_gateway_imagegen_singleton(self):
-        with patch.dict("os.environ", {"OPENAI_API_BASE": "https://gateway.example/v1"}, clear=False):
+        with patch.dict("os.environ", {
+            "OPENAI_API_BASE": "https://gateway.example/v1",
+            "ZHIPU_API_KEY": "",
+            "MINIMAX_API_KEY": "",
+            "DOUBAO_API_KEY": "",
+            "YI_API_KEY": "",
+            "AIGATE_API_KEY": "",
+        }, clear=False):
             bridge = AIBridge(config={
                 "openai_api_key": "sk-openai-test",
                 "kimi_api_key": "sk-kimi-test",
@@ -531,7 +635,7 @@ class TestNodeModelPreferences(unittest.TestCase):
                 "gpt-5.4",
             )
 
-            self.assertEqual(candidates[:3], ["gpt-5.4", "kimi-coding", "gpt-5.3-codex"])
+            self.assertEqual(candidates[:3], ["gpt-5.4", "kimi-k2.6-code-preview", "gpt-5.3-codex"])  # v5.8.2
 
     def test_resolve_candidates_does_not_append_emergency_fallbacks_for_non_gateway_singleton(self):
         bridge = AIBridge(config={
@@ -828,6 +932,7 @@ class TestNodeModelPreferences(unittest.TestCase):
 
     def test_execute_preflight_progress_timeout_does_not_block_builder_dispatch(self):
         bridge = AIBridge(config={"kimi_api_key": "sk-kimi-test"})
+        bridge._pick_speculative_pair = lambda *a, **kw: None
         bridge._execute_openai_compatible_chat = AsyncMock(
             return_value={"success": True, "output": "ok", "tool_results": [], "mode": "openai_compatible_chat"}
         )
@@ -836,7 +941,7 @@ class TestNodeModelPreferences(unittest.TestCase):
             await asyncio.sleep(0.5)
 
         start = time.perf_counter()
-        with patch.dict("os.environ", {"EVERMIND_PROGRESS_EVENT_TIMEOUT_SEC": "0.01"}):
+        with patch.dict("os.environ", {"EVERMIND_PROGRESS_EVENT_TIMEOUT_SEC": "0.01", "OPENAI_API_BASE": ""}):
             result = asyncio.run(
                 bridge.execute(
                     node={
@@ -987,10 +1092,9 @@ class TestNodeModelPreferences(unittest.TestCase):
             )
 
             self.assertTrue(result.get("success"))
-            self.assertEqual(result.get("model"), "kimi-coding")
-            self.assertEqual(result.get("attempted_models"), ["gpt-5.4", "kimi-coding"])
-            # V5.1: gpt-5.4 uses chat (custom_gateway, no plugins);
-            # kimi-coding uses compatible (extra_headers). Each called once.
+            # v5.8.2: LEGACY_AUTO_FALLBACK_ORDER now leads with kimi-k2.6-code-preview
+            self.assertEqual(result.get("model"), "kimi-k2.6-code-preview")
+            self.assertEqual(result.get("attempted_models"), ["gpt-5.4", "kimi-k2.6-code-preview"])
             self.assertEqual(bridge._execute_openai_compatible_chat.await_count, 1)
             self.assertEqual(bridge._execute_openai_compatible.await_count, 1)
 
@@ -1110,10 +1214,11 @@ class TestNodeModelPreferences(unittest.TestCase):
                     )
                 )
                 self.assertTrue(result.get("success"))
-                self.assertEqual(result.get("model"), "kimi-coding")
+                # v5.8.2: LEGACY_AUTO_FALLBACK_ORDER leads with kimi-k2.6-code-preview
+                self.assertEqual(result.get("model"), "kimi-k2.6-code-preview")
 
-            # Call 1: gpt-5.4 timeout (chat) → cooldown → kimi-coding fallback (compat).
-            # Calls 2-3: gpt-5.4 blocked by cooldown → kimi-coding (compat) only.
+            # Call 1: gpt-5.4 timeout (chat) → cooldown → kimi fallback (compat).
+            # Calls 2-3: gpt-5.4 blocked by cooldown → kimi (compat) only.
             # Total: 1 chat call + 3 compat calls.
             self.assertEqual(bridge._execute_openai_compatible_chat.await_count, 1)
             self.assertEqual(bridge._execute_openai_compatible.await_count, 3)
@@ -1462,7 +1567,11 @@ class TestMergeUsage(unittest.TestCase):
     def test_merge_with_none_delta(self):
         base = {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
         result = self.bridge._merge_usage(base, None)
-        self.assertEqual(result, base)
+        # v5.8.6: _merge_usage now also tracks cached_tokens (0 when absent).
+        self.assertEqual(result["prompt_tokens"], 100)
+        self.assertEqual(result["completion_tokens"], 50)
+        self.assertEqual(result["total_tokens"], 150)
+        self.assertEqual(result.get("cached_tokens", 0), 0)
 
 
 class TestGetAvailableModels(unittest.TestCase):
@@ -1486,29 +1595,42 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         self.bridge = AIBridge(config={})
 
     def test_builder_defaults_are_higher(self):
-        self.assertEqual(self.bridge._max_tokens_for_node("builder"), 32768)
-        self.assertEqual(self.bridge._timeout_for_node("builder"), 960)
+        # v6.1.10 (maintainer 2026-04-19): tool_call default raised 16384→24576 —
+        # 50KB HTML ≈ 20K tokens; 16384 was consistently triggering
+        # finish=length → salvage loop. 24576 covers 60KB.
+        self.assertEqual(self.bridge._max_tokens_for_node("builder"), 24576)
+        # direct_text unchanged at 28672.
+        self.assertEqual(
+            self.bridge._max_tokens_for_node("builder", node={"builder_delivery_mode": "direct_text"}),
+            28672,
+        )
+        self.assertEqual(self.bridge._timeout_for_node("builder"), 600)  # v5.8.2: 960→600
 
     def test_non_builder_defaults_are_lower(self):
-        self.assertEqual(self.bridge._max_tokens_for_node("tester"), 4096)
-        self.assertEqual(self.bridge._timeout_for_node("tester"), 120)
-        # V4.3.1: Increased tool iterations for all nodes
-        self.assertEqual(self.bridge._max_tool_iterations_for_node("tester"), 15)
-        self.assertEqual(self.bridge._max_tool_iterations_for_node("reviewer"), 15)
-        # V4.5: analyst iterations reduced 12→8 to prevent context bloat
-        self.assertEqual(self.bridge._max_tool_iterations_for_node("analyst"), 8)
-        self.assertEqual(self.bridge._max_tool_iterations_for_node("imagegen"), 10)
+        # v5.8.4: tester now has an independent budget (was falling through to generic
+        # EVERMIND_MAX_TOKENS=4096 / EVERMIND_TIMEOUT_SEC=120 defaults).
+        self.assertEqual(self.bridge._max_tokens_for_node("tester"), 6144)
+        self.assertEqual(self.bridge._timeout_for_node("tester"), 240)
+        # v6.1.3 (maintainer 2026-04-18): tool iteration caps raised across the board
+        # so nodes aren't prematurely killed; no-activity watchdog remains the
+        # authoritative deadlock detector.
+        self.assertEqual(self.bridge._max_tool_iterations_for_node("tester"), 50)
+        self.assertEqual(self.bridge._max_tool_iterations_for_node("reviewer"), 50)
+        # v6.3 (maintainer 2026-04-20): analyst cap reduced 8→6 — tutorial-search
+        # prompts kept asking for one more source. See _max_tool_iterations_for_node.
+        self.assertEqual(self.bridge._max_tool_iterations_for_node("analyst"), 6)
+        self.assertEqual(self.bridge._max_tool_iterations_for_node("imagegen"), 40)
 
     def test_asset_plan_nodes_use_compact_budgets(self):
-        self.assertEqual(self.bridge._max_tokens_for_node("spritesheet"), 12288)
-        self.assertEqual(self.bridge._timeout_for_node("spritesheet"), 180)   # v4.0: 240→180
-        self.assertEqual(self.bridge._stream_stall_timeout_for_node("spritesheet"), 45)  # v4.0: 90→45
-        self.assertEqual(self.bridge._max_tokens_for_node("assetimport"), 12288)
-        self.assertEqual(self.bridge._timeout_for_node("assetimport"), 180)   # v4.0: 240→180
-        self.assertEqual(self.bridge._stream_stall_timeout_for_node("assetimport"), 45)  # v4.0: 90→45
-        self.assertEqual(self.bridge._max_tokens_for_node("imagegen"), 16384)  # v4.0: 32768→16384
-        self.assertEqual(self.bridge._timeout_for_node("imagegen"), 240)  # v4.0: 420→240
-        self.assertEqual(self.bridge._stream_stall_timeout_for_node("imagegen"), 60)  # v4.0: 210→60
+        self.assertEqual(self.bridge._max_tokens_for_node("spritesheet"), 10240)   # v5.8.1: rollback truncation
+        self.assertEqual(self.bridge._timeout_for_node("spritesheet"), 540)  # v5.8.6: 240→540 (2 turns × 200s JSON + margin)
+        self.assertEqual(self.bridge._stream_stall_timeout_for_node("spritesheet"), 25)
+        self.assertEqual(self.bridge._max_tokens_for_node("assetimport"), 10240)   # v5.8.1: rollback truncation
+        self.assertEqual(self.bridge._timeout_for_node("assetimport"), 540)  # v5.8.6: 240→540
+        self.assertEqual(self.bridge._stream_stall_timeout_for_node("assetimport"), 25)
+        self.assertEqual(self.bridge._max_tokens_for_node("imagegen"), 12288)   # v5.8.1: rollback
+        self.assertEqual(self.bridge._timeout_for_node("imagegen"), 180)  # v6.1.15: 240→180 (tighter wall, observed 15min loops)
+        self.assertEqual(self.bridge._stream_stall_timeout_for_node("imagegen"), 35)
 
     def test_effective_builder_timeout_boosts_for_premium_3d_game(self):
         timeout_sec = self.bridge._effective_timeout_for_node(
@@ -1531,23 +1653,24 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         self.assertGreaterEqual(timeout_sec, 2400)
 
     def test_compatible_gateway_initial_activity_timeout_defaults_are_role_aware(self):
-        # V4.6 SPEED: Ultra-aggressive initial-activity timeouts.
-        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("builder"), 14)
+        # v5.8.6 REDESIGN: reasoning-model era defaults tripled. Builder 90s,
+        # multi-page 120s, others 60-75s. Philosophy = trust the agent.
+        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("builder"), 90)
         self.assertEqual(
             self.bridge._gateway_initial_activity_timeout_for_node(
                 "builder",
                 "做一个 8 页面品牌官网，Assigned HTML filenames for this builder: index.html, about.html, craft.html, contact.html.",
             ),
-            18,  # Multi-page builder gets slightly more headroom
+            120,  # Multi-page builder gets extra headroom
         )
-        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("imagegen"), 12)
-        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("spritesheet"), 10)
-        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("reviewer"), 12)
+        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("imagegen"), 75)
+        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("spritesheet"), 60)
+        self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("reviewer"), 75)
         self.assertEqual(self.bridge._gateway_initial_activity_timeout_for_node("unknown"), 0)
 
     def test_env_overrides_are_clamped(self):
         with patch.dict("os.environ", {
-            "EVERMIND_BUILDER_MAX_TOKENS": "999999",
+            "EVERMIND_BUILDER_TOOLCALL_MAX_TOKENS": "999999",
             "EVERMIND_BUILDER_TIMEOUT_SEC": "5",
             "EVERMIND_MAX_TOKENS": "-1",
             "EVERMIND_TIMEOUT_SEC": "999",
@@ -1557,14 +1680,20 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
             "EVERMIND_ANALYST_MAX_TOOL_ITERS": "1",
             "EVERMIND_DEFAULT_MAX_TOOL_ITERS": "0",
         }):
-            self.assertEqual(self.bridge._max_tokens_for_node("builder"), 65536)
+            # v6.1.10: tool_call max clamped at 49152 (raised from 32768 to
+            # accommodate 80KB+ HTML when builder explicitly overrides).
+            self.assertEqual(self.bridge._max_tokens_for_node("builder"), 49152)
             self.assertEqual(self.bridge._timeout_for_node("builder"), 30)
-            self.assertEqual(self.bridge._max_tokens_for_node("tester"), 1024)
-            self.assertEqual(self.bridge._timeout_for_node("tester"), 600)
-            # V4.3.1: Raised clamps — builder 30, imagegen 20, tester 25, analyst min=2
-            self.assertEqual(self.bridge._max_tool_iterations_for_node("builder"), 30)
-            self.assertEqual(self.bridge._max_tool_iterations_for_node("imagegen"), 20)
-            self.assertEqual(self.bridge._max_tool_iterations_for_node("tester"), 25)
+            # v5.8.4: tester has its own envs now, EVERMIND_MAX_TOKENS/_TIMEOUT_SEC
+            # no longer apply → these assertions now verify the tester-specific defaults
+            # (generic envs do not pass through).
+            self.assertEqual(self.bridge._max_tokens_for_node("tester"), 6144)
+            self.assertEqual(self.bridge._timeout_for_node("tester"), 240)
+            # v6.1.3: raised clamps — builder max 100, imagegen max 80, QA max 100,
+            # analyst min=2. Env overrides are clamped to each node's own range.
+            self.assertEqual(self.bridge._max_tool_iterations_for_node("builder"), 100)
+            self.assertEqual(self.bridge._max_tool_iterations_for_node("imagegen"), 80)
+            self.assertEqual(self.bridge._max_tool_iterations_for_node("tester"), 100)
             self.assertEqual(self.bridge._max_tool_iterations_for_node("analyst"), 2)
 
     def test_analyst_browser_limit_defaults_allow_two_source_research(self):
@@ -1626,7 +1755,10 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         prompt = AGENT_PRESETS["analyst"]["instructions"]
         self.assertIn("MUST use source_fetch or the browser tool", prompt)
         self.assertIn("Use source_fetch first", prompt)
-        self.assertIn("Visit up to 5 distinct URLs", prompt)
+        # v5.8.4+: tightened URL budget to 3 + hard 6-round tool budget
+        self.assertIn("Visit AT MOST 3 distinct URLs", prompt)
+        self.assertIn("HARD TOOL BUDGET", prompt)
+        self.assertIn("6 tool-loop rounds", prompt)
         self.assertIn("visited URLs", prompt)
         self.assertIn("do NOT browse playable web games", prompt)
         self.assertIn("deliverables_contract", prompt)
@@ -1636,9 +1768,14 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         self.assertIn("do NOT use it as a crawl target", prompt)
 
     def test_builder_system_prompt_requires_readable_projectiles_for_shooters(self):
-        prompt = AGENT_PRESETS["builder"]["instructions"]
-        self.assertIn("Shooter sequence", prompt)
-        self.assertIn("spawn-kills", prompt)
+        # v6.1.5: shooter-specific guidance moved to
+        # agent_skills/godogen-tps-control-sanity-lock (conditional load for
+        # shooter briefs only). Verify skill content covers the prior contract.
+        skill_path = Path(__file__).parent.parent / "agent_skills" / "godogen-tps-control-sanity-lock" / "SKILL.md"
+        self.assertTrue(skill_path.exists(), f"Missing shooter skill at {skill_path}")
+        text = skill_path.read_text(encoding="utf-8")
+        self.assertIn("shooter", text.lower())
+        self.assertIn("muzzle", text.lower())
 
     def test_planner_system_prompt_requires_parallel_ownership_and_rollback_contracts(self):
         prompt = AGENT_PRESETS["planner"]["instructions"]
@@ -1658,6 +1795,22 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         self.assertIn("content handoff", scribe)
         self.assertNotIn("XML tags", uidesign)
         self.assertIn("design brief", uidesign)
+
+    def test_uidesign_budget_defaults_are_compact(self):
+        self.assertEqual(self.bridge._max_tool_iterations_for_node("uidesign"), 4)
+        self.assertEqual(self.bridge._timeout_for_node("uidesign"), 180)
+        self.assertEqual(self.bridge._max_tokens_for_node("uidesign"), 6144)
+        self.assertEqual(self.bridge._uidesign_browser_call_limit(), 2)
+
+    def test_uidesign_prompt_prefers_implementation_sources_and_goal_lock(self):
+        prompt = AGENT_PRESETS["uidesign"]["instructions"]
+        self.assertIn("Do NOT research the target brand site itself", prompt)
+        self.assertIn("Never switch product category", prompt)
+
+    def test_analyst_prompt_discourages_live_brand_site_research_for_style_briefs(self):
+        prompt = AGENT_PRESETS["analyst"]["instructions"]
+        self.assertIn("brand-style website tasks", prompt)
+        self.assertIn("NEVER fetch the brand's live site", prompt)
 
     def test_router_prompt_exposes_specialized_agents(self):
         prompt = AGENT_PRESETS["router"]["instructions"]
@@ -1694,44 +1847,48 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         with patch.dict("os.environ", {
             "EVERMIND_BUILDER_STREAM_STALL_SEC": "9999",
             "EVERMIND_STREAM_STALL_SEC": "5",
+            "EVERMIND_QA_STREAM_STALL_SEC": "5",  # v5.8.4: tester/debugger route
         }):
             self.assertEqual(self.bridge._stream_stall_timeout_for_node("builder"), 600)
-            self.assertEqual(self.bridge._stream_stall_timeout_for_node("tester"), 20)  # v4.0: min clamp 30→20
+            # v5.8.4: tester routes through EVERMIND_QA_STREAM_STALL_SEC (min clamp=30)
+            self.assertEqual(self.bridge._stream_stall_timeout_for_node("tester"), 30)
 
     def test_builder_prewrite_call_timeout_defaults_to_180_for_multi_page(self):
+        # v6.1.3: base raised 90 → 600s; multi-page cap 180 is eclipsed.
         input_data = "做一个 8 页面奢侈品官网，包含 index.html, brand.html, collections.html, contact.html。"
-        self.assertEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 180)
+        self.assertGreaterEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 600)
 
     def test_builder_prewrite_call_timeout_tightens_retry_window(self):
+        # v6.1.3: retry cap 180 is eclipsed by 600 base — thinking models need room.
         input_data = (
             "做一个 8 页面奢侈品官网。\n"
             "PREVIOUS ATTEMPT FAILED (retry 1/3): Multi-page delivery incomplete."
         )
-        self.assertEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 180)
+        self.assertGreaterEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 600)
 
     def test_builder_prewrite_call_timeout_clamps_premium_3d_direct_text_first_pass(self):
+        # v6.1.3: 3D direct-text raised 210 → 900s (thinking-friendly).
         input_data = "创建一个 3d 第三人称射击游戏，要有怪物、枪械、关卡和精美建模。"
-        # v3.5.1: raised from 210→360 to prevent systematic first-attempt timeouts on 3D TPS games
-        self.assertEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 360)
-        self.assertEqual(self.bridge._builder_repair_write_timeout("builder", input_data), 360)
+        self.assertGreaterEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 900)
 
     def test_builder_prewrite_call_timeout_keeps_3d_retry_budget(self):
+        # v6.1.3: 3D retry cap 420 is eclipsed by 900 direct-text base.
         input_data = (
             "创建一个 3d 第三人称射击游戏，要有怪物、枪械、关卡和精美建模。\n"
             "PREVIOUS ATTEMPT FAILED (retry 1/3): Builder quality gate failed."
         )
-        self.assertEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 420)
+        self.assertGreaterEqual(self.bridge._builder_prewrite_call_timeout("builder", input_data), 600)
 
     def test_builder_peer_timeouts_match_primary_for_premium_3d_game(self):
         # v5.1: support-lane removed — all peer builders get equal timeout
+        # v5.8.3: base reduced 150→90; still validates both peers get same budget
         input_data = (
             "ADVANCED MODE — Use analyst notes and asset manifest.\n"
             "Build a non-overlapping support subsystem for the same commercial-grade HTML5 game. "
             "Do NOT overwrite /tmp/evermind_output/index.html in this pass unless explicitly reassigned."
         )
         result = self.bridge._builder_prewrite_call_timeout("builder", input_data)
-        # v5.1: No support-lane cap; standard base timeout applies (150s default)
-        self.assertGreaterEqual(result, 150, f"Peer builder timeout {result} should be >= 150")
+        self.assertGreaterEqual(result, 90, f"Peer builder timeout {result} should be >= 90")
 
     def test_effective_builder_stream_stall_timeout_keeps_3d_retry_budget(self):
         input_data = (
@@ -1915,22 +2072,24 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
             return_value={"success": True, "output": "ok", "tool_results": [], "mode": "litellm_chat"}
         )
 
-        result = asyncio.run(
-            bridge.execute(
-                node={
-                    "type": "builder",
-                    "model": "kimi-coding",
-                },
-                plugins=[],
-                input_data=(
-                    "做一个 8 页面轻奢品牌网站。\n"
-                    "Assigned HTML filenames for this builder: index.html, about.html, collections.html, "
-                    "craft.html, materials.html, journal.html, contact.html, faq.html."
-                ),
-                model="kimi-coding",
-                on_progress=None,
+        # v5.8.6: explicit opt-in — direct_multifile is off by default for kimi in prod.
+        with patch.dict("os.environ", {"EVERMIND_BUILDER_KIMI_ALLOW_DIRECT_MULTIFILE": "1"}):
+            result = asyncio.run(
+                bridge.execute(
+                    node={
+                        "type": "builder",
+                        "model": "kimi-coding",
+                    },
+                    plugins=[],
+                    input_data=(
+                        "做一个 8 页面轻奢品牌网站。\n"
+                        "Assigned HTML filenames for this builder: index.html, about.html, collections.html, "
+                        "craft.html, materials.html, journal.html, contact.html, faq.html."
+                    ),
+                    model="kimi-coding",
+                    on_progress=None,
+                )
             )
-        )
 
         self.assertTrue(result.get("success"))
         # Direct multifile mode routes to either openai_compatible_chat (custom gateway) or litellm_chat
@@ -1977,6 +2136,52 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
             or bridge._execute_litellm_chat.await_count > 0
         )
         self.assertTrue(tool_path_called, "Expected tool path via openai_compatible, litellm_tools, or litellm_chat")
+
+    def test_v6410_multi_target_streaming_model_prefers_direct_multifile(self):
+        """v6.4.10 (maintainer 2026-04-22): every streaming-capable provider (gpt-5.x,
+        claude, deepseek, qwen, minimax, ...) running a multi-target builder
+        should pick the direct_multifile fast path instead of the tool_call
+        loop. Regression guard against 2026-04-22 run where kimi/gpt-5.x
+        multi-target builders took 10-15min per builder vs 2-4min when
+        streaming works."""
+        bridge = AIBridge(config={})
+        bridge._check_api_key = MagicMock(return_value=None)
+        bridge._execute_openai_compatible_chat = AsyncMock(
+            return_value={"success": True, "output": "multifile chat", "tool_results": [], "mode": "openai_compatible_chat"}
+        )
+        bridge._execute_openai_compatible = AsyncMock(
+            return_value={"success": True, "output": "tool path", "tool_results": [], "mode": "openai_compatible"}
+        )
+        bridge._execute_litellm_chat = AsyncMock(
+            return_value={"success": True, "output": "multifile chat", "tool_results": [], "mode": "litellm_chat"}
+        )
+
+        # Non-Kimi streaming model with multi-target brief → direct_multifile.
+        result = asyncio.run(
+            bridge.execute(
+                node={"type": "builder", "model": "gpt-5.4"},
+                plugins=[],
+                input_data=(
+                    "做一个 8 页面奢侈品牌网站。\n"
+                    "Assigned HTML filenames for this builder: "
+                    "index.html, pricing.html, features.html, solutions.html."
+                ),
+                model="gpt-5.4",
+                on_progress=None,
+            )
+        )
+        self.assertTrue(result.get("success"))
+        direct_multifile_fired = (
+            bridge._execute_openai_compatible_chat.await_count > 0
+            or bridge._execute_litellm_chat.await_count > 0
+        )
+        self.assertTrue(direct_multifile_fired, "multi-target gpt-5.4 builder must run through direct_multifile fast path")
+        # tool_call path must NOT be used for a multi-target streaming-capable builder.
+        self.assertEqual(
+            bridge._execute_openai_compatible.await_count,
+            0,
+            "multi-target streaming builder should not fall through to the tool_call loop",
+        )
 
     def test_execute_auto_routes_kimi_single_page_game_builder_to_direct_text(self):
         bridge = AIBridge(config={"kimi_api_key": "sk-kimi-test"})
@@ -2156,19 +2361,23 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         self.assertTrue(direct_text_called, "Expected direct text delivery via openai_compatible_chat or litellm_chat")
         bridge._execute_openai_compatible.assert_not_called()
 
-    def test_builder_should_auto_direct_multifile_only_for_kimi_multi_page_builder(self):
+    def test_builder_should_auto_direct_multifile_for_streaming_models(self):
+        # v6.4.10 (maintainer 2026-04-22): direct_multifile is the fast path for
+        # multi-target builders on every streaming-capable provider. Prior
+        # gate was kimi-only + env-opt-in, which forced gpt-5.x / claude /
+        # deepseek through the 10-15min tool_call loop instead of a 2-4min
+        # streaming delivery. Now:
+        #   - every non-Kimi streaming provider: auto True with 2+ targets
+        #   - Kimi still requires EVERMIND_BUILDER_KIMI_ALLOW_DIRECT_MULTIFILE=1
+        #     (v5.8.6 empirical 100% fail still applies)
+        #   - GLM-5.x explicitly denied (sglang#11888 tool_stream incompat)
+        #   - non-builder node_type → False
         input_data = (
             "做一个 8 页面轻奢品牌网站。\n"
             "Assigned HTML filenames for this builder: index.html, about.html, collections.html, "
             "craft.html, materials.html, journal.html, contact.html, faq.html."
         )
-        self.assertTrue(
-            self.bridge._builder_should_auto_direct_multifile(
-                "builder",
-                model_name="kimi-coding",
-                input_data=input_data,
-            )
-        )
+        # Non-builder role never direct_multifile.
         self.assertFalse(
             self.bridge._builder_should_auto_direct_multifile(
                 "reviewer",
@@ -2176,26 +2385,59 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
                 input_data=input_data,
             )
         )
-        self.assertFalse(
+        # Streaming models → True (multi-target builder).
+        self.assertTrue(
             self.bridge._builder_should_auto_direct_multifile(
                 "builder",
                 model_name="gpt-4o",
                 input_data=input_data,
             )
         )
-
-    def test_builder_should_auto_direct_multifile_for_two_target_kimi_builder(self):
-        input_data = (
-            "做一个双页面产品网站，包含首页和定价页。\n"
-            "Assigned HTML filenames for this builder: index.html, pricing.html."
-        )
         self.assertTrue(
+            self.bridge._builder_should_auto_direct_multifile(
+                "builder",
+                model_name="gpt-5.4",
+                input_data=input_data,
+            )
+        )
+        # GLM-5.x still denied (known tool_stream bug).
+        self.assertFalse(
+            self.bridge._builder_should_auto_direct_multifile(
+                "builder",
+                model_name="glm-5.1",
+                input_data=input_data,
+            )
+        )
+        # Kimi: denied without env opt-in, allowed with it.
+        self.assertFalse(
             self.bridge._builder_should_auto_direct_multifile(
                 "builder",
                 model_name="kimi-coding",
                 input_data=input_data,
             )
         )
+        with patch.dict("os.environ", {"EVERMIND_BUILDER_KIMI_ALLOW_DIRECT_MULTIFILE": "1"}):
+            self.assertTrue(
+                self.bridge._builder_should_auto_direct_multifile(
+                    "builder",
+                    model_name="kimi-coding",
+                    input_data=input_data,
+                )
+            )
+
+    def test_builder_should_auto_direct_multifile_for_two_target_kimi_builder(self):
+        input_data = (
+            "做一个双页面产品网站，包含首页和定价页。\n"
+            "Assigned HTML filenames for this builder: index.html, pricing.html."
+        )
+        with patch.dict("os.environ", {"EVERMIND_BUILDER_KIMI_ALLOW_DIRECT_MULTIFILE": "1"}):
+            self.assertTrue(
+                self.bridge._builder_should_auto_direct_multifile(
+                    "builder",
+                    model_name="kimi-coding",
+                    input_data=input_data,
+                )
+            )
 
     def test_builder_should_auto_direct_multifile_for_single_override_target_on_kimi(self):
         input_data = (
@@ -2204,12 +2446,81 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
             "Assigned HTML filenames for this builder: index.html, pricing.html, features.html, "
             "solutions.html, platform.html, contact.html, about.html, faq.html."
         )
-        self.assertTrue(
+        with patch.dict("os.environ", {"EVERMIND_BUILDER_KIMI_ALLOW_DIRECT_MULTIFILE": "1"}):
+            self.assertTrue(
+                self.bridge._builder_should_auto_direct_multifile(
+                    "builder",
+                    model_name="kimi-coding",
+                    input_data=input_data,
+                )
+            )
+
+    def test_builder_direct_multifile_default_disabled_for_kimi_v586(self):
+        """v5.8.6: direct_multifile default off for kimi (100% prose failure in prod)."""
+        input_data = (
+            "做一个 8 页面轻奢品牌网站。\n"
+            "Assigned HTML filenames for this builder: index.html, about.html, collections.html, "
+            "craft.html, materials.html, journal.html, contact.html, faq.html."
+        )
+        self.assertFalse(
             self.bridge._builder_should_auto_direct_multifile(
                 "builder",
                 model_name="kimi-coding",
                 input_data=input_data,
-            )
+            ),
+            "Without env opt-in, kimi builders must skip direct_multifile entirely",
+        )
+
+    def test_v649_retry_markers_classify_zero_files_as_missing_artifact(self):
+        """v6.4.9 F: the three new retry markers (zero-files demote, unnamed-
+        HTML block extractor skips, direct-text no-output timeout) must mark
+        the retry as "missing artifact" — i.e. greenfield retry, not a
+        patch-existing-artifact retry. Before the fix these surfaces were
+        silently bucketed as "has artifact" and dragged retries into patch
+        mode even though nothing had actually been written."""
+        # Zero-files demote (observed 2026-04-22 builder1 first pass)
+        error_text = (
+            "Builder reported success but produced zero files on disk. "
+            "A file_ops write or extractable HTML code block is required."
+        )
+        self.assertTrue(
+            self.bridge._builder_retry_missing_artifact_context(
+                "builder",
+                input_data="rebuild multi-page site",
+                node={"error": error_text},
+            ),
+            "zero-files demote must classify as missing-artifact (greenfield retry)",
+        )
+        # Unnamed-block stream (observed 2026-04-22 builder2 kimi multi-page)
+        error_text = "Skipping unnamed HTML block for multi-page builder output"
+        self.assertTrue(
+            self.bridge._builder_retry_missing_artifact_context(
+                "builder",
+                input_data="",
+                goal_hint=error_text,
+            ),
+            "unnamed-HTML-block stream must classify as missing-artifact",
+        )
+        # Direct-text no-output timeout
+        error_text = (
+            "builder direct-text no-output timeout: 180s elapsed with no real file write."
+        )
+        self.assertTrue(
+            self.bridge._builder_retry_missing_artifact_context(
+                "builder",
+                input_data="",
+                node={"error": error_text},
+            ),
+            "direct-text no-output timeout must classify as missing-artifact",
+        )
+        # Negative control: unrelated retry error must NOT trip missing-artifact.
+        self.assertFalse(
+            self.bridge._builder_retry_missing_artifact_context(
+                "builder",
+                input_data="plain retry",
+                node={"error": "retry 1/3 — reviewer requested clarifying copy"},
+            ),
+            "unrelated reviewer retry must not trip missing-artifact context",
         )
 
     def test_builder_should_auto_direct_text_for_single_page_kimi_game_without_explicit_index_hint(self):
@@ -2243,6 +2554,11 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         )
 
     def test_builder_should_not_auto_direct_text_for_non_root_parallel_support_lane(self):
+        # v5.8.6: pure non-HTML support lanes must still be explicitly flagged
+        # with `builder_is_support_lane_node=True` (or support-lane text).
+        # A primary peer with `can_write_root_index=False` still produces a
+        # staged index.html and legitimately benefits from direct_text, so
+        # the mere absence of allowed_html_targets is no longer enough.
         input_data = "做一个第三人称 3D 射击网页游戏，带怪物、不同枪械、大地图和精美建模，要达到商业级水准。"
         self.assertFalse(
             self.bridge._builder_should_auto_direct_text(
@@ -2253,6 +2569,51 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
                     "type": "builder",
                     "can_write_root_index": False,
                     "allowed_html_targets": [],
+                    "builder_is_support_lane_node": True,
+                },
+            )
+        )
+
+    def test_builder_parallel_peer_with_merger_goes_direct_text_v586(self):
+        """v5.8.6: primary peer builder (merger handles root) must route to
+        direct_text so both Builder 1 and Builder 2 take the same path."""
+        input_data = "Build the core TPS scene and combat. Assigned HTML filenames for this builder: index.html."
+        self.assertTrue(
+            self.bridge._builder_should_auto_direct_text(
+                "builder",
+                model_name="kimi-coding",
+                input_data=input_data,
+                node={
+                    "type": "builder",
+                    "can_write_root_index": False,           # merger owns root
+                    "allowed_html_targets": [],              # orchestrator leaves empty for peers
+                    "builder_merger_like": False,            # this is primary peer, not merger
+                    "builder_is_support_lane_node": False,   # writes HTML, not JS-only
+                },
+            )
+        )
+
+    def test_builder_parallel_multi_page_website_peer_does_not_go_direct_text(self):
+        input_data = (
+            "写一个 8 页的奢侈品牌官网，风格像苹果一样。"
+            "Assigned HTML filenames for this builder: about.html, materials.html, boutiques.html, contact.html."
+        )
+        self.assertFalse(
+            self.bridge._builder_should_auto_direct_text(
+                "builder",
+                model_name="kimi-coding",
+                input_data=input_data,
+                node={
+                    "type": "builder",
+                    "can_write_root_index": False,
+                    "allowed_html_targets": [
+                        "about.html",
+                        "materials.html",
+                        "boutiques.html",
+                        "contact.html",
+                    ],
+                    "builder_merger_like": False,
+                    "builder_is_support_lane_node": False,
                 },
             )
         )
@@ -2564,10 +2925,27 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
         input_data = (
             "Assigned HTML filenames for this builder: index.html, about.html, contact.html."
         )
-        output = "```html index.html\n<!DOCTYPE html><html><body>home</body></html>\n```"
+        output = (
+            "```html index.html\n<!DOCTYPE html><html><head><title>Home</title></head>"
+            "<body><main><h1>Home</h1><p>Concrete premium homepage copy with enough depth to persist.</p></main></body></html>\n```"
+        )
         self.assertEqual(
             self.bridge._builder_missing_html_targets(input_data, output),
             ["about.html", "contact.html"],
+        )
+
+    def test_builder_missing_html_targets_keeps_invalid_index_in_remaining_set(self):
+        input_data = (
+            "Assigned HTML filenames for this builder: index.html, pricing.html, contact.html."
+        )
+        output = (
+            "```html index.html\n<!DOCTYPE html><html><body></body></html>\n```\n"
+            "```html pricing.html\n<!DOCTYPE html><html><head><title>Pricing</title></head>"
+            "<body><main><h1>Pricing</h1><p>Concrete pricing content with enough detail to persist safely.</p></main></body></html>\n```"
+        )
+        self.assertEqual(
+            self.bridge._builder_missing_html_targets(input_data, output),
+            ["index.html", "contact.html"],
         )
 
     def test_builder_missing_html_targets_ignores_truncated_trailing_html_block(self):
@@ -2575,8 +2953,10 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
             "Assigned HTML filenames for this builder: index.html, about.html, contact.html."
         )
         output = (
-            "```html index.html\n<!DOCTYPE html><html><body>home</body></html>\n```\n"
-            "```html about.html\n<!DOCTYPE html><html><body>about</body></html>\n```\n"
+            "```html index.html\n<!DOCTYPE html><html><head><title>Home</title></head>"
+            "<body><main><h1>Home</h1><p>Concrete premium homepage copy with enough depth to persist.</p></main></body></html>\n```\n"
+            "```html about.html\n<!DOCTYPE html><html><head><title>About</title></head>"
+            "<body><main><h1>About</h1><p>Concrete about-page copy with enough depth to persist.</p></main></body></html>\n```\n"
             "```html contact.html\n<!DOCTYPE html><html><body>contact"
         )
         self.assertEqual(
@@ -2614,6 +2994,7 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
         prompt = messages[1]["content"].split("[DIRECT MULTI-FILE INITIAL DELIVERY]", 1)[1]
         self.assertIn("HTML TARGET OVERRIDE: index.html", prompt)
         self.assertIn("Return ONLY this first batch now: index.html", prompt)
+        self.assertIn("index.html is part of this batch and is MANDATORY", prompt)
         self.assertIn("The ONLY valid local HTML route set for this site is: index.html, about.html, collections.html, craft.html, materials.html, journal.html, contact.html, faq.html", prompt)
         self.assertIn("Every internal href that points to a local .html page MUST use one of those exact filenames.", prompt)
         self.assertIn("another continuation will request them immediately", prompt)
@@ -3298,6 +3679,7 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
                         "type": "builder",
                         "can_write_root_index": False,
                         "allowed_html_targets": [],
+                        "builder_is_support_lane_node": True,
                     },
                     tool_results=[],
                     tool_call_stats={},
@@ -3413,6 +3795,196 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
             self.assertTrue((staged_dir / "index.html").exists())
             self.assertFalse((Path(tmpdir) / "index.html").exists())
 
+    def test_auto_save_builder_text_output_stages_peer_direct_text_root_for_merger_pipeline(self):
+        playable_output = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Peer Builder</title>
+</head>
+<body>
+  <main>
+    <button onclick="startGame()">Start</button>
+    <canvas id="gameCanvas"></canvas>
+  </main>
+  <script>
+    let started = false;
+    function startGame() { started = true; requestAnimationFrame(loop); }
+    function loop() { if (!started) return; requestAnimationFrame(loop); }
+    document.addEventListener('keydown', () => {});
+  </script>
+</body>
+</html>"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staged_dir = Path(tmpdir) / "task_7"
+            self.bridge.config["output_dir"] = tmpdir
+            saved_paths = asyncio.run(
+                self.bridge._auto_save_builder_text_output(
+                    output_text=playable_output,
+                    input_data="做一个第三人称 3D 射击游戏",
+                    node={
+                        "type": "builder",
+                        "can_write_root_index": False,
+                        "allowed_html_targets": [],
+                        "subtask_id": "7",
+                        "output_dir": tmpdir,
+                    },
+                    tool_results=[],
+                    tool_call_stats={},
+                    on_progress=None,
+                )
+            )
+
+            self.assertEqual(saved_paths, [str(staged_dir / "index.html")])
+            self.assertTrue((staged_dir / "index.html").exists())
+            self.assertFalse((Path(tmpdir) / "index.html").exists())
+
+    def test_auto_save_builder_text_output_defaults_raw_html_to_index_without_explicit_target(self):
+        playable_output = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Luxury Landing</title>
+</head>
+<body>
+  <main>
+    <section><h1>Luxury</h1><p>Immersive narrative surface with editorial pacing, restrained motion, and premium product storytelling.</p></section>
+    <section><div class="feature-grid"></div><p>Material palette notes, hero composition, and section rhythm are already resolved for implementation.</p></section>
+    <section><h2>Craft</h2><p>Showcase brushed metal details, warm neutral contrast, oversized typography, and controlled reveal timing across every fold.</p></section>
+    <section><h2>Collection</h2><p>Use staggered cards, pinned storytelling, immersive image framing, and high-clarity CTA sequencing without clutter.</p></section>
+    <section><h2>Experience</h2><p>Support hover, focus, and scroll transitions with durable browser-native code, stable layout shells, and meaningful progressive disclosure.</p></section>
+    <section><h2>System</h2><p>Design tokens, motion rules, spacing cadence, and layout constraints should be explicit enough for the runtime to persist as a trustworthy artifact.</p></section>
+  </main>
+</body>
+</html>"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.bridge.config["output_dir"] = tmpdir
+            saved_paths = asyncio.run(
+                self.bridge._auto_save_builder_text_output(
+                    output_text=playable_output,
+                    input_data="Build a commercial-grade multi-page website for a luxury brand.",
+                    node={
+                        "type": "builder",
+                        "can_write_root_index": True,
+                        "allowed_html_targets": [],
+                    },
+                    tool_results=[],
+                    tool_call_stats={},
+                    on_progress=None,
+                )
+            )
+
+            self.assertEqual(saved_paths, [str(Path(tmpdir) / "index.html")])
+            self.assertTrue((Path(tmpdir) / "index.html").exists())
+
+    def test_apply_runtime_node_contracts_adds_peer_staging_contract_when_targets_missing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            staged_dir = Path(tmpdir) / "task_7"
+            text = self.bridge._apply_runtime_node_contracts(
+                {
+                    "type": "builder",
+                    "can_write_root_index": False,
+                    "allowed_html_targets": [],
+                    "subtask_id": "7",
+                    "output_dir": tmpdir,
+                },
+                (
+                    "Build a commercial-grade multi-page website for a luxury brand. "
+                    "Create index.html plus at least 7 additional linked HTML page(s) via file_ops write."
+                ),
+            )
+
+            self.assertIn("[BUILDER PEER STAGING CONTRACT]", text)
+            self.assertIn(str(staged_dir / "index.html"), text)
+            self.assertIn("output only one merger-ready html artifact", text.lower())
+
+    def test_finalize_builder_chat_output_saves_preamble_wrapped_html(self):
+        output = """I'll create the assigned page now.
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Platform</title>
+</head>
+<body>
+  <main>
+    <h1>Platform</h1>
+    <p>Concrete builder content that should be persisted.</p>
+    <section><p>Detailed product copy for the owned route.</p></section>
+  </main>
+</body>
+</html>
+```"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.bridge.config["output_dir"] = tmpdir
+            saved_paths, tool_results, tool_call_stats, failure_msg = asyncio.run(
+                self.bridge._finalize_builder_chat_output(
+                    output_text=output,
+                    input_data="Assigned HTML filenames for this builder: platform.html.",
+                    node={
+                        "type": "builder",
+                        "can_write_root_index": False,
+                        "allowed_html_targets": ["platform.html"],
+                        "output_dir": tmpdir,
+                    },
+                    tool_results=[],
+                    tool_call_stats={},
+                    on_progress=None,
+                )
+            )
+
+            self.assertEqual(failure_msg, "")
+            self.assertEqual(saved_paths, [str(Path(tmpdir) / "platform.html")])
+            self.assertTrue(any(self.bridge._tool_result_has_write(item) for item in tool_results))
+            self.assertGreaterEqual(tool_call_stats.get("file_ops", 0), 1)
+
+    def test_finalize_builder_chat_output_flags_missing_root_index_for_multi_page_batch(self):
+        output = """```html pricing.html
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Pricing</title></head>
+<body><main><h1>Pricing</h1><p>Concrete pricing copy.</p></main></body></html>
+```
+
+```html contact.html
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><title>Contact</title></head>
+<body><main><h1>Contact</h1><p>Concrete contact copy.</p></main></body></html>
+```"""
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.bridge.config["output_dir"] = tmpdir
+            saved_paths, tool_results, tool_call_stats, failure_msg = asyncio.run(
+                self.bridge._finalize_builder_chat_output(
+                    output_text=output,
+                    input_data="Assigned HTML filenames for this builder: index.html, pricing.html, contact.html.",
+                    node={
+                        "type": "builder",
+                        "can_write_root_index": True,
+                        "allowed_html_targets": ["index.html", "pricing.html", "contact.html"],
+                        "output_dir": tmpdir,
+                    },
+                    tool_results=[],
+                    tool_call_stats={},
+                    on_progress=None,
+                )
+            )
+
+            self.assertIn("required root index.html", failure_msg)
+            self.assertEqual(
+                sorted(Path(path).name for path in saved_paths),
+                ["contact.html", "pricing.html"],
+            )
+            self.assertTrue(any(self.bridge._tool_result_has_write(item) for item in tool_results))
+            self.assertGreaterEqual(tool_call_stats.get("file_ops", 0), 2)
+
     def test_builder_partial_text_salvage_result_rejects_non_persistable_game_shell(self):
         thin_output = """```html index.html
 <!DOCTYPE html>
@@ -3511,8 +4083,9 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
             input_data="做一个科技风官网",
         )
         self.assertIn("[Skill: browser-observe-act-verify]", prompt)
-        # Reviewer must handle multi-page sites
-        self.assertIn("cover ALL requested pages", prompt)
+        # v6.1.3: reviewer generalized beyond "pages" to any product type.
+        # Must still require full coverage + strict rejection posture.
+        self.assertIn("Be STRICT", prompt)
 
     def test_analyst_prompt_loads_research_skill(self):
         prompt = self.bridge._compose_system_prompt(
@@ -3589,9 +4162,9 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
         self.assertIn("weapon_primary_brief.md", prompt)
 
     def test_imagegen_max_tokens_budget_is_raised_for_core_pack_completion(self):
-        # v4.0: ImageGen base 32768→16384, retry escalation 8192→4096, cap 49152→32768
-        self.assertEqual(self.bridge._max_tokens_for_node("imagegen", retry_attempt=0), 16384)
-        self.assertEqual(self.bridge._max_tokens_for_node("imagegen", retry_attempt=1), 20480)
+        # v5.8.1: ImageGen 8192 → 12288 rollback (8192 truncated tool_calls)
+        self.assertEqual(self.bridge._max_tokens_for_node("imagegen", retry_attempt=0), 12288)
+        self.assertEqual(self.bridge._max_tokens_for_node("imagegen", retry_attempt=1), 16384)
 
     def test_imagegen_prompt_marks_backend_configured_when_available(self):
         bridge = AIBridge(config={
@@ -3608,17 +4181,20 @@ class TestBuilderForcedOutputPolicy(unittest.TestCase):
         self.assertIn("configured image backend detected", prompt.lower())
 
     def test_reviewer_preset_uses_strict_thresholds(self):
+        # v6.1.3: reviewer softened to "avg ≥ 6.5 + blocking-only reject"
+        # rule. Single-dimension auto-reject removed — drove false negatives.
         prompt = AGENT_PRESETS["reviewer"]["instructions"]
-        self.assertIn("Any single dimension < 5", prompt)
+        self.assertIn("avg \u2265 6.5", prompt)
         self.assertIn("blocking_issues", prompt)
         self.assertIn("ship_readiness", prompt)
         self.assertIn("missing_deliverables", prompt)
 
     def test_reviewer_preset_requires_route_named_owner_changes(self):
         prompt = AGENT_PRESETS["reviewer"]["instructions"]
-        # Reviewer must require naming page routes and prefixing owners
-        self.assertIn("index.html", prompt)
-        self.assertIn("cities.html", prompt)
+        # v6.1.3: reviewer now generalized across product types. Still must
+        # require file/UI anchor citations and owner-prefixed rework items.
+        self.assertIn("file:line", prompt)
+        self.assertIn("file + UI anchor", prompt)
         self.assertIn("Builder: ...", prompt)
         self.assertIn("Polisher: ...", prompt)
 
@@ -5237,8 +5813,13 @@ class TestContextCompaction(unittest.TestCase):
                 )
             )
 
-        self.assertFalse(result["success"])
-        self.assertIn("polisher loop guard", result["error"])
+        # v6.1.14f (maintainer 2026-04-20): polisher loop-guard without writes is
+        # now treated as SUCCESS ("polish skipped" — builder's artifact is
+        # already high quality). Orchestrator proceeds to reviewer without
+        # burning a retry on a pass-through polisher. The guard reason is
+        # preserved in `warning` for observability.
+        self.assertTrue(result["success"])
+        self.assertIn("polisher loop guard", result.get("warning", ""))
         self.assertEqual(result.get("tool_call_stats", {}).get("browser"), 2)
 
     def test_openai_compatible_polisher_grants_one_write_after_forced_prompt(self):
@@ -5727,11 +6308,11 @@ class TestContextCompaction(unittest.TestCase):
 
         self.assertEqual(
             bridge._plain_text_final_timeout_for_node("analyst", "tool_iterations_exhausted"),
-            60,  # V4.2: raised from 35 to 60 for report generation after 20+ research rounds
+            200,  # v5.8.5: 120→200 — mid-synthesis streaming hit 120s ceiling, lost the handoff
         )
         self.assertEqual(
             bridge._plain_text_final_timeout_for_node("analyst", "missing_final_handoff"),
-            60,  # V4.2: raised from 35 to 60
+            200,  # v5.8.5: 120→200 — same reason as tool_iterations_exhausted branch
         )
         self.assertEqual(
             bridge._plain_text_final_timeout_for_node("uidesign", "missing_final_handoff"),

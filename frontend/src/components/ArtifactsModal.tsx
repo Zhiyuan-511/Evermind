@@ -106,7 +106,7 @@ export default function ArtifactsModal({ open, onClose, lang }: ArtifactsModalPr
                                         marginBottom: 6,
                                         borderColor: active ? 'var(--blue)' : 'var(--glass-border)',
                                         color: active ? 'var(--blue)' : 'var(--text2)',
-                                        background: active ? 'rgba(79,143,255,0.08)' : undefined,
+                                        background: active ? 'rgba(91,140,255,0.08)' : undefined,
                                     }}
                                 >
                                     <span>{task.task_id}</span>

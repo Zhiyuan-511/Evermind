@@ -42,6 +42,27 @@ DEFAULT_SETTINGS = {
         "deepseek": "",
         "kimi": "",
         "qwen": "",
+        # v5.8.6: new providers added to UI — they were always in MODEL_REGISTRY
+        # but users had no way to configure their keys until now.
+        "minimax": "",
+        "zhipu": "",
+        "doubao": "",
+        "yi": "",
+        "aigate": "",  # v5.8.6: private-relay.example multi-model relay (sk-ag-*)
+        # v5.8.6: optional secondary keys — populated via Settings UI. When
+        # present, ai_bridge round-robins between primary and secondary to
+        # unblock rate limits on concurrent nodes.
+        "openai_2": "",
+        "anthropic_2": "",
+        "gemini_2": "",
+        "deepseek_2": "",
+        "kimi_2": "",
+        "qwen_2": "",
+        "minimax_2": "",
+        "zhipu_2": "",
+        "doubao_2": "",
+        "yi_2": "",
+        "aigate_2": "",
     },
     "api_bases": {
         "openai": "",
@@ -50,8 +71,13 @@ DEFAULT_SETTINGS = {
         "deepseek": "",
         "kimi": "",
         "qwen": "",
+        "minimax": "",
+        "zhipu": "",
+        "doubao": "",
+        "yi": "",
+        "aigate": "https://llm.private-relay.example/v1",
     },
-    "workspace": str(Path.home() / "Desktop"),
+    "workspace": str(Path.home() / ".evermind" / "workspace"),
     "artifact_sync_dir": "",
     "output_dir": "/tmp/evermind_output",
     "privacy": {
@@ -61,6 +87,32 @@ DEFAULT_SETTINGS = {
         "customPatterns": [],
     },
     "relay_endpoints": [],
+    # v7.1i (2026-04-25): CLI 中转 key 配置
+    # 区分订阅类 vs 中转类 CLI：
+    #   - claude / gemini = 官方订阅，CLI 内部 OAuth，不需要 key（留空即可）
+    #   - codex / kimi / qwen = 走中转或 API key，必须填 key 否则 401
+    # 启动时 apply_api_keys() 会把这些 key 注入对应的 env 变量
+    # （codex → GMN_OPENAI_API_KEY，kimi → KIMI_API_KEY，qwen → DASHSCOPE_API_KEY），
+    # cli_backend.py 的 _build_*_cmd 读 env 决定走中转还是订阅。
+    "cli_relay_keys": {
+        "codex": {
+            "api_key": "",
+            "base_url": "https://relayx.com",
+            "subscription_mode": False,  # True = 走 ChatGPT 官方 OAuth (codex auth login)
+        },
+        "kimi": {
+            "api_key": "",
+            "base_url": "https://api.kimi.com/coding/v1",
+            "subscription_mode": False,
+        },
+        "qwen": {
+            "api_key": "",
+            "base_url": "",
+            "subscription_mode": False,
+        },
+        "claude": {"subscription_mode": True},  # 官方订阅，不需要 key
+        "gemini": {"subscription_mode": True},  # 官方订阅，不需要 key
+    },
     "control": {
         "mouseEnabled": True,
         "keyboardEnabled": True,
@@ -116,6 +168,17 @@ DEFAULT_SETTINGS = {
         "enable_query_search": True,
     },
     "image_generation": {
+        # v6.1.15 (maintainer 2026-04-20): 独立图片生成 API 配置.
+        # 用户填了 provider + api_key 就启用真图片生成；否则 imagegen 节点
+        # 降级为 SVG/CSS 占位符（不产生 broken <img src> 链接）.
+        "provider": "",              # "tongyi" | "doubao-image" | "wenxin" | "seedream" | "flux-fal" | "dalle-3" | "openai-compat"
+        "api_key": "",               # provider 专用 key
+        "base_url": "",              # 仅当 provider="openai-compat" 或自定义中转站时填
+        "default_size": "1024x1024", # 1024x1024 / 1536x1024 / 1024x1536 / 2048x2048
+        "default_model": "",         # 留空 → provider 默认；如 wanx2.1-t2i-turbo / doubao-seedream-3-0-t2i-250428
+        "max_images_per_run": 10,    # 限量防炸
+        "auto_crop": True,           # 生成后是否自动 rembg + PIL 裁剪 4 种比例
+        # 旧 ComfyUI 字段保留兼容
         "comfyui_url": "",
         "workflow_template": "",
     },
@@ -125,8 +188,30 @@ DEFAULT_SETTINGS = {
         "preferred_model": "",         # "" = use CLI's default model
         "detected_clis": {},           # Populated by /api/cli/detect
         "node_cli_overrides": {},      # {"builder": {"cli": "claude", "model": "sonnet"}, ...}
+        # v7.1 (maintainer 2026-04-24) ULTRA MODE — 顶级玩家"一次到位"长任务模式
+        # 启用后：所有 timeout ×10，iter cap ×4，max_rejections=5，
+        # builder 并行 ×4，支持多文件项目脚手架 + 图片生成/爬取 + 打包部署。
+        # 任务时长预期 3-4 小时到 1 天。质量 > 速度。
+        "ultra_mode": False,
+        "ultra_parallel_builders": 4,     # 默认 4 个 builder 并行
+        "ultra_max_rejections": 5,        # reviewer 可打回 5 次
+        "ultra_total_timeout_sec": 86400, # 24 小时总超时兜底
+        "ultra_project_scaffold": True,   # 支持多文件脚手架（非单 HTML）
+        "ultra_asset_tools": True,        # 图片生成/爬取/favicon 多尺寸
     },
     "ui_language": "zh",
+    # v6.1.3 (maintainer 2026-04-18): separate language toggle for node walkthrough
+    # reports. "" means "inherit ui_language". When set to "zh" or "en"
+    # explicitly, the walkthrough text is forced to that language regardless
+    # of UI language.
+    "walkthrough_language": "",
+    # v6.1.10 (maintainer 2026-04-19): when True and user configured TWO API keys
+    # for the primary builder provider (e.g. kimi_api_key + kimi_api_key_2),
+    # parallel peer builders all use the PREFERRED first model and round-robin
+    # across both keys — avoids provider rotation to a weaker fallback model.
+    # When False or user only has one key, peer builder #2+ falls through to
+    # the user's secondary model to avoid rate-limit collision.
+    "peer_builders_share_model_when_multikey": True,
 }
 
 _cached_cipher: Optional[Fernet] = None
@@ -367,7 +452,12 @@ def save_settings(settings: Dict) -> bool:
 
 
 def apply_api_keys(settings: Dict):
-    """Set API keys and base URLs as environment variables for LiteLLM."""
+    """Set API keys and base URLs as environment variables for LiteLLM.
+
+    v5.8.6: expanded to cover every provider in MODEL_REGISTRY plus optional
+    secondary keys (``_2`` suffix) for concurrent-node load balancing. Missing
+    providers here caused "paste a MiniMax key, see zero models" symptoms.
+    """
     key_map = {
         "openai": "OPENAI_API_KEY",
         "anthropic": "ANTHROPIC_API_KEY",
@@ -375,6 +465,11 @@ def apply_api_keys(settings: Dict):
         "deepseek": "DEEPSEEK_API_KEY",
         "kimi": "KIMI_API_KEY",
         "qwen": "QWEN_API_KEY",
+        "minimax": "MINIMAX_API_KEY",
+        "zhipu": "ZHIPU_API_KEY",
+        "doubao": "DOUBAO_API_KEY",
+        "yi": "YI_API_KEY",
+        "aigate": "AIGATE_API_KEY",   # v5.8.6: private-relay.example multi-model relay
     }
     base_map = {
         "openai": "OPENAI_API_BASE",
@@ -383,6 +478,11 @@ def apply_api_keys(settings: Dict):
         "deepseek": "DEEPSEEK_API_BASE",
         "kimi": "KIMI_API_BASE",
         "qwen": "QWEN_API_BASE",
+        "minimax": "MINIMAX_API_BASE",
+        "zhipu": "ZHIPU_API_BASE",
+        "doubao": "DOUBAO_API_BASE",
+        "yi": "YI_API_BASE",
+        "aigate": "AIGATE_API_BASE",
     }
     count = 0
     for name, env_key in key_map.items():
@@ -392,6 +492,14 @@ def apply_api_keys(settings: Dict):
             count += 1
         else:
             os.environ.pop(env_key, None)
+        # Secondary key — pool reads {ENV}_2 for concurrent load balancing
+        sec_val = settings.get("api_keys", {}).get(f"{name}_2", "")
+        sec_env = f"{env_key}_2"
+        if sec_val:
+            os.environ[sec_env] = sec_val
+            count += 1
+        else:
+            os.environ.pop(sec_env, None)
     # Apply relay/proxy base URLs
     base_count = 0
     for name, env_key in base_map.items():
@@ -401,7 +509,30 @@ def apply_api_keys(settings: Dict):
             base_count += 1
         else:
             os.environ.pop(env_key, None)
-    logger.info(f"Applied {count} API keys and {base_count} base URLs to environment")
+    # v7.1i: CLI relay keys → env vars consumed by cli_backend._build_*_cmd
+    # codex/kimi/qwen 走中转时要这些 env，订阅模式（claude/gemini）不需要。
+    cli_relay = settings.get("cli_relay_keys", {}) or {}
+    cli_env_map = {
+        "codex": "GMN_OPENAI_API_KEY",
+        "kimi": "KIMI_API_KEY",
+        "qwen": "DASHSCOPE_API_KEY",
+    }
+    cli_count = 0
+    for cli_name, env_key in cli_env_map.items():
+        cli_cfg = cli_relay.get(cli_name, {}) or {}
+        # subscription_mode=True → 主动清掉 env，确保 cli_backend 走订阅路径
+        if cli_cfg.get("subscription_mode"):
+            os.environ.pop(env_key, None)
+            continue
+        api_key = (cli_cfg.get("api_key") or "").strip()
+        if api_key:
+            os.environ[env_key] = api_key
+            cli_count += 1
+        else:
+            os.environ.pop(env_key, None)
+    logger.info(
+        f"Applied {count} API keys, {base_count} base URLs, {cli_count} CLI relay keys to environment"
+    )
     return count
 
 
@@ -447,12 +578,14 @@ def validate_api_key(provider: str, key: str) -> Dict:
         }.get(provider)
 
         if provider == "kimi":
-            # Support both new Kimi Coding keys (sk-kimi-*) and legacy Moonshot keys.
+            # v6.1: coding-plan keys (sk-kimi-*) must hit api.kimi.com/coding/v1
+            # with UA=claude-code/0.1.0 (official white-listed). Legacy Moonshot
+            # platform keys use moonshot.cn with vanilla Authorization headers.
             if key.startswith("sk-kimi-"):
                 kwargs["model"] = "openai/kimi-k2.5"
                 kwargs["api_base"] = "https://api.kimi.com/coding/v1"
                 kwargs["extra_headers"] = {
-                    "User-Agent": "claude-code/1.0",
+                    "User-Agent": "claude-code/0.1.0",
                     "X-Client-Name": "claude-code",
                 }
             else:

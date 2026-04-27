@@ -165,7 +165,9 @@ class TestAIBridgeReportAndHandoffPostProcessing(unittest.TestCase):
         # v3.5.1: _build_structured_summary now uses "completed all responsibilities" with bold markdown
         self.assertIn("completed all responsibilities", result["handoff_packet"]["context_summary"])
         self.assertIn("Stack:", result["handoff_packet"]["context_summary"])
-        self.assertIn("## Deliverables", result["handoff_context_message"])
+        # v6.1.5 THIN handoff: "## Deliverables" section was dropped in favor
+        # of a single-line "Files: ..." render; assert file names appear.
+        self.assertIn("Files:", result["handoff_context_message"])
         self.assertNotEqual(result["handoff_packet"]["context_summary"], rich_result["output"][:2000])
 
 

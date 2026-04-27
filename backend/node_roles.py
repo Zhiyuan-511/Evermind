@@ -9,6 +9,7 @@ _CANONICAL_NODE_ROLES = {
     "analyst",
     "builder",
     "polisher",
+    "patcher",
     "reviewer",
     "tester",
     "deployer",
@@ -70,6 +71,7 @@ def normalize_node_role(value: str) -> str:
     for canonical in (
         "builder",
         "polisher",
+        "patcher",
         "reviewer",
         "tester",
         "deployer",

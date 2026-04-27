@@ -117,113 +117,176 @@ class HandoffPacket:
         """Deserialize from dict."""
         return cls(**{k: v for k, v in data.items() if k in cls.__dataclass_fields__})
 
-    def to_context_message(self, lang: str = "en") -> str:
+    def to_context_message(self, lang: str = "en", *, verbose: bool = False) -> str:
         """
         Format the handoff packet as a readable context message
         for injection into the downstream node's prompt.
+
+        v6.1.5 (maintainer 2026-04-19): THIN handoff. Default = ≤400 bytes rendered,
+        reference to OpenHands AgentDelegateAction (4 fields) + MetaGPT Document
+        .get_meta() (path-only refs) + CrewAI TaskOutput (auto summary).
+        Prior renderer emitted ~1200 bytes every handoff. Pass verbose=True to
+        restore full render for debug/analytics.
         """
-        parts = []
+        zh = lang == "zh"
+        parts: List[str] = []
 
-        # Header
-        if lang == "zh":
-            parts.append(f"## 📦 来自 {self.source_node_type} 节点的交接信息")
-        else:
-            parts.append(f"## 📦 Handoff from {self.source_node_type} node")
+        header = (
+            f"[handoff ← {self.source_node_type or self.source_node or 'node'}]"
+            if not zh else
+            f"[交接 ← {self.source_node_type or self.source_node or '节点'}]"
+        )
+        parts.append(header)
 
-        # Summary
-        if self.context_summary:
-            if lang == "zh":
-                parts.append(f"\n### 工作摘要\n{self.context_summary}")
+        brief = (self.context_summary or "").strip()
+        if brief:
+            brief_capped = brief if len(brief) <= 400 else brief[:397] + "..."
+            parts.append(brief_capped)
+
+        # File refs (path-only by default; drops 2000-byte source_bundles)
+        file_bits: List[str] = []
+        for f in (self.files_produced or [])[:5]:
+            if isinstance(f, dict):
+                p = str(f.get("path") or "").strip()
             else:
-                parts.append(f"\n### Work Summary\n{self.context_summary}")
+                p = str(f or "").strip()
+            if p:
+                file_bits.append(p)
+        if file_bits:
+            label = "产出" if zh else "Files"
+            parts.append(f"{label}: " + ", ".join(file_bits))
 
-        # Files
-        if self.deliverables:
-            if lang == "zh":
-                parts.append("\n### 交付清单")
-            else:
-                parts.append("\n### Deliverables")
-            for item in self.deliverables[:10]:
-                parts.append(f"- {item}")
+        # Decisions (3 max, no rationale)
+        dec = [d for d in (self.decisions_made or []) if str(d).strip()][:3]
+        if dec:
+            label = "决策" if zh else "Decisions"
+            parts.append(f"{label}: " + " | ".join(d[:120] for d in dec))
 
-        if self.files_produced:
-            if lang == "zh":
-                parts.append("\n### 产出文件")
-            else:
-                parts.append("\n### Files Produced")
-            for f in self.files_produced:
-                if isinstance(f, dict):
-                    purpose = f.get("purpose", "")
-                    parts.append(f"- `{f.get('path', '?')}` — {purpose}")
-                else:
-                    parts.append(f"- `{f}`")
+        # Blockers (warnings + known_issues merged, 2 max)
+        blockers: List[str] = []
+        for source in (self.warnings, self.known_issues):
+            for b in (source or []):
+                s = str(b).strip()
+                if s and s not in blockers:
+                    blockers.append(s)
+        if blockers:
+            label = "待办" if zh else "Blockers"
+            parts.append(f"{label}: " + " | ".join(b[:160] for b in blockers[:2]))
 
-        # Key decisions
-        if self.decisions_made:
-            if lang == "zh":
-                parts.append("\n### 关键决策")
-            else:
-                parts.append("\n### Key Decisions")
-            for d in self.decisions_made:
-                parts.append(f"- {d}")
-
-        # Design choices with rationale
-        if self.design_choices:
-            if lang == "zh":
-                parts.append("\n### 设计选择")
-            else:
-                parts.append("\n### Design Choices")
-            for dc in self.design_choices:
-                parts.append(f"- **{dc.get('choice', '?')}**: {dc.get('rationale', '')}")
-
-        # Source code references
-        if self.source_bundles:
-            if lang == "zh":
-                parts.append("\n### 参考源码")
-            else:
-                parts.append("\n### Reference Source Code")
-            for sb in self.source_bundles[:5]:
-                parts.append(f"\n#### {sb.get('title', 'Reference')}")
-                if sb.get("url"):
-                    parts.append(f"Source: {sb['url']}")
-                content = str(sb.get("content_summary") or sb.get("content", ""))[:2000]
-                if content:
-                    parts.append(f"```\n{content}\n```")
-
-        # Technologies
-        if self.technologies_used:
-            joined = ", ".join(self.technologies_used)
-            if lang == "zh":
-                parts.append(f"\n### 使用技术\n{joined}")
-            else:
-                parts.append(f"\n### Technologies Used\n{joined}")
-
-        # Open questions and warnings
+        # v6.1.5 (Opus Y1): preserve 1 open_question — low cost, high value
+        # when analyst flags ambiguous briefs.
         if self.open_questions:
-            if lang == "zh":
-                parts.append("\n### ⚠️ 待解决问题")
-            else:
-                parts.append("\n### ⚠️ Open Questions")
-            for q in self.open_questions:
-                parts.append(f"- {q}")
+            label = "疑问" if zh else "Q"
+            q = str(self.open_questions[0])[:120]
+            if q.strip():
+                parts.append(f"{label}: {q}")
 
-        if self.known_issues:
-            if lang == "zh":
-                parts.append("\n### 🐛 已知问题")
-            else:
-                parts.append("\n### 🐛 Known Issues")
-            for issue in self.known_issues:
-                parts.append(f"- {issue}")
+        if not verbose:
+            return "\n".join(parts)
 
-        if self.warnings:
-            if lang == "zh":
-                parts.append("\n### ⚡ 注意事项")
-            else:
-                parts.append("\n### ⚡ Warnings")
-            for w in self.warnings:
-                parts.append(f"- {w}")
-
+        # Verbose fallback (original behavior for debug pages)
+        parts.append("")
+        if self.deliverables:
+            parts.append(("交付" if zh else "Deliverables") + ":")
+            parts.extend(f"- {item}" for item in self.deliverables[:10])
+        if self.design_choices:
+            parts.append(("设计" if zh else "Design choices") + ":")
+            for dc in self.design_choices[:4]:
+                parts.append(f"- {dc.get('choice','')}: {dc.get('rationale','')}")
+        if self.source_bundles:
+            parts.append(("参考" if zh else "References") + ":")
+            for sb in self.source_bundles[:3]:
+                title = sb.get("title", "")
+                url = sb.get("url", "")
+                parts.append(f"- {title} ({url})")
+        if self.technologies_used:
+            parts.append(("技术" if zh else "Tech") + ": " + ", ".join(self.technologies_used))
+        if self.open_questions:
+            parts.append(("疑问" if zh else "Open questions") + ":")
+            parts.extend(f"- {q}" for q in self.open_questions[:3])
         return "\n".join(parts)
+
+
+#
+# ChatDev-style edge payload processors (v6.1.5)
+# ─────────────────────────────────────────────
+# Reference: ChatDev 2.0 workflow/graph.py:L373-394 `payload_processor` callback
+# on edges. MetaGPT Document.get_meta() — path-only refs. Returning None drops
+# the payload entirely (like ChatDev's regex processor returning None).
+#
+from typing import Callable
+
+PayloadProcessor = Callable[[HandoffPacket], Optional[HandoffPacket]]
+
+
+def drop_verbose_fields(packet: HandoffPacket) -> HandoffPacket:
+    """Strip heavy debug fields; keep brief + files + decisions."""
+    stripped = HandoffPacket.from_dict(packet.to_dict())
+    stripped.source_bundles = []
+    stripped.reference_urls = []
+    stripped.design_choices = []
+    stripped.rejected_alternatives = []
+    stripped.api_patterns = []
+    stripped.technologies_used = []
+    stripped.token_usage = {}
+    stripped.duration_seconds = 0.0
+    stripped.tool_calls_count = 0
+    stripped.iterations = 0
+    return stripped
+
+
+def keep_file_refs_only(packet: HandoffPacket) -> HandoffPacket:
+    """For integrator/merger: only care about WHERE artifacts landed."""
+    stripped = HandoffPacket.from_dict(packet.to_dict())
+    stripped.decisions_made = []
+    stripped.design_choices = []
+    stripped.source_bundles = []
+    stripped.reference_urls = []
+    stripped.open_questions = []
+    stripped.context_summary = f"{packet.source_node_type} produced the files listed below."
+    return stripped
+
+
+def summarize_brief(max_len: int = 200) -> PayloadProcessor:
+    """Cap context_summary to max_len; OpenHands AgentDelegateAction style."""
+    def _proc(packet: HandoffPacket) -> HandoffPacket:
+        out = HandoffPacket.from_dict(packet.to_dict())
+        s = (out.context_summary or "").strip()
+        if len(s) > max_len:
+            out.context_summary = s[: max_len - 3] + "..."
+        return out
+    return _proc
+
+
+BUILT_IN_PROCESSORS: Dict[str, PayloadProcessor] = {
+    "drop_verbose": drop_verbose_fields,
+    "file_refs_only": keep_file_refs_only,
+    "summarize_200": summarize_brief(200),
+    "summarize_400": summarize_brief(400),
+}
+
+
+def apply_edge_processor(
+    packet: HandoffPacket,
+    processor: Any,
+) -> Optional[HandoffPacket]:
+    """Apply a processor by name or callable; None return drops packet."""
+    if processor is None:
+        return packet
+    fn: Optional[PayloadProcessor]
+    if callable(processor):
+        fn = processor
+    elif isinstance(processor, str):
+        fn = BUILT_IN_PROCESSORS.get(processor)
+    else:
+        fn = None
+    if fn is None:
+        return packet
+    try:
+        return fn(packet)
+    except Exception:  # processor bugs must never break pipeline
+        logger.exception("edge payload_processor %r failed; passthrough", processor)
+        return packet
 
 
 class HandoffValidator:

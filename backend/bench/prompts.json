@@ -1,0 +1,25 @@
+{
+  "version": "6.1.6",
+  "title": "Evermind HTML5 App Generation Micro-Benchmark",
+  "description": "10 prompts to evaluate one-shot HTML5 app generation quality vs v0/Bolt.new/Lovable. Uses LLM-as-judge with strong external model (GPT-5 or Claude 4.6+) to avoid self-evaluation bias.",
+  "rubric": {
+    "runnability": {"weight": 25, "checks": ["loads without error", "no console errors"]},
+    "feature_completeness": {"weight": 25, "checks": ["every feature in prompt present"]},
+    "visual_polish": {"weight": 20, "checks": ["typography hierarchy", "color coherence", "whitespace", "animations"]},
+    "interactivity": {"weight": 15, "checks": ["keyboard/mouse/touch reacts", "feedback on action"]},
+    "responsive": {"weight": 10, "checks": ["375px", "768px", "1440px don't break"]},
+    "code_quality": {"weight": 5, "checks": ["structure", "readability", "comments"]}
+  },
+  "prompts": [
+    {"id": "p01_fps_game", "category": "game", "text": "Build a 3D first-person shooter game in the browser. Use Three.js. Include: pointer-lock mouse look, WASD movement, left-click to shoot projectiles, 5 enemies that spawn and patrol, HUD with HP/ammo/score, game-over + restart. Single index.html, inline JS/CSS, no external assets."},
+    {"id": "p02_snake", "category": "game", "text": "Build a Snake game with Canvas. Arrow keys control, score increments per food, game over on wall/self collision, 3 difficulty levels (speed). Include pause/resume. Keep grid crisp at any window size."},
+    {"id": "p03_markdown_editor", "category": "tool", "text": "Build a live Markdown editor: split pane, left is textarea, right renders HTML. Include code-block syntax highlighting, dark/light theme toggle, character count. Auto-save to localStorage."},
+    {"id": "p04_pomodoro", "category": "tool", "text": "Build a Pomodoro timer: 25 min focus, 5 min break auto-cycle, play soft beep on transition, show today's completed pomodoros from localStorage, edit goal text per session."},
+    {"id": "p05_kanban", "category": "tool", "text": "Build a Kanban board: 3 columns (To Do / In Progress / Done), add card, drag between columns, edit/delete card on click, persist to localStorage. Clean minimalist design."},
+    {"id": "p06_dashboard", "category": "dataviz", "text": "Build an analytics dashboard: 4 KPI cards (users, revenue, orders, conversion), 1 line chart (30-day trend), 1 bar chart (top 5 products), 1 donut (traffic sources). Use Chart.js inline or pure SVG. Include date-range filter (mock data)."},
+    {"id": "p07_landing", "category": "website", "text": "Build a responsive SaaS landing page: hero with CTA, 3-column feature grid, pricing table (3 tiers with highlighted middle), testimonial strip, footer. Mobile-first at 375px. Include dark mode toggle."},
+    {"id": "p08_chat_ui", "category": "ui", "text": "Build a chat UI shell: sidebar with conversation list, main pane with message bubbles (user right/AI left), input with submit + attach button, streaming typing animation on AI response (simulate with setInterval), render code blocks with syntax highlight."},
+    {"id": "p09_whiteboard", "category": "tool", "text": "Build an online whiteboard: Canvas drawing with pen+color+size, undo/redo (20 history), export PNG, clear button. Touch-enabled for mobile. Single HTML, no libraries."},
+    {"id": "p10_music_viz", "category": "creative", "text": "Build a music visualizer: user uploads an audio file, Web Audio API extracts frequency data, Canvas renders real-time spectrum bars + floating particle system reacting to bass. Play/pause controls. Aesthetic dark theme."}
+  ]
+}

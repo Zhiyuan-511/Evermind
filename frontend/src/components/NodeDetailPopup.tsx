@@ -72,7 +72,7 @@ type DetailTab = 'overview' | 'timeline' | 'refs' | 'reports';
 const STATUS_COLORS: Record<string, { color: string; labelZh: string; labelEn: string }> = {
     idle: { color: '#555', labelZh: '空闲', labelEn: 'Idle' },
     queued: { color: '#8b8fa3', labelZh: '排队中', labelEn: 'Queued' },
-    running: { color: '#4f8fff', labelZh: '执行中', labelEn: 'Running' },
+    running: { color: '#5B8CFF', labelZh: '执行中', labelEn: 'Running' },
     passed: { color: '#40d67c', labelZh: '已完成', labelEn: 'Passed' },
     done: { color: '#40d67c', labelZh: '已完成', labelEn: 'Done' },
     failed: { color: '#ff4f6a', labelZh: '失败', labelEn: 'Failed' },
@@ -166,6 +166,7 @@ function nodeTypeLabel(nodeType: string, lang: 'en' | 'zh'): string {
         scribe: { zh: '文档节点', en: 'Scribe' },
         merger: { zh: '合并器', en: 'Merger' },
         polisher: { zh: '抛光器', en: 'Polisher' },
+        patcher: { zh: '补丁师', en: 'Patcher' },
         imagegen: { zh: '图像生成', en: 'Image Gen' },
         spritesheet: { zh: '精灵图生成', en: 'Spritesheet' },
         assetimport: { zh: '素材导入', en: 'Asset Import' },
@@ -200,7 +201,7 @@ function extractToolMention(text: string): string | null {
 
 // v3.0: Simple Markdown renderer (no external deps)
 function SimpleMarkdown({ content, accentColor }: { content: string; accentColor?: string }) {
-    const accent = accentColor || '#4f8fff';
+    const accent = accentColor || '#5B8CFF';
     const lines = content.split('\n');
     const elements: React.ReactNode[] = [];
     let inCodeBlock = false;
@@ -548,6 +549,10 @@ function roleOverviewHint(nodeType: string, lang: 'en' | 'zh'): string {
             zh: '图像生成节点使用AI生成项目所需的图片素材、图标、背景等视觉资源。',
             en: 'The Image Gen node uses AI to generate visual assets like images, icons, and backgrounds needed by the project.',
         },
+        patcher: {
+            zh: '补丁师基于审查员的 blocking_issues 生成外科手术式 unified-diff 补丁，最小修改、绝不重写。',
+            en: 'The Patcher produces surgical unified-diff patches from reviewer blocking_issues — minimum-diff fixes, never a rewrite.',
+        },
     };
     const hint = hints[nodeType];
     return hint ? (lang === 'zh' ? hint.zh : hint.en) : '';
@@ -670,7 +675,9 @@ function normalizeEntries(
             ts: endedAt || startedAt || Date.now(),
             type: descriptor?.type || tone,
             title: descriptor?.title || (lang === 'zh' ? titleZh : titleEn),
-            text: humanText.slice(0, 2400),
+            // v5.8: bumped 2400 → 16000 so Cursor/Antigravity-grade walkthrough reports
+            // (analyst ~5KB, reviewer ~6KB with blocking_issues) render in full.
+            text: humanText.slice(0, 16000),
         });
     };
 
@@ -706,11 +713,13 @@ function artifactMeta(artifactType: string, lang: 'en' | 'zh') {
 function normalizeArtifactPreview(content: string): string {
     const trimmed = String(content || '').trim();
     if (!trimmed) return '';
+    // v5.8: 4000 → 20000 so reviewer/tester JSON verdicts + analyst handoffs
+    // with full blocking_issues lists render without truncation.
     try {
         const parsed = JSON.parse(trimmed);
-        return JSON.stringify(parsed, null, 2).slice(0, 4000);
+        return JSON.stringify(parsed, null, 2).slice(0, 20000);
     } catch {
-        return trimmed.slice(0, 4000);
+        return trimmed.slice(0, 20000);
     }
 }
 
@@ -852,9 +861,16 @@ export default function NodeDetailPopup({ open, onClose, lang, nodeData }: NodeD
     const startedAt = Number(mergedNode.startedAt || 0);
     const endedAt = Number(mergedNode.endedAt || 0);
     const logs = Array.isArray(mergedNode.log) ? mergedNode.log : [];
-    const codeLines = Number((mergedNode as any).codeLines || 0);
-    const totalLines = Number((mergedNode as any).totalLines || 0);
-    const codeKb = Number((mergedNode as any).codeKb || 0);
+    const rawCodeLines = Number((mergedNode as any).codeLines || 0);
+    const rawTotalLines = Number((mergedNode as any).totalLines || 0);
+    const rawCodeKb = Number((mergedNode as any).codeKb || 0);
+    // v6.1: guard against "1 line / 49KB" mismatch from minified output — if
+    // codeLines is suspiciously low relative to bytes, estimate from size.
+    const codeKb = rawCodeKb;
+    const byteSize = Math.round(rawCodeKb * 1024);
+    const estimatedLines = byteSize >= 2048 ? Math.max(Math.floor(byteSize / 80), 1) : rawCodeLines;
+    const codeLines = rawCodeLines > 1 ? rawCodeLines : Math.max(rawCodeLines, rawTotalLines, estimatedLines);
+    const totalLines = rawTotalLines > 0 ? rawTotalLines : codeLines;
     const codeLanguages: string[] = Array.isArray((mergedNode as any).codeLanguages) ? (mergedNode as any).codeLanguages : [];
     const durationText = (() => {
         if (mergedNode.durationSeconds && mergedNode.durationSeconds > 0) {

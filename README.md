@@ -1,77 +1,147 @@
-# Evermind — AI Workflow Orchestrator 🧠
+<div align="center">
+  <h1>Evermind</h1>
 
-> 多 AI 智能体协作的可视化工作流编辑器，类似 Dify / Flowise / LangFlow
+  <p><strong>An open-source multi-agent orchestration desktop app, with a built-in AI browser and native support for every major LLM — local or cloud, Chinese or Western.</strong></p>
 
-## 🚀 Quick Start
+  <p>
+    <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
+    <a href="https://github.com/Zhiyuan-511/Evermind/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Zhiyuan-511/Evermind?include_prereleases"></a>
+    <a href="https://github.com/Zhiyuan-511/Evermind/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Zhiyuan-511/Evermind?style=social"></a>
+  </p>
 
-### 1. 启动后端
+  <p>
+    <a href="https://github.com/Zhiyuan-511/Evermind/releases/latest">Download</a> ·
+    <a href="INSTALL.md">Install guide</a> ·
+    <a href="BUILD.md">Build from source</a> ·
+    <a href="CHANGELOG.md">Changelog</a>
+  </p>
+</div>
+
+---
+
+## What is Evermind?
+
+Evermind is a desktop app that runs **multiple AI agents as a DAG pipeline** on your Mac.
+Compose a router + planner + analyst + parallel builders + reviewer + tester as a graph — not a chain — and watch them collaborate live.
+
+It ships with:
+
+- A **built-in Chromium browser** agents can drive, with a visible AI cursor, click ripples, scroll glow and typing overlays so you can see what the AI is doing.
+- A **Monaco code editor** side-by-side with chat.
+- **Provider plugins for 12 LLM vendors** — Kimi, Qwen, DeepSeek, Zhipu GLM, Doubao, MiniMax, OpenAI, Anthropic, Gemini, xAI Grok, Mistral, Meta Llama.
+- A **quality-guard runtime** that detects narration-only output, empty batches, reasoning-mode leaks and auto-falls-back to tool-call mode.
+- **Streaming-everything** WebSocket runtime (port 8765), live trace viewer, persistent session memory.
+- **BYOK** — your API keys stay on disk (AES-encrypted) and requests go directly to the provider you configured. No Evermind cloud. No proxy.
+
+> This whole project was written by a human and Claude, together, with zero lines of hand-written code from the author. It's an experiment in what two people — one silicon, one not — can ship in a living codebase.
+
+## Key features
+
+- 🧩 **Multi-agent DAG pipelines** — router / planner / analyst / imagegen / spritesheet / assetimport / builder×N / merger / reviewer / tester / debugger / deployer
+- 🌐 **Built-in agent browser** — AX + paint-order snapshot, 13 atomic mouse/keyboard actions, AI cursor overlay, click ripples, scroll edge-glow, typed-char float-up, element highlight boxes
+- 📝 **YAML harness templates** — 16-node prompts externalized; hot-swap without rebuild
+- 🔌 **12 LLM providers** — one plugin per vendor, not one size fits all
+- 🇨🇳 **Kimi / Qwen / DeepSeek / GLM / Doubao / MiniMax** — first-class Chinese LLM support with per-vendor thinking-disable, prompt-cache, retry policy
+- 🤖 **OpenAI / Anthropic / Gemini / Grok / Mistral / Llama** — native Responses / Messages / generateContent protocol shaping
+- 🖥️ **Monaco editor** — same engine as VS Code, side-by-side with chat
+- 🧠 **Session memory** — cross-conversation local SQLite
+- 🛡️ **Quality guard** — narration-guard, empty-batch detection (10 KB threshold), kill-switch override — see [V5.8.7](CHANGELOG.md#580-2026-04-18)
+- 🎯 **Speculative execution** — parallel peer agents for 2–4× faster pipelines
+- 📊 **Live trace viewer** — every tool call, every token, real time
+- 🔑 **BYOK + encrypted key storage** — AES-256 on disk
+- 🔄 **WebSocket streaming everything** — no 30s stalls
+
+## Quick start
+
 ```bash
-cd backend
-pip install -r requirements.txt
-cp .env.example .env   # 填入你的 API Keys
-python3 server.py
+# macOS Apple Silicon
+curl -LO https://github.com/Zhiyuan-511/Evermind/releases/latest/download/Evermind-arm64.dmg
+open Evermind-arm64.dmg
+# drag Evermind.app to Applications, then right-click → Open on first launch
 ```
 
-### 2. 打开前端
-打开浏览器访问 **http://localhost:8765**
+Set at least one API key on first launch (Settings → API keys). See [INSTALL.md](INSTALL.md) for a full walk-through.
 
-### 3. 配置 API Key
-点击右上角 ⚙️ 设置 → 接口 → 填入至少一个 API Key
-
-## 📁 项目结构
+## Architecture
 
 ```
-ai智能体合作/
-├── backend/                  # Python 后端
-│   ├── server.py            # FastAPI + WebSocket 服务器
-│   ├── ai_bridge.py         # AI 模型调用引擎 (LiteLLM 100+ 模型)
-│   ├── orchestrator.py      # 自主编排引擎
-│   ├── executor.py          # 节点执行器
-│   ├── privacy.py           # 脱敏处理 (PII masking)
-│   ├── proxy_relay.py       # 中转 API 管理
-│   ├── plugins/             # 7 个插件
-│   │   ├── base.py          # 插件基类 + 安全等级
-│   │   └── implementations.py  # screenshot, browser, file_ops, shell, git, CUA, UI control
-│   ├── requirements.txt
-│   └── .env.example
-├── evermind_godmode_final.html  # 可视化前端 (单文件)
-├── frontend/                # Next.js 版前端 (可选)
-└── docker-compose.yml
+┌─────────────────────────────────────────────────────────┐
+│  Electron main (Node)                                    │
+│  ├── Next.js renderer (React + Monaco + Chromium view)   │
+│  └── Spawns Python sidecar ──────────────┐               │
+└──────────────────────────────────────────┼───────────────┘
+                                           │
+                        WebSocket / HTTP :8765
+                                           │
+┌──────────────────────────────────────────▼───────────────┐
+│  Python FastAPI backend                                  │
+│  ├── Pipeline engine (DAG executor, YAML harness)        │
+│  ├── Agent router (planner/analyst/builder/reviewer)     │
+│  ├── Quality guard (narration / empty-batch / kill)      │
+│  ├── Provider plugins (Kimi / Qwen / DeepSeek / GLM /    │
+│  │                     Doubao / MiniMax / OpenAI /       │
+│  │                     Anthropic / Gemini / xAI /        │
+│  │                     Mistral / Meta Llama)             │
+│  └── Browser plugin (Playwright + AI cursor overlay)     │
+└──────────────────────────────────────────────────────────┘
 ```
 
-## ✨ Features
+## Screenshots
 
-- **可视化节点编辑器** — 拖拽连线，构建 AI 工作流
-- **100+ AI 模型** — OpenAI / Claude / Gemini / DeepSeek / Kimi / Qwen / Ollama
-- **中转 API** — 支持任意 OpenAI 兼容端点
-- **脱敏处理** — 手机/邮箱/身份证/API Key 等 11 种 PII 自动脱敏
-- **AI 控制电脑** — 鼠标/键盘/截图/拖拽/剪贴板/窗口管理
-- **安全等级** — L1-L4 权限控制，L3 确认弹窗，L4 密码+倒计时
-- **中英文** — 完整 i18n 支持
+| Pipeline canvas | Chat + editor |
+|-----------------|---------------|
+| ![pipeline](docs/assets/ss-pipeline.png) | ![chat](docs/assets/ss-chat.png) |
 
-## 🎨 网站生成质量模式
+| Agent browser | Live trace |
+|---------------|------------|
+| ![browser](docs/assets/ss-browser.png) | ![trace](docs/assets/ss-trace.png) |
 
-- 默认稳态模式（推荐）：`EVERMIND_BUILDER_ENABLE_BROWSER=0`
-  - Builder 仅使用本地 `file_ops`，更稳定
-  - 已内置更严格审美规则：禁用 emoji 图标，优先 inline SVG，商业级布局规范
-- 增强模式（可选）：`EVERMIND_BUILDER_ENABLE_BROWSER=1`
-  - Builder 可额外调用 `browser` 做少量网页风格参考（仍输出本地单文件 HTML）
-  - 适合追求更强视觉灵感，但速度会略慢、运行波动会更大
+*(Add the screenshots under `docs/assets/` before tagging a release.)*
 
-可用质量阈值：
-- `EVERMIND_MAX_EMOJI_GLYPHS=0`（默认）禁止生成 emoji 图标
+## Install
 
-## 🔌 API
+- **Users**: [INSTALL.md](INSTALL.md) — download .dmg and run
+- **Developers**: [BUILD.md](BUILD.md) — build from source + Apple signing guide
 
-| Endpoint | Method | 说明 |
-|---|---|---|
-| `/api/health` | GET | 健康检查 |
-| `/api/models` | GET | 可用模型列表 |
-| `/api/relay/add` | POST | 添加中转端点 |
-| `/api/relay/list` | GET | 列出中转端点 |
-| `/api/privacy/test` | POST | 测试脱敏 |
-| `/api/execute` | POST | 执行单个节点 |
+## Contributing
 
-## 📄 License
+PRs welcome. Before opening one:
 
-MIT
+```bash
+python3 -m pytest backend/tests -q        # backend
+cd frontend && npx tsc --noEmit           # types
+```
+
+Add an entry to `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Sign your commit with `git commit -s`. Open with a description of the intent and a short test plan.
+
+## Safety
+
+Every agent action that writes files, executes shell, or navigates the browser is logged in the live trace. Support-lane builders cannot write to the root `index.html`. The browser plugin defaults to headless; overlays are on so the user always sees what's happening. See [docs/safety.md](docs/safety.md) for the full model.
+
+## License
+
+[Apache 2.0](LICENSE). Commercial, modification, distribution all allowed — the license only asks you to state the changes you made, keep the license text, and not use the "Evermind" trademark as your own product name.
+
+## Credits
+
+Evermind learns from the best in class:
+
+- [Aider](https://github.com/Aider-AI/aider) — editblock / whole / udiff output formats
+- [Cline](https://github.com/cline/cline) — BYOK + safety model
+- [OpenHands](https://github.com/All-Hands-AI/OpenHands) — agent runtime concepts
+- [bolt.diy](https://github.com/stackblitz-labs/bolt.diy) — multi-provider UX
+- [browser-use](https://github.com/browser-use/browser-use) — AX-tree snapshot + element highlight
+- [rrweb](https://github.com/rrweb-io/rrweb) — mouse replay cursor animation
+- [ghost-cursor](https://github.com/Xetera/ghost-cursor) — Bezier mouse movement
+- [Monaco Editor](https://github.com/microsoft/monaco-editor)
+- [FastAPI](https://github.com/tiangolo/fastapi)
+
+## Project philosophy
+
+Evermind is built on three beliefs:
+
+1. **LLM vendors are not interchangeable.** Kimi, Qwen, DeepSeek, Doubao, MiniMax, OpenAI, Anthropic, Gemini each have different reasoning fields, tool schemas, retry rules. The right abstraction is one plugin per vendor — not one OpenAI-compat middleman for all of them.
+
+2. **Weak models can be made strong with better plumbing.** The difference between a model that works and one that doesn't is often a single `enable_thinking=False` or a `<think>` tag that nobody stripped. Evermind's quality guard closes those gaps.
+
+3. **Agents must be visible.** When the AI drives your browser, you should see a cursor, a ripple, a scroll glow, a highlighted target — not a frozen screen with a status string.

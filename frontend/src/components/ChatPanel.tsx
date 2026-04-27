@@ -15,8 +15,10 @@ interface ChatPanelProps {
     running: boolean;
     onStop: () => void;
     lang: 'en' | 'zh';
-    difficulty: 'simple' | 'standard' | 'pro';
-    onDifficultyChange: (d: 'simple' | 'standard' | 'pro') => void;
+    difficulty: 'simple' | 'standard' | 'pro' | 'ultra' | 'custom';
+    onDifficultyChange: (d: 'simple' | 'standard' | 'pro' | 'ultra' | 'custom') => void;
+    cliEnabled?: boolean;  // v7.1i: Ultra requires CLI mode on, otherwise dimmed/disabled
+    customCanvasNodeCount?: number;
     runtimeMode?: string;
     taskTitle?: string | null;
     taskStatus?: string | null;
@@ -129,7 +131,7 @@ function stripLeadingMarker(content: string): string {
 
 function messageBadge(msg: ChatMessage, lang: 'en' | 'zh'): { label: string; color: string; bg: string } {
     if (msg.role === 'user') {
-        return { label: lang === 'zh' ? '目标' : 'Goal', color: 'var(--blue)', bg: 'rgba(79, 143, 255, 0.1)' };
+        return { label: lang === 'zh' ? '目标' : 'Goal', color: 'var(--blue)', bg: 'rgba(91, 140, 255, 0.1)' };
     }
     if (msg.icon === '✅' || msg.icon === '🏁') {
         return { label: lang === 'zh' ? '完成' : 'Done', color: '#22c55e', bg: 'rgba(34, 197, 94, 0.1)' };
@@ -138,7 +140,7 @@ function messageBadge(msg: ChatMessage, lang: 'en' | 'zh'): { label: string; col
         return { label: lang === 'zh' ? '失败' : 'Failed', color: '#ef4444', bg: 'rgba(239, 68, 68, 0.1)' };
     }
     if (msg.icon === '⚙️') {
-        return { label: lang === 'zh' ? '执行中' : 'Running', color: 'var(--blue)', bg: 'rgba(79, 143, 255, 0.1)' };
+        return { label: lang === 'zh' ? '执行中' : 'Running', color: 'var(--blue)', bg: 'rgba(91, 140, 255, 0.1)' };
     }
     if (msg.sender === 'Plan' || msg.icon === '📋') {
         return { label: lang === 'zh' ? '规划' : 'Plan', color: '#a855f7', bg: 'rgba(168, 85, 247, 0.1)' };
@@ -170,7 +172,7 @@ function messageBadge(msg: ChatMessage, lang: 'en' | 'zh'): { label: string; col
 function getCardStyle(msg: ChatMessage): React.CSSProperties {
     if (msg.role === 'user') {
         return {
-            background: 'rgba(79, 143, 255, 0.08)',
+            background: 'rgba(91, 140, 255, 0.08)',
             borderLeft: '3px solid var(--blue)',
             borderRadius: 8,
         };
@@ -194,8 +196,8 @@ function getCardStyle(msg: ChatMessage): React.CSSProperties {
     // Running milestones
     if (msg.icon === '⚙️') {
         return {
-            background: 'rgba(79, 143, 255, 0.04)',
-            borderLeft: '3px solid rgba(79, 143, 255, 0.4)',
+            background: 'rgba(91, 140, 255, 0.04)',
+            borderLeft: '3px solid rgba(91, 140, 255, 0.4)',
             borderRadius: 8,
         };
     }
@@ -361,6 +363,8 @@ export default function ChatPanel({
     selectedRuntime = 'local',
     onRuntimeChange,
     showOpenClawRuntime = true,
+    customCanvasNodeCount = 0,
+    cliEnabled = false,
 }: ChatPanelProps) {
     const [input, setInput] = useState('');
     const [logsExpanded, setLogsExpanded] = useState(false);
@@ -384,6 +388,21 @@ export default function ChatPanel({
             inputRef.current.focus();
         }
     }, [running]);
+
+    // v6.2 (maintainer 2026-04-20): listen for template pre-fill events dispatched
+    // by WelcomeWizard / TemplateGallery. Fills the input with the template's
+    // goal so the user just needs to hit Send.
+    useEffect(() => {
+        const handler = (e: Event) => {
+            const detail = (e as CustomEvent).detail as { goal?: string } | undefined;
+            const goal = String(detail?.goal || '').trim();
+            if (!goal) return;
+            setInput(goal);
+            setTimeout(() => inputRef.current?.focus(), 50);
+        };
+        window.addEventListener('evermind-prefill-goal', handler);
+        return () => window.removeEventListener('evermind-prefill-goal', handler);
+    }, []);
 
     // Split messages into feed (milestones) and logs (console)
     const feedMessages = useMemo(
@@ -654,40 +673,112 @@ export default function ChatPanel({
                     </button>
                 )}
 
-                {/* Difficulty selector */}
+                {/* Difficulty selector — v7.1i (maintainer 2026-04-25): 5 modes incl. Ultra.
+                    Ultra mode triggers 14-NE pro plan + Ultra CLI orchestration:
+                    analyst + uidesign + scribe + 4 parallel builders + merger + polisher
+                    + reviewer + patcher + deployer + tester + debugger. */}
                 <div style={{
                     display: 'flex', gap: 2, marginBottom: 8,
                     borderRadius: 8, overflow: 'hidden',
                     border: '1px solid var(--glass-border)',
                 }}>
-                    {([['simple', tr('极速', 'Blitz'), '2-3'],
-                       ['standard', tr('平衡', 'Balanced'), '3-4'],
-                       ['pro', tr('深度', 'Deep'), '7-10']] as const).map(([key, label, nodes]) => (
-                        <button
-                            key={key}
-                            onClick={() => onDifficultyChange(key as 'simple' | 'standard' | 'pro')}
-                            title={`${nodes} ${tr('个节点', 'nodes')}`}
-                            style={{
-                                flex: 1, padding: '5px 0',
-                                fontSize: 10, fontWeight: 600,
-                                border: 'none', cursor: 'pointer',
-                                background: difficulty === key
-                                    ? key === 'simple' ? 'rgba(79,143,255,0.12)'
-                                    : key === 'standard' ? 'rgba(255,154,64,0.12)'
-                                    : 'rgba(168,85,247,0.12)'
-                                    : 'transparent',
-                                color: difficulty === key
-                                    ? key === 'simple' ? 'var(--blue)'
-                                    : key === 'standard' ? 'var(--orange)'
-                                    : 'var(--purple)'
-                                    : 'var(--text3)',
-                                transition: 'all 0.15s',
-                            }}
-                        >
-                            {label}
-                        </button>
-                    ))}
+                    {(() => {
+                        const tiers: Array<[string, string, string]> = [
+                            ['simple', tr('极速', 'Blitz'), tr('2-3 个节点', '2-3 nodes')],
+                            ['standard', tr('平衡', 'Balanced'), tr('3-4 个节点', '3-4 nodes')],
+                            ['pro', tr('深度', 'Deep'), tr('7-10 个节点', '7-10 nodes')],
+                        ];
+                        // v7.1i (maintainer 2026-04-25): Ultra 按钮只在 CLI 模式开启时显示。
+                        // 否则按钮根本不出现在 UI 上 —— Ultra 依赖 CLI 进程，没 CLI 这选项没意义。
+                        if (cliEnabled) {
+                            tiers.push(['ultra', tr('Ultra', 'Ultra'),
+                                tr('14 节点 + 4 并行 builder', '14 nodes + 4 parallel builders')]);
+                        }
+                        tiers.push(['custom', tr('自定义', 'Custom'),
+                            customCanvasNodeCount > 0
+                                ? tr(`${customCanvasNodeCount} 个画布节点`, `${customCanvasNodeCount} canvas nodes`)
+                                : tr('先在画布上拖节点', 'Arrange nodes on canvas first'),
+                        ]);
+                        return tiers.map(([key, label, hint]) => {
+                        const isCustom = key === 'custom';
+                        const customMissing = isCustom && customCanvasNodeCount < 2;
+                        // v7.1i: Ultra requires CLI mode to be enabled.
+                        // When CLI mode is OFF, Ultra is dimmed and disabled.
+                        const isUltra = key === 'ultra';
+                        const ultraDisabled = isUltra && !cliEnabled;
+                        // v7.2 (maintainer 2026-04-26): Custom mode is no longer a
+                        // hard-disabled button when the canvas is empty —
+                        // selecting it without ≥2 nodes simply shows an inline
+                        // hint banner so users know to drag nodes in. Hard
+                        // disabling led to confusion ("the lock icon, can't
+                        // click it"). Ultra still hard-disables when CLI off.
+                        const disabled = ultraDisabled;
+                        const tooltip = ultraDisabled
+                            ? tr('需先在设置中开启 CLI 模式', 'Enable CLI Mode in Settings first')
+                            : customMissing
+                                ? tr('点击选择，再去画布拖 ≥2 个节点（点击后会显示提示）', 'Click to select; then drag ≥2 nodes onto the canvas (a hint will appear).')
+                                : hint;
+                        return (
+                            <button
+                                key={key}
+                                disabled={disabled}
+                                onClick={() => {
+                                    if (!disabled) {
+                                        onDifficultyChange(key as 'simple' | 'standard' | 'pro' | 'ultra' | 'custom');
+                                    }
+                                }}
+                                title={tooltip}
+                                style={{
+                                    flex: 1, padding: '5px 0',
+                                    fontSize: 10, fontWeight: 600,
+                                    border: 'none',
+                                    cursor: disabled ? 'not-allowed' : 'pointer',
+                                    background: difficulty === key
+                                        ? key === 'simple' ? 'rgba(91,140,255,0.12)'
+                                        : key === 'standard' ? 'rgba(255,154,64,0.12)'
+                                        : key === 'pro' ? 'rgba(168,85,247,0.12)'
+                                        : key === 'ultra' ? 'rgba(236,72,153,0.14)'
+                                        : 'rgba(34,197,94,0.12)'
+                                        : 'transparent',
+                                    color: difficulty === key
+                                        ? key === 'simple' ? 'var(--blue)'
+                                        : key === 'standard' ? 'var(--orange)'
+                                        : key === 'pro' ? 'var(--purple)'
+                                        : key === 'ultra' ? '#ec4899'
+                                        : '#22c55e'
+                                        : (customMissing || ultraDisabled ? 'var(--text3)' : 'var(--text3)'),
+                                    opacity: ultraDisabled ? 0.35
+                                        : (customMissing && difficulty === 'custom' ? 0.6 : 1),
+                                    transition: 'all 0.15s',
+                                }}
+                            >
+                                {label}
+                                {ultraDisabled && <span style={{ marginLeft: 3, fontSize: 9 }}>🔒</span>}
+                            </button>
+                        );
+                        });
+                    })()}
                 </div>
+                {difficulty === 'custom' && (
+                    <div style={{
+                        marginBottom: 8, padding: '6px 8px',
+                        fontSize: 10, lineHeight: 1.5,
+                        color: customCanvasNodeCount >= 2 ? '#22c55e' : 'var(--orange)',
+                        background: customCanvasNodeCount >= 2 ? 'rgba(34,197,94,0.06)' : 'rgba(255,154,64,0.06)',
+                        border: `1px solid ${customCanvasNodeCount >= 2 ? 'rgba(34,197,94,0.25)' : 'rgba(255,154,64,0.25)'}`,
+                        borderRadius: 6,
+                    }}>
+                        {customCanvasNodeCount >= 2
+                            ? tr(
+                                `✓ 自定义模式：画布当前有 ${customCanvasNodeCount} 个节点，发送任务后 Planner 会严格按画布拓扑分派。`,
+                                `✓ Custom mode: ${customCanvasNodeCount} nodes on canvas. Planner will strictly follow your canvas topology when you send the task.`
+                            )
+                            : tr(
+                                '⚠ 自定义模式：画布上节点不足（需 ≥ 2 个）。请在右侧画布拖入节点或从模板库加载，或切回其他模式。',
+                                '⚠ Custom mode: not enough nodes on canvas (need ≥ 2). Drag nodes on the canvas at right, load a template, or switch back to another mode.'
+                            )}
+                    </div>
+                )}
                 {/* P1-2: Runtime toggle */}
                 {showOpenClawRuntime && onRuntimeChange && (
                     <div style={{
@@ -826,7 +917,7 @@ export default function ChatPanel({
                             color: !connected ? 'var(--text3)' : 'var(--text1)',
                             outline: 'none',
                             transition: 'all 0.2s ease',
-                            boxShadow: inputFocused ? '0 0 0 3px rgba(79, 143, 255, 0.15)' : sendFlash ? '0 0 12px rgba(34, 197, 94, 0.3)' : 'none',
+                            boxShadow: inputFocused ? '0 0 0 3px rgba(91, 140, 255, 0.15)' : sendFlash ? '0 0 12px rgba(34, 197, 94, 0.3)' : 'none',
                         }}
                     />
                     <button
@@ -835,9 +926,9 @@ export default function ChatPanel({
                         style={{
                             padding: '6px 14px',
                             fontSize: 14,
-                            background: !connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0) ? 'rgba(255,255,255,0.04)' : sendFlash ? 'rgba(34, 197, 94, 0.2)' : 'rgba(79, 143, 255, 0.12)',
+                            background: !connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0) ? 'rgba(255,255,255,0.04)' : sendFlash ? 'rgba(34, 197, 94, 0.2)' : 'rgba(91, 140, 255, 0.12)',
                             color: !connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0) ? 'var(--text3)' : sendFlash ? '#22c55e' : 'var(--blue)',
-                            border: `1px solid ${sendFlash ? 'rgba(34,197,94,0.3)' : 'rgba(79, 143, 255, 0.2)'}`,
+                            border: `1px solid ${sendFlash ? 'rgba(34,197,94,0.3)' : 'rgba(91, 140, 255, 0.2)'}`,
                             borderRadius: 8,
                             cursor: !connected || attachmentsBusy || (!input.trim() && pendingAttachments.length === 0) ? 'not-allowed' : 'pointer',
                             transition: 'all 0.2s',

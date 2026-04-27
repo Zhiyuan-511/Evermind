@@ -23,7 +23,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Keep the packaged app bundle immutable at runtime.
 sys.dont_write_bytecode = True
@@ -109,15 +109,23 @@ BACKEND_LOCK_FILE = STATE_DIR / "backend.lock"
 
 
 def _ensure_file_logging():
+    """v7.3.9 audit-fix CRITICAL — replace plain FileHandler with rotating
+    handler. Prior code had no rotation, so heavy use produced a 5–10 GB log
+    in 24h. Now: 50 MB max + 5 backups (250 MB total ceiling)."""
     try:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         root = logging.getLogger()
         for handler in root.handlers:
-            if isinstance(handler, logging.FileHandler):
-                base = getattr(handler, "baseFilename", "")
-                if base and Path(base).resolve() == LOG_FILE.resolve():
-                    return
-        file_handler = logging.FileHandler(LOG_FILE, encoding="utf-8")
+            base = getattr(handler, "baseFilename", "")
+            if base and Path(base).resolve() == LOG_FILE.resolve():
+                return  # Already attached
+        from logging.handlers import RotatingFileHandler
+        file_handler = RotatingFileHandler(
+            LOG_FILE,
+            maxBytes=50 * 1024 * 1024,
+            backupCount=5,
+            encoding="utf-8",
+        )
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s"))
         root.addHandler(file_handler)
@@ -138,6 +146,14 @@ _backend_lock_handle = None
 ORPHANED_RUNNING_RUN_STALE_S = max(15, coerce_int(os.getenv("EVERMIND_ORPHANED_RUNNING_RUN_STALE_S", 45), 45))
 
 app = FastAPI(title="Evermind Backend", version=APP_VERSION)
+
+# v6.4.4 (maintainer 2026-04-21): GitHub integration router
+try:
+    from git_routes import router as _git_router
+    app.include_router(_git_router)
+except Exception as _git_err:
+    import logging as _lg
+    _lg.getLogger("evermind.server").warning("git routes failed to load: %s", _git_err)
 
 
 def _to_epoch_ms(value: Any, default: int | None = None) -> int:
@@ -1150,8 +1166,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # We skip X-Frame-Options entirely for preview routes only.
         path = request.url.path
         if path.startswith("/preview"):
-            # Allow iframe embedding & brief caching for faster preview loads
-            response.headers["Cache-Control"] = "public, max-age=5"
+            # v7.1f (maintainer 2026-04-24): NO cache for /preview — reviewer/
+            # tester must always observe the LATEST patched code. Old
+            # `max-age=5` allowed Playwright to serve stale JS/CSS for 5s,
+            # which is exactly long enough for a fast patcher edit to be
+            # invisible to the immediately-following reviewer re-observation.
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
         else:
             response.headers["X-Frame-Options"] = "DENY"
             response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
@@ -1162,9 +1184,13 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 
 # ─────────────────────────────────────────────
-# Security — Request body size limit (5 MB)
+# Security — Request body size limit
+# v7.4: was 5 MB which silently blocked uploads larger than ~3.7 MB raw
+# (base64 inflates ~33%) before the 25 MB UI / 12 MB route caps could
+# return a friendly error. Bumped so the route-level cap is the binding
+# constraint and the 413 middleware only catches genuinely abusive bodies.
 # ─────────────────────────────────────────────
-MAX_REQUEST_BODY_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_REQUEST_BODY_BYTES = 50 * 1024 * 1024  # 50 MB (covers 25 MB raw + base64 inflation + JSON envelope)
 
 
 class RequestSizeLimitMiddleware(BaseHTTPMiddleware):
@@ -1196,6 +1222,10 @@ MAX_WS_CONNECTIONS = 10
 connected_clients: Set[WebSocket] = set()
 _active_tasks: Dict[int, list] = {}  # client_id → [asyncio.Task, ...]
 _detached_tasks: Set[asyncio.Task] = set()  # long-lived tasks that survive sender WS disconnect
+# v6.4.34 (maintainer 2026-04-23): cross-handler references so chat_stop can
+# interrupt an in-flight chat turn. Keyed by client_id → handle.
+_chat_cancel_handles: Dict[int, Dict[str, bool]] = {}
+_chat_queue_handles: Dict[int, Any] = {}
 
 # ── Session Memory: pipeline↔chat context sharing ──
 # Key: session_id → {pipeline_results: [...], chat_messages: [...]}
@@ -1310,25 +1340,352 @@ def _compress_chat_messages(mem: Dict[str, list]) -> None:
     mem["chat_messages"] = msgs[-40:]
 
 
+def _detect_workspace_tech_stack(index_path: Path) -> str:
+    """v6.4.30 (maintainer 2026-04-22) — peek at index.html head to identify
+    the tech stack so chat agent proposes stack-appropriate edits.
+    Returns a short one-liner like 'Three.js r164 (3D game)' or empty."""
+    try:
+        head = index_path.read_text(encoding="utf-8", errors="ignore")[:3000].lower()
+    except Exception:
+        return ""
+    signals = []
+    if "three.js" in head or "three.min.js" in head or "new three." in head:
+        signals.append("Three.js (3D/WebGL)")
+    if "canvas" in head and "getcontext" in head:
+        signals.append("Canvas 2D")
+    if 'from "react"' in head or "react.createelement" in head or 'import react' in head:
+        signals.append("React")
+    if "vue.js" in head or "createapp" in head:
+        signals.append("Vue")
+    if "phaser" in head:
+        signals.append("Phaser")
+    if "pixi" in head or "pixi.js" in head:
+        signals.append("Pixi.js")
+    if "tailwind" in head:
+        signals.append("Tailwind CSS")
+    if signals:
+        return " + ".join(signals)
+    return "vanilla HTML/CSS/JS"
+
+
+def _load_workspace_conventions() -> str:
+    """v6.4.30 — auto-detect and read CLAUDE.md / AGENTS.md / .cursorrules
+    from OUTPUT_DIR root (Claude Code / Cursor auto-discovery pattern).
+    The chat agent should honor project-specific conventions before every
+    coding action — this avoids re-negotiating style rules every turn."""
+    try:
+        root = OUTPUT_DIR  # type: ignore[name-defined]
+        if not root.exists():
+            return ""
+    except Exception:
+        return ""
+    for name in ("CLAUDE.md", "AGENTS.md", ".cursorrules", ".evermind-rules.md"):
+        path = root / name
+        if path.exists() and path.is_file():
+            try:
+                body = path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            if not body.strip():
+                continue
+            # Cap at ~2500 chars to avoid prompt bloat; keep first section.
+            body = body[:2500]
+            return (
+                f"\n\n## Workspace Conventions (from {name}, auto-loaded)\n"
+                "Honor these project-specific rules before every coding action:\n\n"
+                f"{body}\n"
+            )
+    return ""
+
+
+def _recent_focused_files_from_session(session_id: str) -> list[str]:
+    """v6.4.30 — read the last 3-5 files the chat agent read/edited in
+    this session. Persisted in session memory under 'focused_files'.
+    Helps with multi-turn memory: user refines a previous change without
+    re-specifying the path."""
+    if not session_id:
+        return []
+    try:
+        mem = _get_session_memory(session_id)
+    except Exception:
+        return []
+    files = mem.get("focused_files") if isinstance(mem, dict) else None
+    if not isinstance(files, list):
+        return []
+    return [str(f) for f in files[:5] if isinstance(f, str)]
+
+
+def _build_active_project_context(*, compact: bool = False, session_id: str = "") -> str:
+    """v6.4.29 (maintainer 2026-04-22) — inject "where the user's current
+    project lives" so the chat agent never replies "我没看到你的游戏前端源码".
+    The pipeline's most recent output is always at OUTPUT_DIR/index.html.
+
+    v6.4.30 (maintainer 2026-04-22) — also injects:
+      - detected tech stack ("Three.js (3D/WebGL)")
+      - CLAUDE.md / AGENTS.md conventions
+      - recently focused files from session memory
+
+    Two modes:
+      - compact=True  → short (≤ 600 chars) for OpenAI-family system prompts
+        (relay.cn 403s above ~6KB sys prompt).
+      - compact=False → full with top-level listing + full conventions.
+    """
+    try:
+        output_root = OUTPUT_DIR  # type: ignore[name-defined]
+    except Exception:
+        return ""
+    try:
+        if not output_root.exists():
+            return ""
+    except Exception:
+        return ""
+    index_path = output_root / "index.html"
+    if not index_path.exists():
+        # No pipeline output yet — still tell chat where the project WILL go.
+        if compact:
+            return (
+                "\n\n## Active Project (ground truth)\n"
+                f"- workspace_root: {output_root}\n"
+                "- primary artifact (not yet written): index.html\n"
+                "- No pipeline output yet. If user asks to modify 'the game/project/preview',\n"
+                "  first run `file_ops list` on workspace_root to see what exists.\n"
+            )
+        return (
+            "\n\n## Active Project (ground truth — Evermind auto-injected)\n"
+            f"The user's pipeline workspace is `{output_root}` but no output is written yet.\n"
+            "When the user refers to 'the game / 游戏 / the project / 当前项目 / the preview',\n"
+            "they mean this directory. Start by `file_ops list` on it.\n"
+        )
+    # index.html exists — full Active Project block.
+    try:
+        size = index_path.stat().st_size
+        mtime = int(index_path.stat().st_mtime)
+    except Exception:
+        size = 0
+        mtime = 0
+    # v6.4.30: tech stack + recently focused files give the agent instant
+    # context without a round-trip.
+    tech_stack = _detect_workspace_tech_stack(index_path)
+    focused = _recent_focused_files_from_session(session_id) if session_id else []
+    focused_block = ""
+    if focused:
+        focused_list = "\n".join(f"  - {f}" for f in focused)
+        focused_block = (
+            f"\n### Recently focused files (this session, most recent first)\n"
+            f"{focused_list}\n"
+            f"If the user's next message refers to 'that file' / 'the one I was editing',\n"
+            f"they probably mean the top entry above. Don't ask — read it.\n"
+        )
+    if compact:
+        tech_line = f"- tech stack: {tech_stack}\n" if tech_stack else ""
+        focused_line = ""
+        if focused:
+            focused_line = f"- recent focus: {focused[0]}\n"
+        return (
+            "\n\n## Active Project (ground truth)\n"
+            f"- workspace_root: {output_root}\n"
+            f"- primary artifact: {index_path} (size={size}B)\n"
+            f"{tech_line}"
+            f"{focused_line}"
+            f"- When user says 'the game / 游戏 / the project / 当前项目 / the preview / 准星 / 子弹 / 枪械',\n"
+            f"  they mean this file. IMMEDIATELY `file_ops read {index_path}` BEFORE your FIRST\n"
+            f"  prose sentence. NEVER reply '我没看到你的源码' or '请告诉我文件路径' — that path IS the source.\n"
+            f"- Preview URL: http://127.0.0.1:8765/preview/?t=<epoch> (cache-busting query optional)\n"
+        )
+    # Full mode: list top-level entries.
+    top_entries: list[str] = []
+    try:
+        for p in sorted(output_root.iterdir())[:30]:
+            try:
+                if p.name.startswith(".") or p.name.startswith("_"):
+                    continue
+                if p.is_dir():
+                    top_entries.append(f"  {p.name}/")
+                else:
+                    sz = p.stat().st_size
+                    top_entries.append(f"  {p.name} ({sz}B)")
+            except Exception:
+                continue
+    except Exception:
+        pass
+    top_listing = "\n".join(top_entries) if top_entries else "  (empty)"
+    tech_line = f"  tech stack: {tech_stack}\n" if tech_stack else ""
+    return (
+        "\n\n## Active Project (ground truth — Evermind auto-injected)\n"
+        f"The user's most recent pipeline output lives at:\n"
+        f"  workspace_root: {output_root}\n"
+        f"  primary artifact: {index_path} (mtime={mtime}, size={size}B)\n"
+        f"{tech_line}"
+        f"{focused_block}"
+        f"\n### Discover-then-act contract (MANDATORY, v6.4.30)\n"
+        "When the user says 'the game / the project / 游戏 / 这个预览 / 准星不能动 / 子弹没轨迹 / \n"
+        "没有枪械建模' WITHOUT a path, the Active Project block above IS the answer. You are\n"
+        "FORBIDDEN from replying '哪里是源码' / '我没看到你的项目' / '请告诉我文件路径'. Immediately:\n"
+        f"  1. `file_ops read {index_path}` — the whole game is usually one file\n"
+        f"  2. If the HTML references external modules (e.g. `<script src='./assets/sprites.js'>`),\n"
+        f"     `file_ops read` those too (they are in `{output_root}/assets/`)\n"
+        "  3. `file_ops search` for the user's symbol (e.g. 'crosshair', 'bullet',\n"
+        "     'gun', '准星', '弹道', 'weapon', 'fire')\n"
+        "  4. Propose `file_ops edit` with exact old_string → new_string\n"
+        "  5. If the browser tool is available, navigate to http://127.0.0.1:8765/preview/\n"
+        "     to verify visually.\n\n"
+        f"### Workspace top-level entries ({output_root.name}/)\n"
+        f"{top_listing}\n\n"
+        f"### Preview URL\nhttp://127.0.0.1:8765/preview/  (use `browser navigate` there for visual verification)\n\n"
+        "(This block is auto-generated on every chat turn from the live filesystem — trust it as truth.)\n"
+        f"{_load_workspace_conventions()}"
+    )
+
+
+def _chat_auto_pre_read_snapshot(user_message: str, session_id: str, *, kimi_compact: bool = False) -> str:
+    """v6.4.31 (maintainer 2026-04-22) — smart auto pre-read.
+
+    v6.4.36 (maintainer 2026-04-23): `kimi_compact=True` caps the snippet at
+    2500 chars (vs 18000 default) because Kimi k2.6-code-preview stops
+    emitting standard tool_calls and degenerates into prose
+    (observed: "to=file_ops.read 体育彩票天天json") once system prompt
+    exceeds ~10KB with tools enabled.
+
+    When the user's message clearly refers to the current artifact (contains
+    fix/debug/修/改 keywords OR names a file extension the pipeline just
+    wrote), eagerly read OUTPUT_DIR/index.html (up to 18KB) and inject it
+    into the system prompt as a <current_artifact> snapshot. This saves a
+    round-trip: the chat agent starts the turn already knowing the code,
+    so its FIRST message can be a concrete answer instead of a tool call.
+
+    Adapted from Aider's "added to the chat" pattern + Cursor's context
+    auto-attach behaviour.
+    """
+    try:
+        root = OUTPUT_DIR  # type: ignore[name-defined]
+        if not root.exists():
+            return ""
+    except Exception:
+        return ""
+    index = root / "index.html"
+    if not index.exists() or not index.is_file():
+        return ""
+    msg = (user_message or "").lower()
+    # Trigger keywords — intent to modify/inspect the current artifact.
+    triggers_en = [
+        "fix", "debug", "optimize", "refactor", "improve", "add ",
+        "why doesn't", "why does", "it doesn't", "not working",
+        "crosshair", "bullet", "weapon", "gun", "game", "project", "preview",
+    ]
+    triggers_zh = [
+        "修", "改", "优化", "不行", "不工作", "不能", "失效",
+        "准星", "子弹", "弹道", "枪械", "武器", "游戏", "项目", "预览",
+        "帮我", "看看", "检查", "增加", "加一个", "改一下",
+    ]
+    if not any(t in msg for t in triggers_en) and not any(t in msg for t in triggers_zh):
+        return ""
+    # Skip if this session already has focused files — user + agent already
+    # in a coding flow, the chat agent has read something recent.
+    try:
+        if _recent_focused_files_from_session(session_id):
+            return ""
+    except Exception:
+        pass
+    try:
+        raw = index.read_text(encoding="utf-8", errors="ignore")
+    except Exception:
+        return ""
+    size = len(raw)
+    # v6.4.36: Kimi k2.6 stops emitting OpenAI-format tool_calls once
+    # system prompt exceeds ~10KB. Shrink the pre-read to 2.5KB for Kimi
+    # so the model can still make a normal file_ops read call and see
+    # the full file. Other providers keep the richer 18KB.
+    head_cap = 2500 if kimi_compact else 18000
+    snippet = raw[:head_cap]
+    truncated = size > head_cap
+    lines_total = raw.count("\n") + 1
+    lines_shown = snippet.count("\n") + 1
+    return (
+        "\n\n## Auto-Attached Source (v6.4.31)\n"
+        f"The user's message suggests they want you to modify the current artifact. "
+        f"To save you a tool round-trip, Evermind has pre-read the primary file:\n\n"
+        f"<current_artifact path=\"{index}\" size=\"{size}B\" lines=\"{lines_total}\""
+        f"{' truncated=\"true\"' if truncated else ''}>\n"
+        f"{snippet}\n"
+        f"</current_artifact>\n"
+        f"\nShowing the first {lines_shown} of {lines_total} lines. "
+        f"{'Call file_ops read if you need the tail.' if truncated else 'This is the FULL file.'}\n"
+        "\nYou now know what the code looks like — do NOT call file_ops read on this same path\n"
+        "before responding. Either answer directly or call file_ops edit / search for follow-up.\n"
+    )
+
+
+def _record_focused_file_in_session(session_id: str, file_path: str) -> None:
+    """v6.4.30 — update 'recently focused' list when chat agent reads or
+    edits a file. Called from the chat handler's tool-execution loop.
+    Keeps most recent first, dedupes, max 10."""
+    if not session_id or not file_path:
+        return
+    try:
+        mem = _get_session_memory(session_id)
+    except Exception:
+        return
+    existing = mem.get("focused_files")
+    if not isinstance(existing, list):
+        existing = []
+    # Move file_path to front; dedupe.
+    filtered = [f for f in existing if f != file_path]
+    filtered.insert(0, file_path)
+    mem["focused_files"] = filtered[:10]
+    _schedule_session_memory_save()
+
+
 def _build_pipeline_context_for_chat(session_id: str) -> str:
-    """Build a context block from pipeline results for the chat system prompt."""
+    """Build a richer session-memory block for the chat assistant.
+
+    v5.8.6: beyond listing recent runs, surface artifacts, reviewer verdicts,
+    and canvas topology so the chat can reason about the user's project. This
+    is what turns the chat from a stateless assistant into a project-aware
+    collaborator that can answer "why did reviewer reject?" or "design a new
+    workflow on top of my last run."
+    """
     if not session_id:
         return ""
     mem = _SESSION_MEMORY.get(session_id)
-    if not mem or not mem.get("pipeline_results"):
+    if not mem:
         return ""
-    lines = ["\n## Recent Pipeline Results (from this session)"]
-    for i, pr in enumerate(mem["pipeline_results"], 1):
-        status = pr.get("status", "unknown")
-        goal = pr.get("goal", "")
-        lines.append(f"\n### Run {i}: {goal}")
-        lines.append(f"Status: {status}")
-        for st in pr.get("subtasks", []):
-            agent = st.get("agent", "?")
-            st_status = st.get("status", "?")
-            summaries = st.get("work_summary", [])
-            summary_text = "; ".join(str(s) for s in summaries[:2]) if summaries else ""
-            lines.append(f"- {agent}: {st_status}" + (f" — {summary_text}" if summary_text else ""))
+    lines: List[str] = []
+    pipeline_results = mem.get("pipeline_results") or []
+    if pipeline_results:
+        lines.append("\n## Recent Pipeline Results (this session)")
+        for i, pr in enumerate(pipeline_results[-5:], 1):
+            status = pr.get("status", "unknown")
+            goal = str(pr.get("goal", ""))[:180]
+            lines.append(f"\n### Run {i}: {goal}")
+            lines.append(f"Status: {status}  ·  Duration: {pr.get('durationSeconds', '?')}s  ·  Retries: {pr.get('retries', 0)}")
+            # Surface reviewer verdict / blocking issues when available
+            reviewer_notes = str(pr.get("reviewer_notes") or "")[:400]
+            if reviewer_notes:
+                lines.append(f"Reviewer: {reviewer_notes}")
+            for st in pr.get("subtasks", [])[:14]:
+                agent = st.get("agent", "?")
+                st_status = st.get("status", "?")
+                summaries = st.get("work_summary", [])
+                summary_text = "; ".join(str(s) for s in summaries[:2]) if summaries else ""
+                files_count = len(st.get("files_created") or st.get("filesCreated") or [])
+                lines.append(
+                    f"- {agent}: {st_status}"
+                    + (f" · {files_count} files" if files_count else "")
+                    + (f" — {summary_text}" if summary_text else "")
+                )
+    # Canvas workflow snapshot — what nodes the user currently has on the board
+    canvas_plan = mem.get("canvas_plan") or {}
+    canvas_nodes = canvas_plan.get("nodes") or []
+    if canvas_nodes:
+        lines.append("\n## Current Canvas Workflow")
+        lines.append(
+            f"The user has {len(canvas_nodes)} nodes on the canvas: "
+            + ", ".join(str(n.get("agent") or n.get("label") or "?") for n in canvas_nodes[:20])
+        )
+    # Project memory digest — multi-session project identity (if linked)
+    project_digest = str(mem.get("project_memory_digest") or "").strip()
+    if project_digest:
+        lines.append("\n## Project Memory Digest\n" + project_digest[:600])
     return "\n".join(lines)
 _openclaw_dispatch_watchdogs: Dict[str, asyncio.Task] = {}
 OPENCLAW_DISPATCH_ACK_TIMEOUT_S = coerce_int(
@@ -1341,6 +1698,307 @@ OPENCLAW_DISPATCH_ACK_TIMEOUT_S = coerce_int(
 # Output directory for generated files (shared with orchestrator)
 OUTPUT_DIR = resolve_output_dir()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+# v7.3 (maintainer 2026-04-26) — per-task workspaces for session isolation.
+# Each task gets its own folder under ~/.evermind/workspaces/<task_id>/
+# so files added in one task are never visible in another. Inspired by
+# Claude Code worktrees (~/.claude/worktrees/<session>/) and Claude Cowork
+# walled-off project workspaces.
+_TASK_WORKSPACES_DIR = Path(os.path.expanduser("~/.evermind/workspaces"))
+
+
+def _task_workspace_dir(task_id: str, *, create: bool = True) -> Path:
+    """Return the absolute path to <task_id>'s isolated workspace folder."""
+    safe = re.sub(r"[^A-Za-z0-9_\-]+", "", str(task_id or "").strip())[:64]
+    if not safe:
+        raise ValueError("task_id required for workspace resolution")
+    p = _TASK_WORKSPACES_DIR / safe
+    if create:
+        p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _scan_workspace_files(root: Path, *, max_entries: int = 500, max_depth: int = 6) -> List[Dict[str, Any]]:
+    """List files in a task workspace. Returns [{name, rel_path, size, kind}].
+
+    v7.3.4 audit fix MINOR-2 — bounded BFS instead of `sorted(rglob('*'))`,
+    so a workspace with 100k files doesn't materialize the whole tree before
+    truncating. Symlinks are not followed (st.is_dir() / iterdir behave
+    correctly via pathlib's lazy resolution).
+    """
+    if not root.exists() or not root.is_dir():
+        return []
+    out: List[Dict[str, Any]] = []
+    queue: List[Tuple[Path, int]] = [(root, 0)]
+    while queue and len(out) < max_entries:
+        current, depth = queue.pop(0)
+        if depth > max_depth:
+            continue
+        try:
+            entries = sorted(current.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
+        except (PermissionError, OSError):
+            continue
+        for p in entries:
+            if len(out) >= max_entries:
+                break
+            try:
+                if p.name.startswith("."):
+                    continue
+                if p.is_symlink():
+                    # Don't traverse symlinks (cycle / escape risk)
+                    continue
+                rel = str(p.relative_to(root))
+                if p.is_dir():
+                    out.append({"name": p.name, "rel_path": rel, "size": 0, "kind": "dir"})
+                    if depth < max_depth:
+                        queue.append((p, depth + 1))
+                elif p.is_file():
+                    out.append({"name": p.name, "rel_path": rel, "size": p.stat().st_size, "kind": "file"})
+            except Exception:
+                continue
+    return out
+
+
+@app.get("/api/tasks/{task_id}/workspace")
+async def api_task_workspace(task_id: str):
+    """List files in a task's isolated workspace."""
+    try:
+        root = _task_workspace_dir(task_id, create=False)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    files = _scan_workspace_files(root)
+    total_size = sum(int(f.get("size", 0) or 0) for f in files if f.get("kind") == "file")
+    file_count = sum(1 for f in files if f.get("kind") == "file")
+    return {
+        "task_id": task_id,
+        "path": str(root),
+        "exists": root.exists(),
+        "files": files,
+        "stats": {"file_count": file_count, "total_size": total_size},
+    }
+
+
+@app.post("/api/tasks/{task_id}/workspace/upload")
+async def api_task_workspace_upload(task_id: str, payload: Dict[str, Any] = Body(default={})):
+    """Upload files into a task's workspace.
+
+    Body: {
+        files: [
+            {name: str (required), content: str | base64 string},
+            ...
+        ],
+        encoding?: 'utf-8' | 'base64'  (per-file or batch),
+    }
+    """
+    try:
+        root = _task_workspace_dir(task_id)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    if not files:
+        return JSONResponse(status_code=400, content={"error": "files list required"})
+    batch_encoding = str(payload.get("encoding") or "utf-8").lower()
+    saved: List[Dict[str, Any]] = []
+    rejected: List[Dict[str, Any]] = []
+    from pathlib import PurePosixPath
+    root_resolved = root.resolve()
+    for raw in files[:128]:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        # v7.3.4 audit MINOR-4: split into path components instead of substring
+        # check, so `foo..bar.txt` (legitimate filename) is no longer rejected,
+        # while `foo/../bar` and `..` parts are still blocked.
+        if not name or name.startswith("/"):
+            rejected.append({"name": name, "reason": "invalid name"})
+            continue
+        try:
+            parts = PurePosixPath(name).parts
+        except Exception:
+            rejected.append({"name": name, "reason": "unparseable path"})
+            continue
+        if any(part == ".." or part == "" for part in parts):
+            rejected.append({"name": name, "reason": "path traversal"})
+            continue
+        content = raw.get("content")
+        if content is None:
+            rejected.append({"name": name, "reason": "no content"})
+            continue
+        encoding = str(raw.get("encoding") or batch_encoding).lower()
+        target = root / name
+        # v7.3.3 audit fix MAJOR-5: defense-in-depth — even after the `..`
+        # substring + leading-`/` checks, verify the resolved target stays
+        # inside the workspace root. A symlink already inside root could
+        # otherwise route the write outside.
+        try:
+            if not str(target.resolve()).startswith(str(root_resolved) + os.sep):
+                rejected.append({"name": name, "reason": "resolves outside workspace"})
+                continue
+        except Exception as _resolve_err:
+            rejected.append({"name": name, "reason": f"resolve failed: {str(_resolve_err)[:80]}"})
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if encoding == "base64":
+                import base64
+                target.write_bytes(base64.b64decode(content))
+            else:
+                target.write_text(str(content), encoding="utf-8")
+            saved.append({"name": name, "rel_path": str(target.relative_to(root)), "size": target.stat().st_size})
+        except Exception as exc:
+            rejected.append({"name": name, "reason": str(exc)[:120]})
+    return {"ok": True, "saved": saved, "rejected": rejected, "path": str(root)}
+
+
+@app.delete("/api/tasks/{task_id}/workspace/{filename:path}")
+async def api_task_workspace_delete(task_id: str, filename: str):
+    """Remove a file or directory from a task's workspace."""
+    try:
+        root = _task_workspace_dir(task_id, create=False)
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    safe_name = filename.strip().lstrip("/")
+    # v7.3.9 audit-fix CRITICAL — same hardening as upload (line 1804+):
+    # 1) reject path components equal to ".." instead of bare substring
+    #    (so a legitimate filename like `foo..bar.txt` survives), and
+    # 2) require a trailing `os.sep` when comparing resolved-target prefix
+    #    against root, so a workspace `abc` does NOT permit deletion of
+    #    `abc-evil/` (without sep, startsWith would match prefix `abc`).
+    from pathlib import PurePosixPath
+    try:
+        parts = PurePosixPath(safe_name).parts
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "unparseable path"})
+    if any(p == ".." or p == "" for p in parts):
+        return JSONResponse(status_code=400, content={"error": "path traversal"})
+    target = (root / safe_name).resolve()
+    root_resolved = root.resolve()
+    try:
+        if not str(target).startswith(str(root_resolved) + os.sep):
+            return JSONResponse(status_code=400, content={"error": "outside workspace"})
+        if target.is_dir():
+            import shutil
+            shutil.rmtree(target)
+        elif target.exists():
+            target.unlink()
+        else:
+            return JSONResponse(status_code=404, content={"error": "not found"})
+        return {"ok": True}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)[:200]})
+
+# v6.5 Phase 3: chat Plan/Act/Debug modes. Each mode scopes which tools the
+# LLM may call + appends a short behavioural suffix to the system prompt.
+# `tools_whitelist` of None means "all tools enabled" (act mode). Names refer
+# to the chat tool `function.name` strings declared in _chat_worker.
+CHAT_MODES: Dict[str, Dict[str, Any]] = {
+    "plan": {
+        "tools_whitelist": {"file_ops.read", "file_ops.list", "file_ops.search", "browser.observe", "browser.navigate"},
+        "sys_suffix": "\n\n## PLAN MODE (v6.5)\n你现在是规划助手。只读/研究/提出方案,不改文件。用户确认后让他们切到 ACT 模式执行。",
+    },
+    "act": {
+        "tools_whitelist": None,
+        "sys_suffix": "\n\n## ACT MODE (v6.5)\n你现在执行已确认的计划。可 file_ops.write/edit 和所有工具。",
+    },
+    "debug": {
+        "tools_whitelist": {"file_ops.read", "file_ops.search", "browser.navigate", "browser.observe", "browser.screenshot"},
+        "sys_suffix": "\n\n## DEBUG MODE (v6.5)\n你现在做根因定位。先读日志/复现/假设/验证,不要盲改代码。",
+    },
+}
+
+
+def _filter_chat_tools_by_mode(tools: List[Dict[str, Any]], mode: str) -> List[Dict[str, Any]]:
+    """Keep only tool specs whose fn name (or fn.name.action) is in the whitelist."""
+    cfg = CHAT_MODES.get(mode) or CHAT_MODES["act"]
+    wl = cfg.get("tools_whitelist")
+    if wl is None:
+        return list(tools)
+    out: List[Dict[str, Any]] = []
+    for t in tools or []:
+        fn = (t.get("function") or {}) if isinstance(t, dict) else {}
+        fn_name = str(fn.get("name") or "").strip()
+        if not fn_name:
+            continue
+        # whitelist granularity: either exact fn name ("browser") OR "fn.action".
+        # we include a tool if ANY of its allowed variants matches OR if the
+        # bare fn name is in the whitelist (action-level filtering happens
+        # server-side when dispatching the tool call).
+        allowed_bare = any(w == fn_name or w.startswith(fn_name + ".") for w in wl)
+        if allowed_bare:
+            out.append(t)
+    return out
+
+
+def _load_agents_md_and_memories(output_dir: Path) -> str:
+    """v6.5 Phase 3: read <OUTPUT_DIR>/AGENTS.md + .evermind/memories/*.md.
+
+    Returns an injectable system-prompt block, or empty string if nothing on disk.
+    """
+    parts: List[str] = []
+    try:
+        agents_md = Path(output_dir) / "AGENTS.md"
+        if agents_md.is_file() and agents_md.stat().st_size < 64 * 1024:
+            body = agents_md.read_text(encoding="utf8", errors="ignore").strip()
+            if body:
+                parts.append("## AGENTS.md (project conventions)\n" + body)
+    except Exception:
+        pass
+    try:
+        mem_dir = Path(output_dir) / ".evermind" / "memories"
+        if mem_dir.is_dir():
+            mem_chunks: List[str] = []
+            for mp in sorted(mem_dir.glob("*.md"))[:20]:
+                try:
+                    if mp.stat().st_size > 16 * 1024:
+                        continue
+                    text = mp.read_text(encoding="utf8", errors="ignore").strip()
+                    if text:
+                        mem_chunks.append(f"### {mp.stem}\n{text}")
+                except Exception:
+                    continue
+            if mem_chunks:
+                parts.append("## Auto-Memory (prior sessions)\n" + "\n\n".join(mem_chunks))
+    except Exception:
+        pass
+    return "\n\n".join(parts)
+
+
+def _maybe_persist_chat_memory(
+    output_dir: Path,
+    user_text: str,
+    assistant_text: str,
+    chat_mode: str,
+) -> None:
+    """v6.5 Phase 3: after a chat turn completes, ask the LLM (via a tiny
+    keyword heuristic first; full LLM decision can hook here later) whether
+    the turn warrants persisting a memory note. Fires-and-forgets on disk.
+    """
+    try:
+        if not assistant_text or len(assistant_text) < 200:
+            return
+        combined = f"{user_text}\n{assistant_text}".lower()
+        trigger = any(kw in combined for kw in (
+            "记住", "remember", "convention", "rule", "always", "never",
+            "下次", "以后", "from now on", "根因", "root cause", "decision",
+        ))
+        if not trigger:
+            return
+        mem_dir = Path(output_dir) / ".evermind" / "memories"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        # naive topic extraction: first 30 chars of user text, slugified.
+        topic = re.sub(r"[^a-z0-9一-龥]+", "-", user_text.strip().lower())[:40] or "note"
+        ts = time.strftime("%Y-%m-%dT%H-%M-%S")
+        path = mem_dir / f"{topic}-{ts}.md"
+        body = (
+            f"# {user_text[:80]}\n\n"
+            f"- mode: {chat_mode}\n"
+            f"- captured_at: {ts}\n\n"
+            f"## User\n{user_text.strip()[:1200]}\n\n"
+            f"## Assistant (truncated)\n{assistant_text.strip()[:2400]}\n"
+        )
+        path.write_text(body, encoding="utf8")
+    except Exception:
+        pass
 # Keep the legacy /tmp alias synced to the active runtime directory so older
 # prompts and preview assumptions cannot drift onto stale artifacts.
 LEGACY_OUTPUT_ALIAS = ensure_output_dir_alias(OUTPUT_DIR)
@@ -2236,7 +2894,31 @@ def _save_connector_artifact(
 # /tmp/evermind_output is maintained separately for older prompts / tooling.
 # ─────────────────────────────────────────────
 app.mount("/uploads", StaticFiles(directory=str(CHAT_UPLOADS_DIR), html=False), name="uploads")
-app.mount("/preview", StaticFiles(directory=str(OUTPUT_DIR), html=True), name="preview")
+
+
+# v7.1f (maintainer 2026-04-24): NO-CACHE wrapper for /preview.
+# Without explicit Cache-Control, Starlette's StaticFiles only sends
+# ETag + Last-Modified. Browsers (incl. Playwright used by reviewer/
+# tester) heuristically cache linked sub-resources (`src/shared/*.js`,
+# `*.css`) between navigations — so when patcher edits nav.js and the
+# reviewer re-navigates with a fresh `?t=` buster on index.html, the
+# linked JS still serves from browser cache → reviewer audits STALE
+# code. This was maintainer's concern (2026-04-24): "reviewer 审查的不是
+# 最新的代码". Fix: force `Cache-Control: no-store` on every /preview
+# response so Playwright always fetches the latest disk state.
+class _NoStoreStaticFiles(StaticFiles):
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        try:
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        except Exception:
+            pass
+        return response
+
+
+app.mount("/preview", _NoStoreStaticFiles(directory=str(OUTPUT_DIR), html=True), name="preview")
 
 
 def _is_previewable_html(path: Path) -> bool:
@@ -2302,6 +2984,110 @@ def _latest_bucket_mtime(paths: List[Path]) -> float:
     return latest
 
 
+@app.get("/api/capabilities")
+async def capabilities_manifest():
+    """v5.8.6: capability manifest for external assistants (OpenClaw, Claude Code,
+    Codex, custom chat) that want to drive Evermind intelligently.
+
+    An assistant calls this once on connect and gets everything it needs to
+    orchestrate Evermind: the agent roster, browser tool actions, workflow
+    templates, the WS goal-submission schema, and the model routing fallback
+    chain. This replaces the "assistant has to learn Evermind by trial and
+    error" scenario — now a fresh assistant can generate correct workflows on
+    its first try.
+    """
+    return {
+        "name": "Evermind",
+        "version": "5.8.6",
+        "schema": "https://evermind.dev/capabilities/v1",
+        "agents": {
+            "router":      {"role": "Classify goal + emit JSON plan", "out": "JSON subtasks[]"},
+            "planner":     {"role": "Deep execution blueprint (modules, contracts, ownership)", "out": "JSON + short prose"},
+            "analyst":     {"role": "Research references + 8-section handoff XML", "out": "XML handoff sections"},
+            "imagegen":    {"role": "Character / weapon / env modeling design packs", "out": "brief files"},
+            "spritesheet": {"role": "Sprite frame / animation config + runtime JS", "out": "sprites.js + sprite_config.json"},
+            "assetimport": {"role": "Asset manifest + loader JS", "out": "loader.js + manifest.json"},
+            "uidesign":    {"role": "Visual design direction + design system", "out": "design brief"},
+            "scribe":      {"role": "Content architecture + copy handoff", "out": "content-architecture.md"},
+            "builder":     {"role": "Produce the actual HTML/CSS/JS product", "out": "index.html + modules"},
+            "polisher":    {"role": "Premium UI / motion / visual polish on existing artifacts", "out": "patched files"},
+            "merger":      {"role": "Integrate parallel builder outputs into one cohesive product", "out": "merged index.html"},
+            "reviewer":    {"role": "Strict quality gate (8-dimension scoring + JSON verdict)", "out": "review report + verdict"},
+            "tester":      {"role": "Run interaction tests in the embedded Chromium", "out": "test report"},
+            "debugger":    {"role": "Pinpoint + fix runtime errors found by reviewer/tester", "out": "patched files"},
+            "deployer":    {"role": "List artifacts + publish preview URL", "out": "file manifest + preview_url"},
+        },
+        "browser": {
+            "cdp_endpoint": os.getenv("EVERMIND_BROWSER_CDP_URL", "http://127.0.0.1:19222"),
+            "note": "The browser tool attaches to Evermind's embedded Electron Chromium via CDP. "
+                    "All actions are visible to the user (floating AI cursor + ripple on click).",
+            "actions": [
+                "navigate", "observe", "snapshot", "act", "click", "fill", "extract",
+                "scroll", "record_scroll", "press", "press_sequence", "wait_for",
+                "find", "hover", "select", "upload", "new_tab", "switch_tab", "close_tab",
+                "evaluate", "close_popups", "network_idle",
+                "mouse_click", "mouse_move", "mouse_down", "mouse_up", "drag", "wheel",
+                "key_down", "key_up", "key_hold", "type_text", "macro", "canvas_click",
+                "screenshot_region",
+            ],
+            "vision_grounding": "Screenshots that include a snapshot are auto-annotated with "
+                                "numbered boxes — every interactive element has an [index] that matches "
+                                "its `ref` field in the snapshot text. VLMs can click by index.",
+        },
+        "tools": {
+            "file_ops": "Read / write / list / patch files inside /tmp/evermind_output/",
+            "shell":    "Bash one-shot with cwd = output dir; no persistent session",
+            "source_fetch": "Fetch raw source from URLs (GitHub raw, docs) without a browser",
+            "browser":  "Full-featured embedded Chromium automation (see `browser` block)",
+            "browser_use": "High-level agentic multi-step browser sidecar (for gameplay QA)",
+            "comfyui":  "ComfyUI image generation (if a local backend is configured)",
+        },
+        "submit_run": {
+            "protocol": "WebSocket",
+            "endpoint": "ws://127.0.0.1:8765/ws",
+            "goal_frame": {
+                "type": "run_goal",
+                "goal": "<natural-language goal>",
+                "difficulty": "simple | standard | pro",
+                "runtime": "local | openclaw",
+                "session_id": "<optional, to reuse session memory>",
+                "conversation_history": [{"role": "user", "content": "..."}],
+            },
+            "ack_frame": "run_goal_ack  →  { runId, taskId, nodeExecutions[] }",
+            "progress_events": [
+                "subtask_start", "subtask_progress", "subtask_done",
+                "openclaw_node_update", "plan_created", "preview_ready",
+                "orchestrator_complete",
+            ],
+        },
+        "model_routing": {
+            "primary": "kimi-k2.6-code-preview",
+            "fallback_chain": ["kimi-k2.6-code-preview", "deepseek-v3", "qwen-max",
+                               "gemini-2.0-flash", "glm-4-plus",
+                               "gpt-5.4", "gpt-5.3-codex", "claude-4-sonnet", "gemini-2.5-pro"],
+            "multi_key_pool": "Each provider can hold primary + secondary API key "
+                              "(e.g. kimi_api_key + kimi_api_key_2); the bridge round-robins "
+                              "and per-key cooldowns on 401/429.",
+        },
+        "workflow_templates": {
+            "simple":   ["router", "builder", "deployer"],
+            "standard": ["router", "planner", "builder", "reviewer", "deployer"],
+            "pro":      ["router", "planner", "analyst", "imagegen", "spritesheet",
+                         "assetimport", "builder1", "builder2", "merger",
+                         "reviewer", "deployer", "tester", "debugger"],
+        },
+        "tips_for_assistants": [
+            "Always start with `router` or a pre-built template — don't hand-craft DAGs unless the user explicitly asks.",
+            "For a 3D game, pro template is correct; for a static landing page, standard is enough.",
+            "Builder 1 and Builder 2 are PEERS (both write HTML staging dirs); merger combines them. "
+            "Don't assume one is primary.",
+            "Reviewer uses the embedded browser — expect 60-120s of browser automation per run.",
+            "If the user asks \"why did reviewer reject?\", read `pipeline_results[*].subtasks[*].work_summary` "
+            "and the reviewer's blocking_issues JSON.",
+        ],
+    }
+
+
 @app.get("/api/preview/list")
 async def preview_list():
     """List generated artifacts, including task folders and output root files."""
@@ -2340,6 +3126,43 @@ async def preview_list():
             item.pop("_mtime", None)
 
     return {"tasks": tasks, "output_dir": str(OUTPUT_DIR)}
+
+
+@app.get("/api/preview/streaming/{task_id}")
+async def preview_streaming(task_id: str):
+    """v6.1.9 — serve the Wave-A `.streaming` staging file while the builder
+    is mid-flight. Frontend polls / reloads this when a `stream_flush` event
+    lands so users see the page materialize in real time.
+
+    Falls back to the final `index.html` when the staging file no longer
+    exists (build completed) so the client can use a single URL throughout.
+    """
+    tid = task_id if task_id.startswith("task_") else f"task_{task_id}"
+    task_dir = OUTPUT_DIR / tid
+    staging = task_dir / "index.html.streaming"
+    final = task_dir / "index.html"
+    if staging.exists():
+        return FileResponse(
+            staging,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store, must-revalidate",
+                "X-Preview-Stage": "streaming",
+            },
+        )
+    if final.exists():
+        return FileResponse(
+            final,
+            media_type="text/html; charset=utf-8",
+            headers={
+                "Cache-Control": "no-store",
+                "X-Preview-Stage": "final",
+            },
+        )
+    return JSONResponse(
+        status_code=404,
+        content={"error": f"No artifact yet for {tid}"},
+    )
 
 
 @app.get("/api/preview/{task_id}")
@@ -2676,14 +3499,23 @@ async def workspace_sync(data: Dict = Body(...)):
 # ── Workspace file management (VS Code-style) ──
 
 def _validate_workspace_path(root: str, rel_path: str) -> Path:
-    """Resolve and validate a workspace path. Raises ValueError if unsafe."""
+    """Resolve and validate a workspace path. Raises ValueError if unsafe.
+
+    Uses ``relative_to`` after resolving symlinks: that's the canonical
+    traversal check. A prefix match on strings is unsafe — ``/tmp/abc``
+    is a false-positive prefix of ``/tmp/abcdef``.
+    """
     root_p = Path(root).expanduser().resolve()
     if not _is_safe_workspace_root(root_p):
         raise ValueError(f"Root not allowed: {root}")
-    target = (root_p / rel_path).resolve()
-    # Prevent path traversal
-    if not str(target).startswith(str(root_p)):
-        raise ValueError("Path traversal detected")
+    rel_clean = str(rel_path or "").lstrip("/").strip()
+    if not rel_clean or rel_clean.startswith("..") or "\x00" in rel_clean:
+        raise ValueError("Invalid relative path")
+    target = (root_p / rel_clean).resolve()
+    try:
+        target.relative_to(root_p)
+    except ValueError as exc:
+        raise ValueError("Path traversal detected") from exc
     return target
 
 
@@ -2750,6 +3582,33 @@ async def workspace_delete(data: Dict = Body(...)):
             import shutil
             shutil.rmtree(str(target))
         return {"success": True}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/api/workspace/upload")
+async def workspace_upload(data: Dict = Body(...)):
+    """v5.6: Binary-safe file upload via JSON + base64. Chosen over multipart/form-data
+    to avoid a hard python-multipart dependency across the test matrix.
+    Client sends: { root, path, content_b64 } — we decode and write to disk."""
+    import base64
+    root = str(data.get("root", "")).strip()
+    rel_path = str(data.get("path", "")).strip()
+    b64 = str(data.get("content_b64", ""))
+    if not root or not rel_path:
+        return JSONResponse(status_code=400, content={"error": "root and path required"})
+    try:
+        target = _validate_workspace_path(root, rel_path)
+    except ValueError as e:
+        return JSONResponse(status_code=403, content={"error": str(e)})
+    try:
+        payload = base64.b64decode(b64, validate=False) if b64 else b""
+    except Exception as exc:
+        return JSONResponse(status_code=400, content={"error": f"invalid base64: {exc}"})
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload)
+        return {"success": True, "path": str(target), "size": target.stat().st_size}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
@@ -2969,11 +3828,107 @@ async def api_logs(tail: int = 300):
     return {"ok": True, "log_file": str(LOG_FILE), "tail": tail_n, "lines": lines}
 
 
-@app.get("/api/models")
-async def list_models():
-    """List all available AI models."""
-    bridge = AIBridge()
-    return {"models": bridge.get_available_models()}
+# v5.8.6: removed duplicate /api/models handler here — FastAPI first-wins
+# routing made it override the newer handler at line 4805 that returns
+# `has_key` per model. Without `has_key`, the frontend AgentNode dropdown
+# filtered every model out (filter returns empty), so the node model
+# selector appeared empty even with keys configured.
+# The authoritative handler is defined below near the speed-test endpoint.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v5.5 Ecosystem APIs — Compound Engineering, MCP, GitHub Repo cache
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.get("/api/compound/stats")
+async def compound_stats():
+    """Return aggregated lessons statistics so the UI can show how many lessons
+    Evermind has learned per task type."""
+    try:
+        import lessons_store
+        return {"ok": True, **lessons_store.stats()}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+@app.get("/api/compound/lessons")
+async def compound_lessons(task_type: str = "", limit: int = 20):
+    """Return recent lessons for a given task_type (or a sample across all)."""
+    try:
+        import lessons_store
+        if task_type:
+            return {"ok": True, "task_type": task_type, "items": lessons_store.relevant(task_type, limit=limit)}
+        # aggregate: a slice from each known task_type
+        stats_obj = lessons_store.stats()
+        merged: List[Dict[str, Any]] = []
+        for tt in (stats_obj.get("per_task_type") or {}).keys():
+            merged.extend(lessons_store.relevant(tt, limit=max(1, int(limit) // max(1, len(stats_obj.get("per_task_type") or {})))))
+        return {"ok": True, "items": merged[:limit], "total_stored": stats_obj.get("total", 0)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+@app.get("/api/mcp/tools")
+async def mcp_list_tools():
+    """List all tools exposed by running MCP servers. Empty when no servers configured."""
+    try:
+        import mcp_client
+        reg = mcp_client.registry()
+        all_tools = await reg.list_all_tools()
+        summary: List[Dict[str, Any]] = []
+        for server_name, tools in all_tools.items():
+            for t in tools:
+                summary.append({
+                    "server": server_name,
+                    "name": t.get("name"),
+                    "description": t.get("description"),
+                    "input_schema": t.get("inputSchema") or t.get("input_schema"),
+                })
+        return {"ok": True, "count": len(summary), "tools": summary}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+@app.post("/api/mcp/call")
+async def mcp_call_tool(payload: Dict[str, Any] = Body(default={})):
+    """Invoke a specific tool on a specific MCP server (debugging / manual use)."""
+    try:
+        import mcp_client
+        server_name = str(payload.get("server") or "").strip()
+        tool_name = str(payload.get("name") or "").strip()
+        arguments = payload.get("arguments") or {}
+        if not server_name or not tool_name:
+            return {"ok": False, "error": "server and name are required"}
+        result = await mcp_client.registry().call(server_name, tool_name, arguments if isinstance(arguments, dict) else {})
+        return {"ok": True, "result": result}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:400]}
+
+
+@app.get("/api/repo/cached")
+async def repo_cached():
+    """List GitHub repos Evermind has cached locally."""
+    try:
+        import repo_clone
+        return {"ok": True, "repos": repo_clone.list_cached()}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
+
+
+@app.post("/api/repo/clone")
+async def repo_clone_endpoint(payload: Dict[str, Any] = Body(default={})):
+    """Manually trigger a GitHub clone. Same code-path the orchestrator uses."""
+    try:
+        import repo_clone
+        url = str(payload.get("url") or "").strip()
+        if not url:
+            return {"ok": False, "error": "url is required"}
+        path = await repo_clone.clone_or_refresh(url)
+        if not path:
+            return {"ok": False, "error": "clone failed — check URL, git binary, or network"}
+        return {"ok": True, "path": path}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:300]}
 
 
 @app.get("/api/chat/history")
@@ -3178,7 +4133,7 @@ async def openclaw_guide():
 
 
 # ─────────────────────────────────────────────
-# Task Board API Endpoints (任务看板 API)
+# Task Board API Endpoints
 # ─────────────────────────────────────────────
 @app.get("/api/tasks")
 async def list_tasks(session_id: str = "", sessionId: str = ""):
@@ -3342,6 +4297,42 @@ async def get_report(report_id: str):
     return {"report": _report_to_api(report)}
 
 
+@app.delete("/api/reports/{report_id}")
+async def delete_report_ep(report_id: str):
+    """v7.0 (maintainer 2026-04-24): delete a single report by id."""
+    store = get_report_store()
+    ok = store.delete_report(report_id)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": f"Report {report_id} not found"})
+    return {"ok": True, "deleted": report_id}
+
+
+@app.delete("/api/reports")
+async def delete_reports_bulk(keep_latest: int = 0):
+    """v7.0 (maintainer 2026-04-24): bulk-delete reports.
+    Use ?keep_latest=N to retain the N most-recent entries, or
+    ?keep_latest=0 (default) to wipe all.
+    """
+    store = get_report_store()
+    all_reports = store.list_reports()
+    try:
+        all_reports = sorted(
+            all_reports,
+            key=lambda r: float(r.get("created_at") or 0),
+            reverse=True,
+        )
+    except Exception:
+        pass
+    keep = max(0, int(keep_latest or 0))
+    to_delete = all_reports[keep:] if keep > 0 else all_reports
+    deleted = 0
+    for r in to_delete:
+        rid = str(r.get("id") or "")
+        if rid and store.delete_report(rid):
+            deleted += 1
+    return {"ok": True, "deleted": deleted, "kept": min(keep, len(all_reports))}
+
+
 # ─────────────────────────────────────────────
 # V1 Run Lifecycle Endpoints
 # ─────────────────────────────────────────────
@@ -3424,8 +4415,166 @@ async def transition_run(run_id: str, data: Dict = Body(...)):
 
 @app.get("/api/workflow-templates")
 async def api_list_workflow_templates():
-    """P2-A: List available workflow templates."""
-    return {"templates": list_templates()}
+    """P2-A: List available workflow templates (system + user)."""
+    system = list_templates()
+    # Tag system templates so frontend can distinguish
+    for t in system:
+        if isinstance(t, dict):
+            t.setdefault("source", "system")
+    return {"templates": system + _load_user_templates()}
+
+
+# ── v7.2 (maintainer 2026-04-26): User-defined custom templates ──────────────
+# Storage: ~/.evermind/user_templates/{slug}.json
+# JSON schema:
+#   {
+#       "id": "user-<slug>",
+#       "name": "<display name>",
+#       "description": "<optional summary>",
+#       "tags": ["<optional>", ...],
+#       "nodes": [{"key", "label", "task", "depends_on": [...]}, ...],
+#       "created_at": <epoch>,
+#       "updated_at": <epoch>,
+#       "source": "user",
+#   }
+_USER_TEMPLATES_DIR = Path(os.path.expanduser("~/.evermind/user_templates"))
+
+
+def _user_templates_dir() -> Path:
+    _USER_TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+    return _USER_TEMPLATES_DIR
+
+
+def _slugify_template_name(name: str) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", str(name or "").strip().lower()).strip("-")
+    return base[:48] or f"template-{int(time.time())}"
+
+
+def _load_user_templates() -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    try:
+        d = _user_templates_dir()
+        for fp in sorted(d.glob("*.json")):
+            try:
+                payload = json.loads(fp.read_text(encoding="utf-8"))
+                if not isinstance(payload, dict):
+                    continue
+                payload.setdefault("source", "user")
+                payload.setdefault("id", f"user-{fp.stem}")
+                out.append(payload)
+            except Exception as exc:
+                logger.warning("user_template parse failed for %s: %s", fp.name, exc)
+    except Exception as exc:
+        logger.warning("user_templates dir scan failed: %s", exc)
+    return out
+
+
+@app.get("/api/templates/user")
+async def api_list_user_templates():
+    """List user-defined custom workflow templates."""
+    return {"templates": _load_user_templates()}
+
+
+@app.post("/api/templates/user")
+async def api_save_user_template(data: Dict = Body(...)):
+    """Save (create or overwrite) a user custom template.
+
+    Body: {
+        name: str (required),
+        description?: str,
+        tags?: [str],
+        nodes: [{key, label, task, depends_on}],
+        slug?: str (override auto-derive),
+    }
+    """
+    payload = dict(data or {})
+    name = str(payload.get("name") or "").strip()
+    if not name:
+        return JSONResponse(status_code=400, content={"error": "name is required"})
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list) or not nodes:
+        return JSONResponse(status_code=400, content={"error": "nodes must be a non-empty list"})
+    # Validate nodes — accept canvas-shaped nodes (id/type/data) OR
+    # template-shaped nodes (key/label/task/depends_on). Normalize to template.
+    norm_nodes: List[Dict[str, Any]] = []
+    for raw in nodes[:64]:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("key") or raw.get("type") or raw.get("id") or "").strip().lower()
+        if not key:
+            continue
+        label = str(raw.get("label") or raw.get("data", {}).get("label") if isinstance(raw.get("data"), dict) else (raw.get("label") or key)).strip() or key
+        task = str(raw.get("task") or raw.get("data", {}).get("task") if isinstance(raw.get("data"), dict) else (raw.get("task") or "")).strip()
+        depends_on = raw.get("depends_on") or raw.get("dependsOn") or []
+        if not isinstance(depends_on, list):
+            depends_on = []
+        norm_nodes.append({
+            "key": key,
+            "label": label,
+            "task": task,
+            "depends_on": [str(x) for x in depends_on if x],
+        })
+    if not norm_nodes:
+        return JSONResponse(status_code=400, content={"error": "no usable nodes after normalization"})
+    slug = _slugify_template_name(str(payload.get("slug") or name))
+    now = time.time()
+    record: Dict[str, Any] = {
+        "id": f"user-{slug}",
+        "name": name,
+        "description": str(payload.get("description") or "")[:600],
+        "tags": [str(x) for x in (payload.get("tags") or []) if x][:12],
+        "nodes": norm_nodes,
+        "created_at": now,
+        "updated_at": now,
+        "source": "user",
+    }
+    fp = _user_templates_dir() / f"{slug}.json"
+    if fp.exists():
+        # Preserve original created_at
+        try:
+            existing = json.loads(fp.read_text(encoding="utf-8"))
+            if isinstance(existing, dict) and existing.get("created_at"):
+                record["created_at"] = float(existing["created_at"])
+        except Exception:
+            pass
+    fp.write_text(json.dumps(record, indent=2, ensure_ascii=False), encoding="utf-8")
+    return {"ok": True, "template": record}
+
+
+@app.delete("/api/templates/user/{slug}")
+async def api_delete_user_template(slug: str):
+    """Delete a user custom template by slug."""
+    fp = _user_templates_dir() / f"{_slugify_template_name(slug)}.json"
+    if not fp.exists():
+        return JSONResponse(status_code=404, content={"error": "template not found"})
+    try:
+        fp.unlink()
+        return {"ok": True}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)[:200]})
+
+
+@app.get("/api/templates/user/{slug}/export")
+async def api_export_user_template(slug: str):
+    """Return raw JSON for a user template (for clipboard / file download)."""
+    fp = _user_templates_dir() / f"{_slugify_template_name(slug)}.json"
+    if not fp.exists():
+        return JSONResponse(status_code=404, content={"error": "template not found"})
+    try:
+        payload = json.loads(fp.read_text(encoding="utf-8"))
+        return {"ok": True, "template": payload}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": str(exc)[:200]})
+
+
+@app.post("/api/templates/user/import")
+async def api_import_user_template(data: Dict = Body(...)):
+    """Import a JSON template payload (e.g. from a shared file)."""
+    payload = dict(data or {})
+    template = payload.get("template") if isinstance(payload.get("template"), dict) else payload
+    if not isinstance(template, dict):
+        return JSONResponse(status_code=400, content={"error": "template body required"})
+    return await api_save_user_template(template)
 
 
 @app.post("/api/runs/launch")
@@ -3547,6 +4696,18 @@ async def cancel_run(run_id: str):
     run_snapshot = get_run_store().get_run(run_id)
     if not run_snapshot:
         return JSONResponse(status_code=404, content={"error": f"Run {run_id} not found"})
+
+    # v7.3.9 audit-fix CRITICAL — actually stop the in-flight orchestrator,
+    # not just flip the DB row. Without this, the orchestrator keeps
+    # writing to OUTPUT_DIR for the full remaining 6+ minutes after
+    # the user thinks the run was cancelled.
+    try:
+        for client_id, _client_state in list(globals().get("_clients", {}).items()):
+            _orch = _client_state.get("orchestrator") if isinstance(_client_state, dict) else None
+            if _orch and hasattr(_orch, "stop"):
+                _orch.stop()
+    except Exception as _stop_err:
+        logger.debug("Orchestrator stop in HTTP cancel: %s", _stop_err)
 
     result = _cancel_run_cascade(run_id)
     if not result.get("cancelled"):
@@ -3752,7 +4913,7 @@ async def get_artifact(artifact_id: str):
 
 
 # ─────────────────────────────────────────────
-# Relay / Proxy API Endpoints (中转 API)
+# Relay / Proxy API Endpoints
 # ─────────────────────────────────────────────
 @app.post("/api/relay/add")
 async def relay_add(data: Dict = Body(...)):
@@ -3829,7 +4990,7 @@ async def relay_remove(endpoint_id: str):
 
 
 # ─────────────────────────────────────────────
-# Privacy / Desensitization Endpoints (脱敏处理)
+# Privacy / Desensitization Endpoints
 # ─────────────────────────────────────────────
 @app.get("/api/privacy/patterns")
 async def privacy_patterns():
@@ -3877,7 +5038,7 @@ async def execute_node(data: Dict = Body(...)):
     input_text = data.get("input", "")
     model = data.get("model") or node.get("data", {}).get("model") or node.get("model", "gpt-5.3-codex")
 
-    workspace = os.getenv("WORKSPACE", str(Path.home() / "Desktop"))
+    workspace = os.getenv("WORKSPACE", str(Path.home() / ".evermind" / "workspace"))
     output_dir = str(OUTPUT_DIR)
     allowed_dirs_env = os.getenv("ALLOWED_DIRS", "")
     allowed_dirs = [p for p in allowed_dirs_env.split(",") if p] if allowed_dirs_env else [workspace, output_dir, "/tmp"]
@@ -4185,9 +5346,23 @@ async def save_user_settings(data: Dict = Body(...)):
         patch.pop("builder_enable_browser", None)
     if "image_generation" in patch and isinstance(patch.get("image_generation"), dict):
         image_patch = dict(patch.get("image_generation") or {})
+        # v6.2 (maintainer 2026-04-20): direct provider fields alongside legacy ComfyUI
+        _max_images_raw = image_patch.get("max_images_per_run", 10)
+        try:
+            _max_images = max(1, min(40, int(_max_images_raw)))
+        except (TypeError, ValueError):
+            _max_images = 10
         patch["image_generation"] = {
             "comfyui_url": str(image_patch.get("comfyui_url", "") or "").strip(),
             "workflow_template": str(image_patch.get("workflow_template", "") or "").strip(),
+            "provider": str(image_patch.get("provider", "") or "").strip().lower(),
+            "api_key": str(image_patch.get("api_key", "") or "").strip(),
+            "base_url": str(image_patch.get("base_url", "") or "").strip(),
+            "default_model": str(image_patch.get("default_model", "") or "").strip(),
+            "default_size": str(image_patch.get("default_size", "") or "1024x1024").strip() or "1024x1024",
+            "max_images_per_run": _max_images,
+            "auto_crop": bool(image_patch.get("auto_crop", True)),
+            "enabled": bool(image_patch.get("enabled", True)),
         }
     if "cli_mode" in patch and isinstance(patch.get("cli_mode"), dict):
         cli_patch = dict(patch.get("cli_mode") or {})
@@ -4205,6 +5380,41 @@ async def save_user_settings(data: Dict = Body(...)):
     success = save_settings(merged)
     if success:
         count = apply_api_keys(merged)
+        # v6.3 (maintainer 2026-04-20): hot-reload EVERY live AIBridge so a UI key
+        # change goes live WITHOUT restarting the backend. Previously the
+        # flow updated env vars + disk but AIBridge instances held on to
+        # cached OpenAI clients + compat-gateway health against the OLD
+        # credentials. Net effect: user pastes new key → next run still 401s
+        # on stale cached pool until the app is fully relaunched.
+        #
+        # v6.3 HOTFIX: this HTTP handler is NOT in the WebSocket closure, so
+        # the `config` / `ai_bridge` local vars from connect_websocket aren't
+        # in scope here. Use the module-level _LIVE_AIBRIDGES WeakSet (same
+        # registry SIGHUP uses) to reach every running bridge.
+        try:
+            if _LIVE_AIBRIDGES is not None:
+                _bridges_touched = 0
+                for _live_bridge in list(_LIVE_AIBRIDGES):
+                    if _live_bridge is None:
+                        continue
+                    try:
+                        _reload_summary = _live_bridge.reload_api_config(merged)
+                        _bridges_touched += 1
+                        logger.info(
+                            "Settings saved: bridge reload_api_config summary=%s",
+                            _reload_summary,
+                        )
+                    except Exception as _bridge_err:
+                        logger.warning(
+                            "Settings saved but one bridge failed to reload: %s",
+                            _bridge_err,
+                        )
+                logger.info(
+                    "Settings saved: hot-reloaded %d live AIBridge instance(s)",
+                    _bridges_touched,
+                )
+        except Exception as _reload_err:
+            logger.warning("Settings saved but live reload failed: %s", _reload_err)
         get_relay_manager().load(merged.get("relay_endpoints", []))
         if merged.get("builder", {}).get("enable_browser_search", False):
             os.environ["EVERMIND_BUILDER_ENABLE_BROWSER"] = "1"
@@ -4225,11 +5435,17 @@ async def save_user_settings(data: Dict = Body(...)):
         os.environ["EVERMIND_COMFYUI_URL"] = str(image_cfg.get("comfyui_url", "") or "").strip()
         os.environ["EVERMIND_COMFYUI_WORKFLOW_TEMPLATE"] = str(image_cfg.get("workflow_template", "") or "").strip()
 
-        # Return which models are now available based on configured keys
+        # Return which models are now available based on configured keys.
+        # v5.8.6: provider_env_map must cover every provider in MODEL_REGISTRY,
+        # otherwise newly-saved keys for those providers silently produce zero
+        # visible models in the Settings UI.
         provider_env_map = {
             "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
             "google": "GEMINI_API_KEY", "deepseek": "DEEPSEEK_API_KEY",
             "kimi": "KIMI_API_KEY", "qwen": "QWEN_API_KEY",
+            "minimax": "MINIMAX_API_KEY", "zhipu": "ZHIPU_API_KEY",
+            "doubao": "DOUBAO_API_KEY", "yi": "YI_API_KEY",
+            "aigate": "AIGATE_API_KEY",  # v5.8.6: private-relay.example relay
         }
         configured_providers = [
             p for p, env in provider_env_map.items() if os.environ.get(env)
@@ -4271,10 +5487,334 @@ async def validate_keys(data: Dict = Body(...)):
     return {"results": results}
 
 
+# NOTE: v6.2 initially shipped a server-side Demo Library + shared-key quota
+# endpoint (`/api/demos`, `/api/demos/try`, `/api/demos/report-cost`). That
+# design put the project author on the hook for API costs. Removed per maintainer
+# 2026-04-20. Quick-start templates now live client-side in TemplateGallery.tsx
+# and run entirely with the user's own configured API key.
+
+
+@app.post("/api/settings/image_gen/test")
+async def image_gen_test(data: Dict = Body(...)):
+    """v6.2 (maintainer 2026-04-20): Test-drive an image_generation config.
+
+    Accepts an ephemeral config (not persisted), hits the provider once with
+    a built-in or user-provided prompt, and returns timing + preview.
+
+    Response shape:
+      Success: { ok, provider, latency_ms, image_base64, files, size_returned }
+      Failure: { ok: false, error, stage }
+    """
+    start_ts = time.time()
+    try:
+        from image_gen import ImageGen  # local import to avoid circular
+    except Exception as exc:
+        return {"ok": False, "error": f"image_gen adapter unavailable: {exc}", "stage": "import"}
+
+    provider = str(data.get("provider") or "").strip().lower()
+    api_key = str(data.get("api_key") or "").strip()
+    if not provider or not api_key:
+        return {"ok": False, "error": "provider and api_key are required", "stage": "validate"}
+
+    ephemeral_cfg = {
+        "image_generation": {
+            "provider": provider,
+            "api_key": api_key,
+            "base_url": str(data.get("base_url") or "").strip(),
+            "default_model": str(data.get("default_model") or "").strip(),
+            "default_size": str(data.get("default_size") or "1024x1024").strip(),
+            "max_images_per_run": 1,
+            "auto_crop": False,
+            "enabled": True,
+        }
+    }
+    gen = ImageGen(ephemeral_cfg)
+    if not gen.available:
+        return {"ok": False, "error": "httpx unavailable or config invalid", "stage": "init"}
+
+    prompt = str(data.get("prompt") or "").strip() or (
+        "A tidy scene with warm morning light, soft depth of field, minimalist composition, 8k, photo-real"
+    )
+    slug = "evermind_test"
+    size = ephemeral_cfg["image_generation"]["default_size"]
+
+    try:
+        result = await asyncio.wait_for(
+            gen.generate(prompt=prompt, output_slug=slug, size=size),
+            timeout=40.0,
+        )
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "Timeout after 40s", "stage": "generate",
+                "latency_ms": int((time.time() - start_ts) * 1000)}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)[:400], "stage": "generate",
+                "latency_ms": int((time.time() - start_ts) * 1000)}
+
+    latency_ms = int((time.time() - start_ts) * 1000)
+    if not result or result.get("status") != "ok":
+        return {"ok": False, "error": "Provider returned no image", "stage": "provider",
+                "latency_ms": latency_ms}
+
+    # Inline base64 so the UI can preview without needing a static file route.
+    raw_path = (result.get("files") or {}).get("raw")
+    image_base64 = ""
+    if raw_path and os.path.exists(raw_path):
+        try:
+            with open(raw_path, "rb") as fh:
+                image_base64 = "data:image/webp;base64," + base64.b64encode(fh.read()).decode("ascii")
+        except Exception:
+            image_base64 = ""
+
+    return {
+        "ok": True,
+        "provider": result.get("provider"),
+        "latency_ms": latency_ms,
+        "image_base64": image_base64,
+        "files": result.get("files", {}),
+        "size_returned": size,
+    }
+
+
+@app.get("/api/system/signing-status")
+async def signing_status():
+    """Report current macOS code-sign identity health.
+
+    Used by the Settings UI to tell the user whether they'll keep getting
+    TCC file-permission prompts on every rebuild (ad-hoc) or whether a
+    stable self-signed identity is already in place (permanent grant).
+    """
+    import subprocess as _sp
+    out = {
+        "platform_supported": sys.platform == "darwin",
+        "stable_identity_installed": False,
+        "identity_name": None,
+        "env_var_set": False,
+        "current_app_signature": None,
+        "can_apply": False,
+        "applied": False,
+    }
+    if sys.platform != "darwin":
+        return out
+    out["env_var_set"] = bool(os.getenv("EVERMIND_CODESIGN_IDENTITY"))
+    out["identity_name"] = os.getenv("EVERMIND_CODESIGN_IDENTITY") or "Evermind Local Dev"
+    try:
+        r = _sp.run(
+            ["security", "find-identity", "-v", "-p", "codesigning"],
+            capture_output=True, text=True, timeout=5,
+        )
+        out["stable_identity_installed"] = out["identity_name"] in (r.stdout or "")
+    except Exception:
+        pass
+    out["can_apply"] = out["stable_identity_installed"]
+    app_path = os.path.expanduser("~/Desktop/Evermind.app")
+    if os.path.exists(app_path):
+        try:
+            r = _sp.run(["codesign", "-dvv", app_path], capture_output=True, text=True, timeout=5)
+            out["current_app_signature"] = (r.stderr or r.stdout)[-400:]
+        except Exception:
+            pass
+    return out
+
+
+@app.post("/api/system/apply-stable-signing")
+async def apply_stable_signing(data: Dict = Body(default={})):
+    """Apply the Evermind Local Dev self-signed cert to all .app copies.
+
+    One-time action the user triggers from Settings. After this the TCC
+    prompt appears once and is never repeated, because macOS key the
+    permission against the stable designated requirement rather than the
+    ad-hoc hash that changes every rebuild.
+
+    Prereq: the self-signed cert must already exist in the user's keychain.
+    The response tells the UI exactly what to do if it doesn't.
+    """
+    import subprocess as _sp
+    identity = str(data.get("identity") or os.getenv("EVERMIND_CODESIGN_IDENTITY") or "Evermind Local Dev")
+    if sys.platform != "darwin":
+        return {"ok": False, "error": "platform_not_darwin"}
+    # Verify cert exists
+    try:
+        r = _sp.run(
+            ["security", "find-identity", "-v", "-p", "codesigning"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if identity not in (r.stdout or ""):
+            return {
+                "ok": False,
+                "error": "certificate_not_found",
+                "message": (
+                    f"Self-signed certificate '{identity}' not found in Keychain.\n"
+                    "1. Open Keychain Access.app\n"
+                    "2. Certificate Assistant → Create a Certificate…\n"
+                    f"3. Name: {identity}\n"
+                    "4. Identity Type: Self Signed Root\n"
+                    "5. Certificate Type: Code Signing\n"
+                    "6. Click Create, then run this again."
+                ),
+            }
+    except Exception as exc:
+        return {"ok": False, "error": f"security_check_failed: {exc}"}
+    # Persist env var into ~/.zshrc so future shells / rebuilds pick it up.
+    rc = os.path.expanduser("~/.zshrc")
+    try:
+        existing = ""
+        if os.path.exists(rc):
+            with open(rc, "r") as fh:
+                existing = fh.read()
+        if "EVERMIND_CODESIGN_IDENTITY" not in existing:
+            with open(rc, "a") as fh:
+                fh.write(f'\n# Added by Evermind Settings\nexport EVERMIND_CODESIGN_IDENTITY="{identity}"\n')
+    except Exception:
+        pass
+    # Sign every .app copy we can find. The entitlements file ships next to
+    # this server.py inside the .app's `Resources/backend/` dir during a
+    # packaged build, OR sits at <repo>/electron/build/ during dev. We try
+    # both and skip if neither is found.
+    _here = os.path.dirname(os.path.abspath(__file__))
+    entitlements_candidates = [
+        os.path.join(_here, "..", "..", "..", "Contents", "Resources", "build", "entitlements.mac.plist"),
+        os.path.join(_here, "..", "electron", "build", "entitlements.mac.plist"),
+        os.path.expanduser("~/Library/Application Support/Evermind/build/entitlements.mac.plist"),
+    ]
+    entitlements = next((os.path.normpath(p) for p in entitlements_candidates if os.path.exists(p)), "")
+    # Sign whichever .app copy we can find on this user's machine.
+    targets = [
+        os.path.expanduser("~/Desktop/Evermind.app"),
+        os.path.expanduser("~/Applications/Evermind.app"),
+        "/Applications/Evermind.app",
+    ]
+    signed: List[str] = []
+    errors: List[str] = []
+    for tgt in targets:
+        if not os.path.isdir(tgt):
+            continue
+        try:
+            _sp.run(["xattr", "-cr", tgt], check=False)
+            sign_args = [
+                "codesign", "--force", "--deep", "--timestamp=none",
+                "--options=runtime",
+            ]
+            if os.path.exists(entitlements):
+                sign_args.extend(["--entitlements", entitlements])
+            sign_args.extend(["-s", identity, tgt])
+            _sp.run(sign_args, check=True, capture_output=True, text=True, timeout=60)
+            signed.append(tgt)
+        except _sp.CalledProcessError as exc:
+            errors.append(f"{tgt}: {(exc.stderr or str(exc))[:200]}")
+        except Exception as exc:
+            errors.append(f"{tgt}: {str(exc)[:200]}")
+    # Reset any stale TCC record so macOS will re-prompt once, now against
+    # the stable identity.
+    for bundle_id in ("com.evermind.desktop", "evermind-desktop"):
+        try:
+            _sp.run(["tccutil", "reset", "All", bundle_id], check=False, capture_output=True, timeout=3)
+        except Exception:
+            pass
+    return {
+        "ok": True,
+        "signed": signed,
+        "errors": errors,
+        "identity": identity,
+        "next_step": (
+            "完成。下次启动 Evermind 会弹 1 次权限提示,点 OK,之后永久记住。"
+            if signed else "未找到任何 .app 目标,请先构建。"
+        ),
+    }
+
+
 # ─────────────────────────────────────────────
 # CLI Backend Endpoints
 # ─────────────────────────────────────────────
 from cli_backend import get_detector, get_executor, is_cli_mode_enabled, CLI_PROFILES
+
+
+@app.post("/api/cli/toggle")
+async def cli_toggle(data: Dict = Body(...)):
+    """v7.0 (maintainer 2026-04-24): one-call CLI-mode on/off.
+    Body: {"enabled": true, "preferred_cli": "claude", "preferred_model": "sonnet"}
+    Persists to ~/.evermind/config.json + applies to in-memory settings.
+    Also runs auto-detection so `detected_clis` is fresh.
+    """
+    from settings import load_settings as _ls, save_settings as _ss
+    from cli_backend import get_detector as _gd
+    enabled = bool(data.get("enabled", True))
+    s = _ls()
+    cm = s.get("cli_mode") or {}
+    cm["enabled"] = enabled
+    for key in ("preferred_cli", "preferred_model"):
+        v = data.get(key)
+        if v is not None:
+            cm[key] = str(v)
+    if isinstance(data.get("node_cli_overrides"), dict):
+        cm["node_cli_overrides"] = data["node_cli_overrides"]
+    # v7.1 Ultra Mode fields
+    if "ultra_mode" in data:
+        cm["ultra_mode"] = bool(data.get("ultra_mode"))
+    for key in ("ultra_parallel_builders", "ultra_max_rejections", "ultra_total_timeout_sec"):
+        if key in data and data.get(key) is not None:
+            try:
+                cm[key] = int(data.get(key))
+            except Exception:
+                pass
+    for key in ("ultra_project_scaffold", "ultra_asset_tools"):
+        if key in data:
+            cm[key] = bool(data.get(key))
+    # Auto-detect so config reflects reality
+    try:
+        detected = await _gd().detect_all(force=True)
+        cm["detected_clis"] = detected
+    except Exception:
+        pass
+    s["cli_mode"] = cm
+    ok = _ss(s)
+    # Also update EVERY live ai_bridge config so change takes effect
+    # without requiring a server restart.
+    try:
+        if _LIVE_AIBRIDGES:
+            for bridge in list(_LIVE_AIBRIDGES):
+                try:
+                    if isinstance(getattr(bridge, "config", None), dict):
+                        bridge.config["cli_mode"] = cm
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {
+        "ok": ok,
+        "enabled": enabled,
+        "preferred_cli": cm.get("preferred_cli", ""),
+        "preferred_model": cm.get("preferred_model", ""),
+        "available_clis": [n for n, i in (cm.get("detected_clis") or {}).items() if i.get("available")],
+    }
+
+
+@app.get("/api/cli/status")
+async def cli_status():
+    """v7.0: concise status — is CLI mode on? which CLIs are live?"""
+    from settings import load_settings as _ls
+    from cli_backend import get_detector as _gd, CLI_PROFILES
+    s = _ls()
+    cm = s.get("cli_mode") or {}
+    detector = _gd()
+    detected = getattr(detector, "_cache", None) or {}
+    if not detected:
+        detected = await detector.detect_all(force=False)
+    available = [n for n, i in detected.items() if i.get("available")]
+    _CLI_ALLOWED = {
+        "planner", "planner_degraded", "analyst", "uidesign", "scribe",
+        "builder", "merger", "polisher", "reviewer", "patcher",
+        "tester", "debugger", "deployer", "router",
+    }
+    return {
+        "enabled": bool(cm.get("enabled")),
+        "preferred_cli": cm.get("preferred_cli", ""),
+        "preferred_model": cm.get("preferred_model", ""),
+        "supported_clis": list(CLI_PROFILES.keys()),
+        "detected_clis": detected,
+        "available_clis": available,
+        "cli_enabled_nodes": sorted(_CLI_ALLOWED),
+        "node_cli_overrides": cm.get("node_cli_overrides") or {},
+    }
 
 
 @app.get("/api/cli/detect")
@@ -4363,7 +5903,7 @@ async def model_speed_test(data: Dict = Body(default={})):
         provider_key_map = {
             "openai": "openai", "anthropic": "anthropic", "google": "gemini",
             "deepseek": "deepseek", "kimi": "kimi", "qwen": "qwen",
-            "zhipu": "zhipu", "doubao": "doubao", "yi": "yi", "minimax": "minimax",
+            "zhipu": "zhipu", "doubao": "doubao", "yi": "yi", "minimax": "minimax", "aigate": "aigate",
         }
         settings_key = provider_key_map.get(provider, provider)
         has_key = bool(str(api_keys.get(settings_key, "") or "").strip())
@@ -4386,16 +5926,21 @@ async def model_speed_test(data: Dict = Body(default={})):
     import time as _time
     import litellm as _litellm_mod
 
-    # Realistic prompt (~80 tokens) — exercises real model behavior
-    _SPEED_TEST_PROMPT = (
-        "You are a helpful coding assistant. A user asks: "
-        "'How do I create a basic HTTP server in Python that handles GET and POST requests?' "
-        "Reply in 2-3 concise sentences."
-    )
-    _SPEED_TEST_ITERATIONS = 2  # Balance accuracy vs speed
+    # v6.0: even faster speed test.
+    #   - prompt: 10 chars ("Say OK.") — minimize TTFB, the actual probe
+    #     is "does the first token arrive?" not "does the model produce
+    #     a meaningful reply?"
+    #   - max_tokens: 8 (was 60) — model can finish in one chunk
+    #   - timeout: 8s (was 15s) — healthy TTFB is 0.5-3s, anything above
+    #     8s is functionally useless for an interactive app
+    #   - bail out at first content chunk: record TTFT then close the
+    #     stream — we don't actually need the "total" latency, it's
+    #     dominated by max_tokens, not model health
+    _SPEED_TEST_PROMPT = "Say OK."
+    _SPEED_TEST_ITERATIONS = 1
 
     def _test_model_sync(name: str) -> tuple:
-        """Test a single model with TTFT tracking and multi-iteration."""
+        """Test a single model: probe TTFT, bail at first content byte."""
         info = MODEL_REGISTRY.get(name, {})
         litellm_id = info.get("litellm_id", name)
         provider = str(info.get("provider") or "").lower()
@@ -4405,8 +5950,10 @@ async def model_speed_test(data: Dict = Body(default={})):
         kwargs = {
             "model": litellm_id,
             "messages": messages,
-            "max_tokens": 60,
-            "timeout": 18,
+            "max_tokens": 8,
+            # v6.0: 15 → 8s. Healthy gateways answer within 3s; above 8s
+            # the model is unusable for any interactive Evermind flow.
+            "timeout": 8,
             "num_retries": 0,
             "stream": True,
         }
@@ -4425,31 +5972,54 @@ async def model_speed_test(data: Dict = Body(default={})):
         total_samples = []
         last_error = ""
 
+        # v6.0: bail out at first content chunk.
+        # Previously we drained the whole stream (content + stop + usage).
+        # For a liveness probe that's wasted time — once we've measured
+        # TTFT, we know the model is alive. Everything after the first
+        # chunk is just waiting for max_tokens=8 to exhaust or the model
+        # to say "stop", neither of which tells us anything useful.
         for _iter in range(_SPEED_TEST_ITERATIONS):
             t0 = _time.monotonic()
             ttft_recorded = False
             try:
                 response = _litellm_mod.completion(**kwargs)
-                content_parts = []
+                content_parts: list[str] = []
                 for chunk in response:
-                    if not ttft_recorded and chunk.choices and chunk.choices[0].delta:
+                    if chunk.choices and chunk.choices[0].delta:
                         c = getattr(chunk.choices[0].delta, "content", None)
                         if c:
-                            ttft_samples.append(int((_time.monotonic() - t0) * 1000))
-                            ttft_recorded = True
+                            if not ttft_recorded:
+                                ttft_samples.append(int((_time.monotonic() - t0) * 1000))
+                                ttft_recorded = True
                             content_parts.append(c)
-                    elif chunk.choices and chunk.choices[0].delta:
-                        c = getattr(chunk.choices[0].delta, "content", None)
-                        if c:
-                            content_parts.append(c)
+                            # v6.0: we have evidence the model is alive —
+                            # close the generator and move on.
+                            try:
+                                response.close()
+                            except Exception:
+                                pass
+                            break
                 total_ms = int((_time.monotonic() - t0) * 1000)
                 reply = "".join(content_parts).strip()
                 if reply:
                     total_samples.append(total_ms)
                 else:
                     last_error = "empty_reply"
+                    break  # v5.8.6: don't retry empty replies
             except Exception as exc:
                 last_error = str(exc)[:200]
+                # v5.8.6: fail-fast on auth / timeout / quota / rate-limit — no
+                # amount of retrying fixes these. Only retry on transient
+                # network blips (ConnectionError / transient 5xx).
+                err_lower = str(exc).lower()
+                fatal_markers = (
+                    "authenticationerror", "api_key", "invalid_authentication",
+                    "unauthorized", "insufficient_user_quota", "quota",
+                    "timeout", "rate_limit", "not_found", "notfounderror",
+                    "no available channel", "access_terminated",
+                )
+                if any(m in err_lower for m in fatal_markers):
+                    break
 
         if not total_samples:
             return name, {
@@ -4461,30 +6031,81 @@ async def model_speed_test(data: Dict = Body(default={})):
                 "iterations": _SPEED_TEST_ITERATIONS,
             }
 
-        # Use best (min) values — represents true capability
-        best_total = min(total_samples)
-        best_ttft = min(ttft_samples) if ttft_samples else best_total
-        median_total = sorted(total_samples)[len(total_samples) // 2]
+        # v5.8.6 iter 2: with iterations=1, trimming is moot.
+        sorted_totals = sorted(total_samples)
+        sorted_ttfts = sorted(ttft_samples) if ttft_samples else []
+        stable_total = int(sum(sorted_totals) / len(sorted_totals))
+        stable_ttft = int(sum(sorted_ttfts) / len(sorted_ttfts)) if sorted_ttfts else stable_total
+        median_total = sorted_totals[len(sorted_totals) // 2]
 
         return name, {
             "ok": True,
-            "latency_ms": best_total,
-            "ttft_ms": best_ttft,
+            "latency_ms": stable_total,   # trimmed-mean total
+            "ttft_ms": stable_ttft,       # trimmed-mean TTFT
             "median_ms": median_total,
+            "best_ms": sorted_totals[0],  # still expose best for reference
+            "worst_ms": sorted_totals[-1],
             "error": "",
             "provider": info.get("provider", ""),
             "iterations": len(total_samples),
         }
 
-    # Run in batches of 5 — offload to thread pool
+    # v5.8.6: SERIAL per-provider to avoid self-inflicted rate limiting.
+    # Prior version ran 5 models in parallel, so 5 Kimi models → 5 concurrent
+    # requests to Kimi For Coding → 429 from same tenant → models showed
+    # "all_iterations_failed" even though key/endpoint were fine.
+    # Now we group by provider, run each group serially, but cross-provider
+    # groups still parallel (OpenAI + Kimi + Deepseek at once).
+    by_provider: Dict[str, List[str]] = {}
+    for name in testable:
+        info = MODEL_REGISTRY.get(name, {})
+        prov = str(info.get("provider") or "unknown")
+        by_provider.setdefault(prov, []).append(name)
+
     loop = _asyncio.get_event_loop()
-    for i in range(0, len(testable), 5):
-        batch = testable[i:i+5]
-        batch_results = await _asyncio.gather(*[
-            loop.run_in_executor(None, _test_model_sync, m)
-            for m in batch
-        ])
-        for name, result in batch_results:
+
+    async def _run_provider_batched(models: List[str]) -> List[tuple]:
+        # v6.0: batch raised 3 → 6 per provider. Combined with TTFT-only
+        # bail-out and 8s timeout, a 12-model provider (aigate) now runs
+        # in 2 waves of 6 × ~3s = ~6s instead of 4 waves of 3 × ~8s = 32s.
+        # 6 concurrent is still under typical public-relay rate thresholds
+        # (10 req/s). If a relay 429s we pick it up in `last_error`.
+        # Additional: if the first wave returns ALL auth errors, skip the
+        # rest of the provider — no point probing 6 more models against
+        # the same broken key.
+        out: List[tuple] = []
+        BATCH = 6
+        short_circuit = False
+        for i in range(0, len(models), BATCH):
+            chunk = models[i:i + BATCH]
+            if short_circuit:
+                for m in chunk:
+                    info = MODEL_REGISTRY.get(m, {})
+                    out.append((m, {
+                        "ok": False, "latency_ms": 0, "ttft_ms": 0,
+                        "error": "provider_auth_skipped",
+                        "provider": info.get("provider", ""),
+                        "iterations": 0,
+                    }))
+                continue
+            results = await _asyncio.gather(*[
+                loop.run_in_executor(None, _test_model_sync, m) for m in chunk
+            ])
+            out.extend(results)
+            # Trip the short-circuit when the whole wave failed on auth.
+            auth_tokens = ("api_key", "auth", "unauthorized", "invalid_token", "401")
+            if all(
+                not r.get("ok") and any(t in str(r.get("error") or "").lower() for t in auth_tokens)
+                for _n, r in results
+            ):
+                short_circuit = True
+        return out
+
+    all_batches = await _asyncio.gather(*[
+        _run_provider_batched(models) for models in by_provider.values()
+    ])
+    for group in all_batches:
+        for name, result in group:
             results[name] = result
 
     return {"results": results, "tested_count": len(testable), "total_models": len(MODEL_REGISTRY)}
@@ -4501,7 +6122,7 @@ async def list_models():
     provider_key_map = {
         "openai": "openai", "anthropic": "anthropic", "google": "gemini",
         "deepseek": "deepseek", "kimi": "kimi", "qwen": "qwen",
-        "zhipu": "zhipu", "doubao": "doubao", "yi": "yi", "minimax": "minimax",
+        "zhipu": "zhipu", "doubao": "doubao", "yi": "yi", "minimax": "minimax", "aigate": "aigate",
     }
     for name, info in MODEL_REGISTRY.items():
         provider = info.get("provider", "")
@@ -4548,8 +6169,192 @@ _ROLE_TIMEOUT_HINTS: Dict[str, int] = {
     "tester": 480,      # smoke + interaction tests
     "deployer": 300,    # file listing + URL generation
     "debugger": 600,    # iterative fix cycles
+    # Ultra-mode node keys (4-builder DAG); these share the "builder" role
+    # hint above, so listed here only for visibility.
+    "uidesign": 600,
+    "scribe": 600,
+    "merger": 900,
+    "patcher": 600,
 }
+
+
+def _ultra_mode_is_on() -> bool:
+    """v7.1d (maintainer 2026-04-24): read cli_mode.ultra_mode from settings.
+    Used by the watchdog to multiply per-role timeouts so commercial-grade
+    long tasks (Analyst 15KB+ research, planner 15-subtask blueprint,
+    Claude CLI writing a 20-file Electron app) don't get axed at 180s.
+    """
+    try:
+        from settings import load_settings as _ls
+        cm = (_ls() or {}).get("cli_mode") or {}
+        return bool(cm.get("ultra_mode"))
+    except Exception:
+        return False
+
+
+# In Ultra mode the watchdog's per-role hint gets multiplied by this factor.
+# Aligned with ai_bridge's ×6 CLI timeout so the watchdog never pre-empts a
+# valid long CLI call. E.g. planner 180s × 6 = 1080s (18min) — enough for
+# Claude CLI to emit a 15-subtask Ultra blueprint with node_briefs.
+_ULTRA_WATCHDOG_MULT = 6
 _watchdog_task: Optional[asyncio.Task] = None
+
+# v6.0: chat agent browser integration — a persistent BrowserPlugin
+# instance shared across chat turns, invoked from the chat_worker thread
+# via run_coroutine_threadsafe so Playwright state survives tool calls.
+_MAIN_ASYNCIO_LOOP: Optional[asyncio.AbstractEventLoop] = None
+_CHAT_BROWSER_PLUGIN = None
+_CHAT_BROWSER_LOCK = __import__("threading").Lock()
+
+
+def _get_chat_browser_plugin():
+    """Lazy-instantiate the shared chat browser plugin."""
+    global _CHAT_BROWSER_PLUGIN
+    if _CHAT_BROWSER_PLUGIN is None:
+        with _CHAT_BROWSER_LOCK:
+            if _CHAT_BROWSER_PLUGIN is None:
+                try:
+                    from plugins.implementations import BrowserPlugin
+                    _CHAT_BROWSER_PLUGIN = BrowserPlugin()
+                except Exception as exc:  # pragma: no cover
+                    logger.warning("chat BrowserPlugin init failed: %s", exc)
+                    _CHAT_BROWSER_PLUGIN = False  # sentinel for "init failed"
+    return _CHAT_BROWSER_PLUGIN if _CHAT_BROWSER_PLUGIN is not False else None
+
+
+# v6.4.42 (maintainer 2026-04-23): inflight future tracker. If a previous
+# browser action timed out at the worker level, the Playwright coroutine
+# may still be scheduled in the main asyncio loop, blocking future
+# navigate/click calls behind a zombie task. Before submitting a new
+# action, cancel any still-pending inflight future so the new call
+# isn't queued behind a stalled one.
+_CHAT_BROWSER_INFLIGHT: "Optional[Any]" = None
+_CHAT_BROWSER_INFLIGHT_LOCK = threading.Lock()
+
+
+def _BROWSER_SUB_TIMEOUT(action: str) -> float:
+    """v6.4.42: per-action budgets so a single slow navigate can't eat the
+    whole 90s pool. Tight but not adversarial — kimi/gpt will get a clean
+    error and retry instead of the whole chat stalling for minutes."""
+    a = (action or "").lower()
+    # Network-heavy actions get longest
+    if a in ("navigate", "goto", "open", "visit"):
+        return 30.0
+    # Screenshot involves rendering + encoding but no JS wait
+    if a in ("screenshot", "snapshot", "ax_tree", "dom_snapshot"):
+        return 20.0
+    # Pure UI actions
+    if a in ("click", "double_click", "right_click", "hover", "fill",
+             "type", "press", "key", "select", "focus", "blur", "scroll",
+             "drag", "wait"):
+        return 15.0
+    # Text extraction / small queries
+    if a in ("extract_text", "get_text", "get_html", "get_attribute",
+             "query_selector", "wait_for_selector"):
+        return 10.0
+    return 25.0  # sensible default for unknown actions
+
+
+def _invoke_chat_browser_tool(params: Dict[str, Any], timeout_sec: float = 30.0) -> Dict[str, Any]:
+    """Synchronously run a BrowserPlugin action from the chat_worker thread.
+
+    The worker thread submits the coroutine to the main asyncio loop and
+    blocks on the resulting concurrent.futures.Future. This keeps Playwright
+    alive across tool calls (so navigate+click+screenshot share a session)
+    without bouncing event loops.
+
+    v6.4.42: sub-action timeouts, zombie-coroutine cancel, entry/exit
+    logging so chat browser trips are visible in the log.
+    """
+    global _CHAT_BROWSER_INFLIGHT
+    import concurrent.futures as _cf
+    import time as _ttime
+    _action = str(params.get("action") or "").strip().lower()
+    _url = str(params.get("url") or "")[:120]
+    _selector = str(params.get("selector") or "")[:80]
+    # Honor caller timeout but respect per-action floor/ceiling
+    _sub = _BROWSER_SUB_TIMEOUT(_action)
+    _effective_timeout = max(5.0, min(float(timeout_sec or _sub), _sub))
+    logger.info(
+        "chat-browser ▶ action=%s url=%s selector=%s timeout=%.1fs",
+        _action or "?", _url, _selector, _effective_timeout,
+    )
+    plugin = _get_chat_browser_plugin()
+    if plugin is None:
+        logger.warning("chat-browser ✗ plugin unavailable")
+        return {"success": False, "error": "browser plugin unavailable"}
+    if _MAIN_ASYNCIO_LOOP is None:
+        logger.warning("chat-browser ✗ asyncio loop not ready")
+        return {"success": False, "error": "main loop not ready yet"}
+    # v6.1.3: chat browser MUST be headful so the user sees the cursor/ripple/
+    # AI-controlling frame overlay. Previously only `browser_show_ai_cursor`
+    # was set but `_resolve_headless` only reads `browser_headful`, so the
+    # chat plugin silently ran headless and users saw NO browser UI at all.
+    _chat_browser_ctx = {
+        "browser_show_ai_cursor": True,
+        "browser_headful": True,
+        "visible": True,
+        "node_type": "chat",
+        "force_visible": True,
+    }
+    # v6.4.42: kill any stale prior inflight that blew past its budget.
+    with _CHAT_BROWSER_INFLIGHT_LOCK:
+        _prev = _CHAT_BROWSER_INFLIGHT
+        if _prev is not None and not _prev.done():
+            try:
+                _prev.cancel()
+                logger.warning("chat-browser: cancelled zombie prior inflight future")
+            except Exception:
+                pass
+    _started = _ttime.monotonic()
+    try:
+        fut = asyncio.run_coroutine_threadsafe(
+            plugin.execute(params, context=_chat_browser_ctx),
+            _MAIN_ASYNCIO_LOOP,
+        )
+        with _CHAT_BROWSER_INFLIGHT_LOCK:
+            _CHAT_BROWSER_INFLIGHT = fut
+        result = fut.result(timeout=_effective_timeout)
+    except _cf.TimeoutError:
+        _elapsed = _ttime.monotonic() - _started
+        logger.warning(
+            "chat-browser ⏱ timeout action=%s after %.1fs — cancelling coroutine",
+            _action, _elapsed,
+        )
+        try:
+            fut.cancel()
+        except Exception:
+            pass
+        return {
+            "success": False,
+            "error": (
+                f"browser action '{_action}' timed out after "
+                f"{_effective_timeout:.0f}s — try a different URL/selector "
+                f"or ask the user for a more specific target"
+            ),
+        }
+    except Exception as exc:  # pragma: no cover
+        logger.warning("chat-browser ✗ %s failed: %s", _action, str(exc)[:200])
+        return {"success": False, "error": f"browser action failed: {exc}"}
+    finally:
+        with _CHAT_BROWSER_INFLIGHT_LOCK:
+            if _CHAT_BROWSER_INFLIGHT is not None and _CHAT_BROWSER_INFLIGHT.done():
+                _CHAT_BROWSER_INFLIGHT = None
+    _elapsed = _ttime.monotonic() - _started
+    if hasattr(result, "to_dict"):
+        result = result.to_dict()
+    if not isinstance(result, dict):
+        logger.warning(
+            "chat-browser ✗ unexpected result type %s after %.1fs",
+            type(result).__name__, _elapsed,
+        )
+        return {"success": False, "error": f"unexpected browser result type: {type(result).__name__}"}
+    logger.info(
+        "chat-browser ✓ action=%s success=%s elapsed=%.1fs err=%s",
+        _action, bool(result.get("success")), _elapsed,
+        str(result.get("error") or "")[:120],
+    )
+    return result
 
 
 def _watchdog_timeout_grace_seconds() -> int:
@@ -4583,6 +6388,10 @@ def _node_timeout_hint_seconds(node_key: str) -> int:
     timeout_hint = int(_ROLE_TIMEOUT_HINTS.get(normalized, DEFAULT_NODE_TIMEOUT_S) or DEFAULT_NODE_TIMEOUT_S)
     if normalized == "builder":
         timeout_hint = max(timeout_hint, _builder_watchdog_timeout_floor_seconds())
+    # v7.1d Ultra: watchdog must not pre-empt a valid long CLI call.
+    # Mirror ai_bridge's ×6 CLI timeout factor.
+    if _ultra_mode_is_on():
+        timeout_hint = int(timeout_hint * _ULTRA_WATCHDOG_MULT)
     return timeout_hint
 
 
@@ -4661,17 +6470,37 @@ async def _timeout_watchdog():
 
             # 1. Check for stuck nodes (running longer than timeout)
             nes = get_node_execution_store()
+            runs_store = get_run_store()
             for ne_dict in nes.list_node_executions():
                 if ne_dict.get("status") != "running":
                     continue
                 started = float(ne_dict.get("started_at", 0) or 0)
                 if started <= 0:
                     continue
+                # v5.8.6: skip NEs whose parent run is no longer active. Previously
+                # the watchdog would "fail" stale NEs from runs the user already
+                # stopped, and the WS broadcast would race against canvas nodes
+                # of the CURRENT run that map to the same agent type — painting
+                # the current Builder 2 red even though it had succeeded. Any NE
+                # whose run is in a terminal state is someone else's problem;
+                # mark it cancelled silently instead of broadcasting failure.
+                ne_run_id = str(ne_dict.get("run_id") or "")
+                parent_run = runs_store.get_run(ne_run_id) if ne_run_id else None
+                parent_run_status = str((parent_run or {}).get("status") or "").strip().lower()
+                if parent_run_status in {"completed", "cancelled", "failed", "passed", "skipped"}:
+                    try:
+                        _transition_node_if_needed(ne_dict["id"], "cancelled")
+                        nes.update_node_execution(ne_dict["id"], {
+                            "error_message": "Cancelled: parent run already terminal (orphaned NE cleanup).",
+                        })
+                    except Exception:
+                        pass
+                    continue
                 ne_timeout = _node_timeout_limit_seconds(ne_dict)
                 elapsed = now - started
                 if elapsed > ne_timeout:
                     ne_id = ne_dict["id"]
-                    run_id = str(ne_dict.get("run_id") or "")
+                    run_id = ne_run_id
                     logger.warning(f"[Watchdog] Node {ne_id} timed out after {elapsed:.0f}s (limit={ne_timeout}s)")
                     _transition_node_if_needed(ne_id, "failed")
                     nes.update_node_execution(ne_id, {
@@ -4755,7 +6584,32 @@ _HOT_RELOAD_MODULES = [
     "agent_skills",
     "orchestrator",
     "ai_bridge",
+    # v6.1.2: include browser plugin internals so focus/launch fixes can be
+    # hot-reloaded without full app restart.
+    "plugins.implementations",
+    "plugins.base",
+    "plugins",
 ]
+
+
+# v6.1.2: weak-track every AIBridge instance so SIGHUP can rebind their
+# __class__ to the freshly reloaded class. Without this, the module reloads
+# but running instances still execute the old class's bound methods, which
+# made our deep-mode timeout floor look like it wasn't taking effect.
+try:
+    import weakref as _weakref
+    _LIVE_AIBRIDGES: "_weakref.WeakSet" = _weakref.WeakSet()
+except Exception:
+    _LIVE_AIBRIDGES = None  # type: ignore[assignment]
+
+
+def _register_live_ai_bridge(bridge_instance: Any) -> None:
+    if _LIVE_AIBRIDGES is None or bridge_instance is None:
+        return
+    try:
+        _LIVE_AIBRIDGES.add(bridge_instance)
+    except Exception:
+        pass
 
 
 def _handle_sighup(signum, frame):
@@ -4771,6 +6625,24 @@ def _handle_sighup(signum, frame):
             reloaded.append(mod_name)
         except Exception as e:
             failed.append(f"{mod_name}: {e}")
+    # v6.1.2: rebind live AIBridge instances to the newly reloaded class so
+    # currently-running nodes pick up method changes (timeouts, thinking
+    # config, etc.) without needing an app restart.
+    if "ai_bridge" in reloaded and _LIVE_AIBRIDGES is not None:
+        try:
+            import ai_bridge as _ab_mod
+            _new_class = getattr(_ab_mod, "AIBridge", None)
+            if _new_class is not None:
+                _rebound = 0
+                for _live in list(_LIVE_AIBRIDGES):
+                    try:
+                        _live.__class__ = _new_class
+                        _rebound += 1
+                    except Exception:
+                        pass
+                logger.info("[HotReload] rebound %d live AIBridge instance(s) to reloaded class", _rebound)
+        except Exception as _rebind_err:
+            logger.warning("[HotReload] AIBridge class rebind failed: %s", _rebind_err)
     # Re-import references that server.py holds directly
     if "workflow_templates" in reloaded:
         try:
@@ -4813,13 +6685,81 @@ def _handle_sighup(signum, frame):
 @asynccontextmanager
 async def lifespan(application):
     """FastAPI lifespan: start/stop background tasks."""
-    global _watchdog_task
+    global _watchdog_task, _MAIN_ASYNCIO_LOOP
     lock_error = _acquire_backend_runtime_lock()
     if lock_error:
         logger.error(lock_error)
         raise RuntimeError(lock_error)
+    # v6.0: capture main asyncio loop so chat_worker thread can submit
+    # browser-tool coroutines via asyncio.run_coroutine_threadsafe.
+    try:
+        _MAIN_ASYNCIO_LOOP = asyncio.get_running_loop()
+    except Exception:
+        _MAIN_ASYNCIO_LOOP = None
     _watchdog_task = asyncio.create_task(_timeout_watchdog())
     logger.info("[Watchdog] Timeout watchdog started")
+    # v7.1g (maintainer 2026-04-24): bootstrap user CLI configs on every server
+    # startup. Idempotent — only writes files that don't exist or merges
+    # missing keys. Lets a fresh user install Evermind.app and immediately
+    # benefit from Codex profiles, Claude skills, sub-agents, MCP servers,
+    # auto-format hooks, codex output schemas. Without this, all v7.1g
+    # optimizations would be invisible to anyone who isn't maintainer.
+    try:
+        from evermind_bootstrap import bootstrap_at_startup as _bootstrap
+        _bootstrap()
+    except Exception as _bs_err:
+        logger.warning("[v7.1g bootstrap] startup hook failed: %s", _bs_err)
+
+    # v7.3.9 audit-fix CRITICAL — startup sweep of unbounded directories.
+    # Without these, /tmp/evermind_output and ~/.evermind/uploads grew
+    # to multi-GB sizes after weeks of use.
+    try:
+        import time as _t
+        from os import walk as _walk
+        # Prune `_stable_previews` to most-recent 8 runs (each ~5-30 MB)
+        sp_root = OUTPUT_DIR / "_stable_previews"
+        if sp_root.exists() and sp_root.is_dir():
+            entries = sorted(
+                [p for p in sp_root.iterdir() if p.is_dir()],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            for old in entries[8:]:
+                try: shutil.rmtree(old, ignore_errors=True)
+                except Exception: pass
+        # Prune `_browser_records/` files older than 24h (screenshots + traces)
+        br_root = OUTPUT_DIR / "_browser_records"
+        if br_root.exists():
+            cutoff = _t.time() - 24 * 3600
+            for entry in br_root.iterdir():
+                try:
+                    if entry.stat().st_mtime < cutoff:
+                        if entry.is_dir():
+                            shutil.rmtree(entry, ignore_errors=True)
+                        else:
+                            entry.unlink(missing_ok=True)
+                except Exception: pass
+        # Prune `~/.evermind/uploads/` chat attachments older than 30 days
+        if CHAT_UPLOADS_DIR.exists():
+            cutoff = _t.time() - 30 * 86400
+            for sess_dir in CHAT_UPLOADS_DIR.iterdir():
+                if not sess_dir.is_dir():
+                    continue
+                try:
+                    for f in sess_dir.iterdir():
+                        try:
+                            if f.is_file() and f.stat().st_mtime < cutoff:
+                                f.unlink(missing_ok=True)
+                        except Exception: pass
+                    # Remove empty session dirs
+                    try:
+                        if not any(sess_dir.iterdir()):
+                            sess_dir.rmdir()
+                    except Exception: pass
+                except Exception: pass
+        logger.info("[v7.3.9 cleanup] startup directory sweep complete")
+    except Exception as _cleanup_err:
+        logger.warning("[v7.3.9 cleanup] startup sweep failed: %s", _cleanup_err)
     # Register SIGHUP handler for hot-reload (macOS/Linux only)
     # Guard with try/except: signal.signal() must be called from the main thread.
     # During tests (httpx.AsyncClient / TestClient), lifespan runs in a worker thread.
@@ -4830,6 +6770,57 @@ async def lifespan(application):
         except ValueError:
             # Not running in main thread (test environment)
             pass
+    # v5.5: TCP+TLS preconnect to primary API hosts — warms DNS cache & TLS
+    # session tickets so the first real LLM call shaves ~80-150ms off its
+    # handshake. Non-blocking, failures are ignored.
+    try:
+        import socket
+        from urllib.parse import urlparse
+        from ai_bridge import MODEL_REGISTRY
+        _hosts: set[tuple[str, int]] = set()
+        for _mi in MODEL_REGISTRY.values():
+            base = str((_mi or {}).get("api_base") or "").strip()
+            if not base:
+                continue
+            try:
+                u = urlparse(base)
+                if u.hostname:
+                    _hosts.add((u.hostname, u.port or (443 if u.scheme == "https" else 80)))
+            except Exception:
+                pass
+        async def _preconnect_host(host: str, port: int) -> None:
+            try:
+                await asyncio.wait_for(
+                    asyncio.open_connection(host, port, ssl=(port == 443)),
+                    timeout=3.0,
+                )
+            except Exception:
+                pass  # silent: preconnect is best-effort
+        if _hosts:
+            await asyncio.gather(*[_preconnect_host(h, p) for h, p in _hosts], return_exceptions=True)
+            logger.info("[Preconnect] Warmed %d API host(s): %s", len(_hosts),
+                        sorted(h for h, _ in _hosts)[:8])
+    except Exception as _pc_err:
+        logger.debug("[Preconnect] skipped: %s", _pc_err)
+
+    # v5.5: Start configured MCP servers (optional — empty config is a no-op).
+    try:
+        import mcp_client
+        _mcp_config = (_saved_settings or {}).get("mcp_servers") or []
+        if _mcp_config:
+            _started = await mcp_client.start_configured_servers(_mcp_config)
+            if _started:
+                logger.info("[MCP] Started %d server(s): %s", len(_started), _started)
+                # Expose each MCP tool as an Evermind plugin so agents can call it.
+                try:
+                    from plugins.mcp_plugin import register_mcp_tools_as_plugins
+                    _registered = await register_mcp_tools_as_plugins()
+                    if _registered:
+                        logger.info("[MCP] Exposed %d tool(s) to agent plugin layer", len(_registered))
+                except Exception as _mcp_reg_err:
+                    logger.warning("[MCP] Plugin registration failed: %s", _mcp_reg_err)
+    except Exception as _mcp_err:
+        logger.warning("[MCP] Failed to start configured servers: %s", _mcp_err)
     yield
     # ── Shutdown ──
     logger.info("Server shutting down — closing all connections...")
@@ -4857,6 +6848,12 @@ async def lifespan(application):
         except Exception:
             pass
     connected_clients.clear()
+    # v5.5: Shut down MCP servers gracefully.
+    try:
+        import mcp_client
+        await mcp_client.shutdown_configured_servers()
+    except Exception as _mcp_err:
+        logger.debug("[MCP] shutdown error: %s", _mcp_err)
     # Flush chat session memory to disk before exit
     global _session_memory_save_timer
     if _session_memory_save_timer is not None:
@@ -4884,7 +6881,7 @@ async def websocket_endpoint(ws: WebSocket):
     logger.info(f"Client {client_id} connected. Total: {len(connected_clients)}")
 
     # Build config from env
-    workspace = os.getenv("WORKSPACE", str(Path.home() / "Desktop"))
+    workspace = os.getenv("WORKSPACE", str(Path.home() / ".evermind" / "workspace"))
     output_dir = str(OUTPUT_DIR)
     allowed_dirs_env = os.getenv("ALLOWED_DIRS", "")
     allowed_dirs = [p for p in allowed_dirs_env.split(",") if p] if allowed_dirs_env else [workspace, output_dir, "/tmp"]
@@ -4930,6 +6927,7 @@ async def websocket_endpoint(ws: WebSocket):
 
     # Create executor for this client
     ai_bridge = AIBridge(config=config)
+    _register_live_ai_bridge(ai_bridge)
 
     async def send_event(data: Dict):
         """Send real-time event to this client."""
@@ -4996,6 +6994,9 @@ async def websocket_endpoint(ws: WebSocket):
             elif msg_type == "update_config":
                 # Update API keys from frontend settings
                 new_config = msg.get("config", {})
+                # v5.8.6: every provider in MODEL_REGISTRY must be configurable
+                # from Settings UI — previously missing MiniMax / Zhipu / Doubao /
+                # Yi meant users had no way to paste their keys for those models.
                 key_map = {
                     "openai_api_key": "OPENAI_API_KEY",
                     "anthropic_api_key": "ANTHROPIC_API_KEY",
@@ -5003,8 +7004,17 @@ async def websocket_endpoint(ws: WebSocket):
                     "deepseek_api_key": "DEEPSEEK_API_KEY",
                     "kimi_api_key": "KIMI_API_KEY",
                     "qwen_api_key": "QWEN_API_KEY",
+                    "minimax_api_key": "MINIMAX_API_KEY",
+                    "zhipu_api_key": "ZHIPU_API_KEY",
+                    "doubao_api_key": "DOUBAO_API_KEY",
+                    "yi_api_key": "YI_API_KEY",
+                    "aigate_api_key": "AIGATE_API_KEY",  # v5.8.6: private-relay.example
                 }
+                # v5.8.6: persist primary + optional secondary ("_2") keys
+                extended_map = dict(key_map)
                 for config_key, env_key in key_map.items():
+                    extended_map[f"{config_key}_2"] = f"{env_key}_2"
+                for config_key, env_key in extended_map.items():
                     if config_key in new_config:
                         val = new_config.get(config_key, "")
                         config[config_key] = val
@@ -5070,16 +7080,47 @@ async def websocket_endpoint(ws: WebSocket):
                         # orchestrator see the change immediately.
                         if ai_bridge and hasattr(ai_bridge, "config") and isinstance(ai_bridge.config, dict):
                             ai_bridge.config["thinking_depth"] = raw_depth
-                        logger.info("thinking_depth updated to '%s' via update_config", raw_depth)
+                        # v6.1.3 (Opus review #1-P1): the 3-source fallback in
+                        # ai_bridge._effective_timeout_for_node reads env and
+                        # disk as well. Propagate here so every WebSocket
+                        # client + SIGHUP-rebound instance sees the new value.
+                        try:
+                            os.environ["EVERMIND_THINKING_DEPTH"] = raw_depth
+                        except Exception:
+                            pass
+                        try:
+                            import json as _json
+                            _disk_path = os.path.expanduser("~/.evermind/config.json")
+                            if os.path.exists(_disk_path):
+                                with open(_disk_path, "r", encoding="utf-8") as _fh:
+                                    _disk_data = _json.load(_fh) or {}
+                                _disk_data["thinking_depth"] = raw_depth
+                                with open(_disk_path, "w", encoding="utf-8") as _fh:
+                                    _json.dump(_disk_data, _fh, ensure_ascii=False, indent=2)
+                        except Exception as _persist_err:
+                            logger.warning("Failed to persist thinking_depth to disk: %s", _persist_err)
+                        logger.info("thinking_depth updated to '%s' via update_config (env + disk synced)", raw_depth)
                 if "analyst" in new_config:
                     config["analyst"] = _normalize_analyst_settings(
                         new_config.get("analyst")
                     )
                 if isinstance(new_config.get("image_generation"), dict):
                     image_cfg = dict(new_config.get("image_generation") or {})
+                    try:
+                        _max_images_live = max(1, min(40, int(image_cfg.get("max_images_per_run", 10))))
+                    except (TypeError, ValueError):
+                        _max_images_live = 10
                     config["image_generation"] = {
                         "comfyui_url": str(image_cfg.get("comfyui_url", "") or "").strip(),
                         "workflow_template": str(image_cfg.get("workflow_template", "") or "").strip(),
+                        "provider": str(image_cfg.get("provider", "") or "").strip().lower(),
+                        "api_key": str(image_cfg.get("api_key", "") or "").strip(),
+                        "base_url": str(image_cfg.get("base_url", "") or "").strip(),
+                        "default_model": str(image_cfg.get("default_model", "") or "").strip(),
+                        "default_size": str(image_cfg.get("default_size", "") or "1024x1024").strip() or "1024x1024",
+                        "max_images_per_run": _max_images_live,
+                        "auto_crop": bool(image_cfg.get("auto_crop", True)),
+                        "enabled": bool(image_cfg.get("enabled", True)),
                     }
                     os.environ["EVERMIND_COMFYUI_URL"] = config["image_generation"]["comfyui_url"]
                     os.environ["EVERMIND_COMFYUI_WORKFLOW_TEMPLATE"] = config["image_generation"]["workflow_template"]
@@ -5104,8 +7145,49 @@ async def websocket_endpoint(ws: WebSocket):
                 if new_config.get("privacy"):
                     from privacy import update_masker_settings
                     update_masker_settings(new_config["privacy"])
+                # v6.3 (maintainer 2026-04-20): also accept nested api_keys /
+                # api_bases (the UI-side shape) so a settings change via WS
+                # propagates the same as /api/settings/save. Previously this
+                # handler only consumed flat `openai_api_key` style fields.
+                if isinstance(new_config.get("api_keys"), dict):
+                    config.setdefault("api_keys", {})
+                    for _p, _val in (new_config.get("api_keys") or {}).items():
+                        config["api_keys"][_p] = str(_val or "")
+                if isinstance(new_config.get("api_bases"), dict):
+                    config.setdefault("api_bases", {})
+                    for _p, _val in (new_config.get("api_bases") or {}).items():
+                        config["api_bases"][_p] = str(_val or "")
                 ai_bridge.config = config
-                ai_bridge._setup_litellm()  # Re-init LiteLLM with new keys
+                # v6.3 (maintainer 2026-04-20): full live reload for EVERY bridge.
+                # Earlier version only reloaded the current ws-handler's
+                # ai_bridge, but multiple concurrent WS clients each hold
+                # their own AIBridge instance (see line ~5774) — a config
+                # change from one UI tab must propagate to every running
+                # pipeline, not just the one that sent the message.
+                try:
+                    if _LIVE_AIBRIDGES is not None:
+                        _touched = 0
+                        for _live_bridge in list(_LIVE_AIBRIDGES):
+                            if _live_bridge is None:
+                                continue
+                            try:
+                                _reload_summary = _live_bridge.reload_api_config(config)
+                                _touched += 1
+                                logger.info(
+                                    "update_config: bridge reload_api_config summary=%s",
+                                    _reload_summary,
+                                )
+                            except Exception as _one_err:
+                                logger.warning("update_config: one bridge failed: %s", _one_err)
+                        logger.info(
+                            "update_config: hot-reloaded %d live AIBridge instance(s)", _touched,
+                        )
+                    else:
+                        _reload_summary = ai_bridge.reload_api_config(config)
+                        logger.info("update_config: reload_api_config summary=%s", _reload_summary)
+                except Exception as _reload_err:
+                    logger.warning("update_config: live reload failed, falling back to _setup_litellm: %s", _reload_err)
+                    ai_bridge._setup_litellm()  # Re-init LiteLLM with new keys
                 # Log only count of updated keys — never log key names or values
                 key_count = sum(1 for k, v in new_config.items() if v and 'key' in k.lower())
                 logger.info(f"Config updated: {key_count} API key(s) refreshed")
@@ -5184,7 +7266,17 @@ async def websocket_endpoint(ws: WebSocket):
                 requested_model = str(model or "gpt-5.3-codex")
                 launch_model_is_user_selected = bool(explicit_frontend_model)
                 difficulty = str(msg.get("difficulty", "standard")).strip().lower()
-                if difficulty not in ("simple", "standard", "pro"):
+                # v5.8.6: accept 'custom' — the caller has arranged their own
+                # canvas DAG. Downstream logic keys on the presence of
+                # `plan.nodes` (is_custom_plan=True) rather than this label, so
+                # treat 'custom' internally as 'pro' for node-count defaults
+                # (pro = 7-10 nodes, matches typical custom workflows).
+                if difficulty == "custom":
+                    difficulty = "pro"
+                # v7.1 (maintainer 2026-04-24): accept ultra aliases
+                elif difficulty in ("ultra", "product", "long_task", "ultra_mode"):
+                    difficulty = "ultra"
+                elif difficulty not in ("simple", "standard", "pro", "ultra"):
                     difficulty = "standard"
                 requested_runtime = str(msg.get("runtime", "local")).strip().lower()
                 if requested_runtime not in ("local", "openclaw"):
@@ -5215,8 +7307,17 @@ async def websocket_endpoint(ws: WebSocket):
                     effective_goal = f"{effective_goal}\n\n{attachment_context}".strip()
 
                 # ── Auto-detect model if default has no key ──
-                if model == "gpt-5.4" and not os.environ.get("OPENAI_API_KEY"):
+                # v6.1.2: promote kimi-k2.6-code-preview (current coding model)
+                # above the legacy kimi-coding alias (kimi-k2.5). The legacy
+                # endpoint 401s on the common platform.moonshot.cn key, and
+                # k2.6 is both faster and the model users actually configure
+                # in Settings.
+                # v7.4: was `model == "gpt-5.4"` only. Real default is gpt-5.3-codex
+                # at line 7261, and any user picking *any* gpt-* model with no
+                # OpenAI key would die on the first call instead of falling back.
+                if model and model.startswith("gpt-") and not os.environ.get("OPENAI_API_KEY"):
                     fallback_order = [
+                        ("kimi-k2.6-code-preview", "KIMI_API_KEY"),
                         ("kimi-coding", "KIMI_API_KEY"),
                         ("kimi-k2.5", "KIMI_API_KEY"),
                         ("deepseek-v3", "DEEPSEEK_API_KEY"),
@@ -5326,6 +7427,21 @@ async def websocket_endpoint(ws: WebSocket):
                             cross_session_memory_task,
                             continuation=False,
                         )
+                    # v6.1.2 FIX: persist the just-built digest into the chat
+                    # session memory so the chat agent sees a populated
+                    # "Project Memory Digest" block next turn. Previously this
+                    # digest was only handed to the orchestrator; the chat
+                    # handler kept reading an empty _SESSION_MEMORY["project_memory_digest"]
+                    # because no one ever wrote it.
+                    if session_id and project_memory_digest:
+                        try:
+                            _get_session_memory(session_id)["project_memory_digest"] = project_memory_digest
+                            if project_memory_source_task:
+                                _get_session_memory(session_id)["project_memory_task_id"] = str(
+                                    (project_memory_source_task or {}).get("id") or ""
+                                )
+                        except Exception as _mem_err:
+                            logger.warning("Failed to persist project_memory_digest to session memory: %s", _mem_err)
                     task_record = ts.create_task({
                         "title": task_title,
                         "description": effective_goal[:2000],
@@ -5454,6 +7570,42 @@ async def websocket_endpoint(ws: WebSocket):
                         except Exception:
                             effective_node_model = effective_node_model or requested_node_model or model
                             preferred_provider = ""
+                        # v7.1g (maintainer 2026-04-25): if CLI mode is enabled and
+                        # the node is CLI-eligible, replace the API model name
+                        # with `cli:<choice>` so the UI shows the actual route
+                        # from the moment the NE is created — not the stale
+                        # API placeholder that was previously visible all the
+                        # way until CLI execution finished.
+                        try:
+                            _cli_cfg = (_saved_settings or {}).get("cli_mode") or {}
+                            if isinstance(_cli_cfg, dict) and _cli_cfg.get("enabled"):
+                                _CLI_ELIGIBLE = {
+                                    "planner", "planner_degraded", "analyst", "uidesign", "scribe",
+                                    "builder", "merger", "polisher", "reviewer", "patcher",
+                                    "tester", "debugger", "deployer", "router",
+                                }
+                                if normalized_node_key in _CLI_ELIGIBLE:
+                                    _node_overrides = _cli_cfg.get("node_cli_overrides") or {}
+                                    _override = (
+                                        (_node_overrides.get(node_key.lower()) if node_key else None)
+                                        or _node_overrides.get(normalized_node_key, "")
+                                    )
+                                    if isinstance(_override, dict):
+                                        _cli_pick = str(_override.get("cli") or "").strip().lower()
+                                        _cli_model = str(_override.get("model") or "").strip()
+                                    elif isinstance(_override, str) and _override:
+                                        _cli_pick = _override.strip().lower()
+                                        _cli_model = ""
+                                    else:
+                                        _cli_pick = str(_cli_cfg.get("preferred_cli") or "").strip().lower()
+                                        _cli_model = str(_cli_cfg.get("preferred_model") or "").strip()
+                                    if _cli_pick:
+                                        effective_node_model = (
+                                            f"cli:{_cli_pick}:{_cli_model}" if _cli_model else f"cli:{_cli_pick}"
+                                        )
+                                        preferred_provider = "cli"
+                        except Exception:
+                            pass
                         # Set per-role timeout so the watchdog uses the correct
                         # limit instead of the global DEFAULT_NODE_TIMEOUT_S.
                         ne_timeout = _node_timeout_hint_seconds(normalized_node_key)
@@ -6493,6 +8645,10 @@ async def websocket_endpoint(ws: WebSocket):
                 conv_id = str(msg.get("conversation_id", ""))
                 session_id = str(msg.get("session_id", ""))
                 chat_history = msg.get("history", [])
+                # v6.5 Phase 3: mode defaults to "act" for backward compat.
+                chat_mode = str(msg.get("chat_mode") or msg.get("mode") or "act").strip().lower()
+                if chat_mode not in CHAT_MODES:
+                    chat_mode = "act"
 
                 if not chat_text:
                     await ws.send_json({"type": "chat_error", "conversation_id": conv_id, "error": "Empty message"})
@@ -6504,9 +8660,103 @@ async def websocket_endpoint(ws: WebSocket):
                 # Store user message in session memory
                 _store_chat_message_in_session(session_id, "user", chat_text)
 
+                # v6.1.2: on-demand project-memory rehydration so the chat can
+                # reference the latest 3D-shooter run (or any ongoing project)
+                # even before any run_goal turn populates _SESSION_MEMORY.
+                # Previously the digest was only stored during run_goal, so a
+                # fresh chat turn showed an empty "Project Memory Digest" block.
+                try:
+                    _sess_mem_for_chat = _get_session_memory(session_id) if session_id else None
+                    if isinstance(_sess_mem_for_chat, dict) and not str(_sess_mem_for_chat.get("project_memory_digest") or "").strip():
+                        _related_task = _find_related_task_for_cross_session_memory(
+                            chat_text, session_id=session_id,
+                        )
+                        if _related_task:
+                            _fresh_digest = _build_project_memory_digest(_related_task, continuation=False)
+                            if _fresh_digest:
+                                _sess_mem_for_chat["project_memory_digest"] = _fresh_digest
+                                _sess_mem_for_chat["project_memory_task_id"] = str(_related_task.get("id") or "")
+                                logger.info(
+                                    "[ChatMemory] Rehydrated project_memory_digest for session %s from task %s (%d chars)",
+                                    session_id[:12], str(_related_task.get("id"))[:12], len(_fresh_digest),
+                                )
+                except Exception as _mem_rehydrate_err:
+                    logger.warning("chat project-memory rehydration failed: %s", _mem_rehydrate_err)
+
                 # Build messages for LLM
                 pipeline_ctx = _build_pipeline_context_for_chat(session_id)
-                system_prompt = (
+                # v6.4.29 (maintainer 2026-04-22): Active Project injection.
+                # Without this, users report the chat saying "我没看到你的
+                # 游戏前端源码" even though the pipeline just wrote a complete
+                # index.html to OUTPUT_DIR. The block tells the agent exactly
+                # where the latest artifact is so it can file_ops read it
+                # directly instead of asking the user to "mount" a directory.
+                # Compact version (≤ 250 chars) for OpenAI-family to avoid
+                # relay.cn 403 on large system prompts.
+                # v6.3 (maintainer 2026-04-20): detect OpenAI-family provider so we
+                # can skip the extended "Browser Virtuosity" macro / WASD /
+                # mouse_click script section — those automation-style phrases
+                # trip OpenAI-route content filters (observed 403 "Your
+                # request was blocked" from relay.cn on a 6KB system prompt
+                # with gpt-5.4). Core tool contracts are preserved; only the
+                # verbose scripting examples are dropped. Kimi / Anthropic
+                # /local models still get the full prompt.
+                _chat_model_info_preview = MODEL_REGISTRY.get(chat_model, {})
+                _chat_provider_preview = str(_chat_model_info_preview.get("provider") or "").lower()
+                _openai_family = _chat_provider_preview in ("openai",)
+                if _openai_family:
+                    system_prompt = (
+                        "You are Evermind's Chat Agent — a fast, senior-engineer coding assistant.\n"
+                        "Single turn, single conversation: no pipeline, no multi-step planning unless asked.\n\n"
+                        "## Core discipline (v6.4 — maintainer 2026-04-21)\n"
+                        "- Go straight to the answer. No preamble like \"Sure, I'll help you...\".\n"
+                        "- Match response length to task complexity. Trivial Q = one line. Code fix = just the diff + one-line why.\n"
+                        "- Only use emojis if the user writes with emojis first. Never as UI/icons.\n"
+                        "- Respond in the user's language (Chinese if they write Chinese, English if English).\n\n"
+                        "## Before you edit code\n"
+                        "1. If the user names a file/symbol you haven't seen, call `file_ops search` or `file_ops read` FIRST.\n"
+                        "   Never edit a file you haven't read in this turn (unless creating it).\n"
+                        "2. If they ask \"where is X\" / \"how does Y work\", use `file_ops search` with a glob — do not guess.\n"
+                        "3. Prefer absolute paths. Workspace root is the cwd printed in env context below.\n\n"
+                        "## When you edit\n"
+                        "- **STRONGLY PREFER `file_ops edit`** (old_string/new_string) over `file_ops write`. "
+                        "Writing a full HTML/JS file of 30KB+ easily blows the output-token budget, which truncates "
+                        "your tool_call arguments mid-string → JSON parse error → the edit silently fails and you'll "
+                        "be forced to retry. For big files ALWAYS use multiple small edits, one feature at a time.\n"
+                        "- Use `file_ops edit` with exact `old_string` → `new_string`. old_string must match the file character-for-character, including whitespace and comments. If it won't be unique, include 2-3 surrounding lines.\n"
+                        "- Use `file_ops write` ONLY for NEW files (<10KB) or when the user explicitly asks for a full rewrite.\n"
+                        "- Never paste a full file back into chat when a 5-line edit will do.\n"
+                        "- After editing: one sentence — \"Edited <path>: <what changed>.\" Then stop.\n\n"
+                        "## When you answer without editing\n"
+                        "- Quote the exact line / function signature you're referencing (with path).\n"
+                        "- If you're uncertain, say so in one clause, then give your best guess — don't hedge for a paragraph.\n\n"
+                        "## Project rules\n"
+                        "If `CLAUDE.md`, `AGENTS.md`, or `.cursorrules` exists in the workspace, read it once at the start of a coding task and honor its conventions (style, commands, branch rules). Do not re-read it every turn.\n\n"
+                        "## Destructive actions\n"
+                        "Confirm before: deleting files, `rm -rf`, force-push, dropping DB, running migrations. Read-only ops don't need confirmation.\n\n"
+                        "## Code quality\n"
+                        "- Complete code only — no TODOs, placeholders, stubs.\n"
+                        "- Responsive design, semantic HTML5, inline SVG icons (never emoji).\n"
+                        "- Balanced braces, null-guarded DOM queries, try/catch async.\n\n"
+                        "## Tools\n"
+                        "- `file_ops`: read / write / edit / list / search / delete files. Prefer absolute paths.\n"
+                        "- `browser`: drive the embedded Chromium. Call `observe` first to enumerate elements (each gets a ref-N index), then `click(ref=N)`, `fill(selector,text)`, `scroll(direction)`, `screenshot()`.\n\n"
+                        "## Workflow Composer\n"
+                        "When the user asks to design or rearrange the node pipeline, emit a fenced JSON block tagged `evermind-workflow`:\n"
+                        "```evermind-workflow\n"
+                        "{\"nodes\":[{\"agent\":\"planner\",\"depends_on\":[]},{\"agent\":\"builder\",\"depends_on\":[\"planner\"]}]}\n"
+                        "```\n"
+                        "Agent keys: planner, analyst, imagegen, spritesheet, assetimport, uidesign, scribe, builder, polisher, merger, reviewer, tester, debugger, deployer, patcher.\n\n"
+                        "## Project Memory\n"
+                        "`Recent Pipeline Results` / `Current Canvas Workflow` / `Project Memory Digest` below are the user's ground truth — cite them when relevant.\n\n"
+                        "## Language\n"
+                        "Respond in the same language the user writes in (Chinese/English)."
+                        + pipeline_ctx
+                        + _build_active_project_context(compact=True, session_id=session_id)
+                        + _chat_auto_pre_read_snapshot(chat_text, session_id, kimi_compact=False)
+                    )
+                else:
+                    system_prompt = (
                     "You are the Evermind Chat assistant — a direct conversation mode "
                     "inside the Evermind multi-agent app builder.\n\n"
                     "## Coding Skills\n"
@@ -6520,12 +8770,181 @@ async def websocket_endpoint(ws: WebSocket):
                     "- Responsive design with CSS variables and semantic HTML5\n"
                     "- No emoji as UI icons — use inline SVG\n"
                     "- Balanced braces, null-guarded DOM queries, try/catch async\n\n"
+                    "## Browser Virtuosity (v5.8.5) — how to drive the built-in browser\n"
+                    "When the user asks you to browse, test, play a web game, fill a form, log in, "
+                    "scrape, click buttons, or verify a UI, use the `browser` tool. You are fluent with it.\n"
+                    "### Core loop\n"
+                    "1. `navigate { url }` then `observe` — the observe result includes a snapshot with "
+                    "   interactive items (each has an `index` / `ref`, role, text, bbox) AND an "
+                    "   auto-annotated screenshot where every item is boxed with its index number. Use the "
+                    "   annotated screenshot + the snapshot text together to ground every click.\n"
+                    "2. To click a DOM element, prefer `act { subaction: 'click', ref: 'ref-N' }` or "
+                    "   `click { ref: 'ref-N' }`. Never guess CSS selectors when a ref is available.\n"
+                    "3. To click a non-DOM thing (canvas games, WebGL viewports, custom UIs) use "
+                    "   `mouse_click { x, y }` — pixel-perfect. Pass `canvas: 'canvas'` to treat x/y as "
+                    "   canvas-local coords, or use `canvas_click` for the same thing in one step.\n"
+                    "### Playing games\n"
+                    "- `key_hold { key: 'w', duration_ms: 1200 }` holds WASD to walk. Combine with "
+                    "  `mouse_move` to aim then `mouse_click` to shoot.\n"
+                    "- `key_down { key }` + `key_up { key }` lets you hold-and-release precisely "
+                    "  (e.g. down 'ShiftLeft', move 'w', up 'ShiftLeft' for run-then-walk).\n"
+                    "- Use `macro { steps: [...] }` to chain 3-20 actions in one turn (click play → "
+                    "  wait 800ms → key_hold w 1500ms → mouse_click aim point → key Space). The macro "
+                    "  saves LLM round-trips; each step is a dict with its own `action` field, plus "
+                    "  `{action:'wait', ms: N}` for pauses.\n"
+                    "### Forms, files, dialogs\n"
+                    "- `fill { ref, value }` / `type_text { text }` for inputs. `select { ref }` with "
+                    "  no value lists options; then call again with `value` or `label` to choose.\n"
+                    "- `upload { ref, files: [path] }` for file inputs.\n"
+                    "- `close_popups` dismisses cookie banners / modals / consent dialogs.\n"
+                    "### Multi-tab flows\n"
+                    "- `new_tab { url }` opens a tab and focuses it. `switch_tab` (no index) lists "
+                    "  all tabs; pass `index` to switch. `close_tab` closes current or `index`.\n"
+                    "### Finding things\n"
+                    "- `find { query }` grep-searches the whole page INCLUDING off-viewport text. "
+                    "  Each hit reports `scrollY_needed` so you can scroll straight to it.\n"
+                    "- `evaluate { script }` runs arbitrary JS in page context for anything else.\n"
+                    "### Visible AI cursor\n"
+                    "Every mouse / key action paints a blue glowing cursor + ripple on the page so "
+                    "the user sees you driving the browser. This is expected — do NOT try to suppress it.\n"
+                    "### Efficiency\n"
+                    "Budget: navigate + observe + ≤6 interactions is usually enough. If you're over 10 "
+                    "calls on the same goal, step back and read the annotated screenshot more carefully "
+                    "instead of guessing more selectors.\n\n"
+                    "## Project Memory (v5.8.6)\n"
+                    "The `Recent Pipeline Results` / `Current Canvas Workflow` / `Project Memory Digest` "
+                    "blocks below ARE the user's project context — treat them as ground truth when "
+                    "they ask \"why did the last run fail?\", \"what's on the canvas right now?\", "
+                    "or \"build on top of run 2\". Cite the specific subtask / reviewer note when relevant.\n\n"
+                    "## Workflow Composer (v5.8.6)\n"
+                    "When the user asks you to DESIGN or REARRANGE the node pipeline (e.g. \"plan "
+                    "a 3-stage workflow for a game site\", \"add a polisher after merger\", \"skip "
+                    "tester this run\"), emit a fenced JSON block tagged `evermind-workflow` with this shape:\n"
+                    "```evermind-workflow\n"
+                    "{\n"
+                    "  \"nodes\": [\n"
+                    "    {\"agent\": \"planner\", \"depends_on\": []},\n"
+                    "    {\"agent\": \"analyst\", \"depends_on\": [\"planner\"]},\n"
+                    "    {\"agent\": \"builder\", \"depends_on\": [\"analyst\"]},\n"
+                    "    {\"agent\": \"reviewer\", \"depends_on\": [\"builder\"]},\n"
+                    "    {\"agent\": \"deployer\", \"depends_on\": [\"reviewer\"]}\n"
+                    "  ]\n"
+                    "}\n"
+                    "```\n"
+                    "Agent keys must be one of: planner, analyst, imagegen, spritesheet, assetimport, "
+                    "uidesign, scribe, builder, polisher, merger, reviewer, tester, debugger, deployer. "
+                    "The frontend detects the fenced block and renders it on the canvas — the user can "
+                    "then click Run to execute it as a live pipeline. For simple Q&A that doesn't "
+                    "restructure the workflow, do NOT emit this block.\n\n"
+                    "## Tool — file_ops (v5.8.6 chat MVP)\n"
+                    "You CAN read/write/edit/list/search/delete files by calling the `file_ops` tool.\n"
+                    "Call it directly via OpenAI-standard tool_calls — do NOT use markdown fenced ```browser\n"
+                    "or ```file blocks (those are just text, they don't execute). When the user asks you\n"
+                    "to read `~/Desktop/something` or create a file, you MUST invoke `file_ops` with the\n"
+                    "appropriate action. After reading, summarize the contents; after writing, confirm path.\n"
+                    "Path tips: use absolute paths when possible (`/Users/xxx/Desktop/file.html`). If the\n"
+                    "user gives a file name only (`测试.html`), try the workspace first, then\n"
+                    "`~/Desktop/<name>` as a common default, list the parent dir if unsure.\n"
+                    "Actions: `read` (returns content), `write` (path+content), `edit` (old_string→new_string),\n"
+                    "`list` (directory listing), `search` (pattern + glob), `delete` (path).\n"
+                    "\n"
+                    "## Built-in Browser (v6.0)\n"
+                    "You CAN drive the embedded Chromium via the `browser` tool. Always `observe()`\n"
+                    "first to see interactive elements (each gets a [N] index), then `click(ref=N)`\n"
+                    "or `click(selector=...)`. For forms use `fill(selector, text)` + `press(key='Enter')`.\n"
+                    "`scroll(direction, amount)` reveals off-screen content. Use `screenshot()` to\n"
+                    "confirm visual state when asked. Your actions are overlaid on the browser with\n"
+                    "an AI cursor + click ripple so the user sees what you're doing.\n\n"
                     "## Language\n"
                     "Respond in the same language the user writes in.\n"
                     "If the user writes in Chinese, respond in Chinese.\n"
                     "If the user writes in English, respond in English."
                     + pipeline_ctx
+                    # v6.4.29/30: full Active Project block for non-OpenAI
+                    # providers (Kimi / Anthropic / Gemini handle large
+                    # system prompts fine; 403 risk is only relay.cn).
+                    + _build_active_project_context(compact=False, session_id=session_id)
+                    # v6.4.31/36: auto pre-read trigger-word-gated.
+                    # Kimi k2.6 degenerates into prose tool_calls once
+                    # system prompt > ~10KB, so keep the snippet tiny for kimi.
+                    + _chat_auto_pre_read_snapshot(
+                        chat_text, session_id,
+                        kimi_compact=("kimi" in str(chat_model or "").lower() or "moonshot" in str(chat_model or "").lower()),
+                    )
+                    )
+
+                # v6.4.56 ROI-1 (maintainer 2026-04-23) — STICKY PROJECT INVARIANTS.
+                # Append auto-extracted invariants (3D/第三人称/怪物 etc.) to
+                # the very last user message. Inspired by Cline's
+                # environment_details pattern + Anthropic long-context tips
+                # ("queries at the end improve quality up to 30%"). We do NOT
+                # put this in system_prompt because:
+                #   (1) system gets cached & distant after many turns;
+                #   (2) Aider format_chat_chunks proves "user-tail reminder"
+                #       beats "system-head reminder" for near-term attention.
+                # The extract is cheap regex over the FIRST user message in
+                # session memory, so it's immune to compaction and guaranteed
+                # to re-anchor 3D-third-person-has-monsters on every turn.
+                def _v656_extract_invariants(_sess_id: str, _latest_user: str) -> Dict[str, Any]:
+                    import re as _re_inv
+                    _first_user = _latest_user
+                    try:
+                        _sess_mem = _SESSION_MEMORY.get(_sess_id) or {} if _sess_id else {}
+                        _past_msgs = _sess_mem.get("chat_messages") or []
+                        for _pm in _past_msgs:
+                            if isinstance(_pm, dict) and _pm.get("role") == "user":
+                                _c_pm = str(_pm.get("content") or "")
+                                if _c_pm.strip():
+                                    _first_user = _c_pm
+                                    break
+                    except Exception:
+                        pass
+                    _patterns = {
+                        "3D 三维": r"3\s*d|三维",
+                        "2D 二维": r"2\s*d(?![a-z])|二维",
+                        "第一人称/FPS": r"第一人称|fps|first[- ]?person",
+                        "第三人称/TPS": r"第三人称|tps|third[- ]?person",
+                        "有怪物/敌人": r"怪物|敌人|monster|enemy|zombie|boss",
+                        "多人联机": r"多人|联机|multiplayer|co-?op",
+                        "移动端": r"手机|移动端|mobile",
+                        "子弹轨迹": r"子弹(?:轨迹|弹道)|bullet\s*trail|tracer",
+                        "准星": r"准星|crosshair|reticle",
+                        "武器建模": r"武器(?:建模|模型)|枪(?:械|支)建模|weapon\s*model",
+                        "关卡/地图": r"关卡|地图|level|map|stage",
+                        "射击/shooting": r"射击|shoot|射击游戏|shooter",
+                        "PixiJS/Three.js": r"three\.?js|pixi\.?js|babylon\.?js",
+                    }
+                    _hits = [_label for _label, _pat in _patterns.items()
+                             if _re_inv.search(_pat, _first_user, _re_inv.I)]
+                    return {
+                        "original_goal": _first_user[:400],
+                        "must_preserve": _hits,
+                    }
+
+                _v656_inv = _v656_extract_invariants(session_id, chat_text)
+                _v656_block = (
+                    "\n\n<project_invariants>\n"
+                    f"original_goal: {_v656_inv['original_goal']}\n"
+                    f"must_preserve: {', '.join(_v656_inv['must_preserve']) or '(none auto-detected — honor user original text above)'}\n"
+                    "RULE: every file_ops.edit/write MUST honor must_preserve. "
+                    "If a change would violate (e.g. user asked 3D third-person, "
+                    "do NOT refactor to first-person), ASK first. Cite which "
+                    "invariant each edit preserves in your response.\n"
+                    "</project_invariants>"
                 )
+                # v6.5 Phase 3: Plan/Act/Debug mode suffix + AGENTS.md/memories.
+                try:
+                    _mode_cfg = CHAT_MODES.get(chat_mode) or CHAT_MODES["act"]
+                    system_prompt = str(system_prompt) + str(_mode_cfg.get("sys_suffix") or "")
+                    _agents_block = _load_agents_md_and_memories(OUTPUT_DIR)
+                    if _agents_block:
+                        system_prompt = system_prompt + "\n\n" + _agents_block
+                    logger.info(
+                        "chat_worker: mode=%s agents_md_block=%d chars",
+                        chat_mode, len(_agents_block),
+                    )
+                except Exception as _mode_err:
+                    logger.warning("chat_worker: mode/AGENTS.md injection failed: %s", _mode_err)
 
                 llm_messages = [{"role": "system", "content": system_prompt}]
                 # Add conversation history
@@ -6533,17 +8952,48 @@ async def websocket_endpoint(ws: WebSocket):
                     for h in chat_history[-40:]:
                         if isinstance(h, dict) and h.get("role") in ("user", "assistant"):
                             llm_messages.append({"role": h["role"], "content": str(h.get("content", ""))})
-                llm_messages.append({"role": "user", "content": chat_text})
+                # v6.4.56: append invariants block to the CURRENT user message
+                llm_messages.append({"role": "user", "content": chat_text + _v656_block})
+                try:
+                    logger.info(
+                        "chat_worker: invariants must_preserve=%s goal_len=%d",
+                        ",".join(_v656_inv["must_preserve"]) or "(none)",
+                        len(_v656_inv["original_goal"]),
+                    )
+                except Exception:
+                    pass
 
                 # Stream response in background thread
                 import threading
                 import queue as queue_mod
 
                 token_queue: queue_mod.Queue = queue_mod.Queue()
+                # v6.4.43 (maintainer 2026-04-23): HOIST _cancel_requested so
+                # the nested _chat_worker can see it via closure. Before
+                # this, the flag was created AFTER worker.start(), so
+                # chat_stop could flip it but the worker's tight stream
+                # loop had no way to notice — Stop button didn't stop
+                # during LLM streaming, which is the slowest case and the
+                # only one the user desperately needs to abort.
+                _cancel_requested = {"value": False}
+                _chat_cancel_handles[client_id] = _cancel_requested
+                _chat_queue_handles[client_id] = token_queue
 
                 def _chat_worker():
+                    # v6.4.43 fix: declare nonlocal so the v6.4.43-B history
+                    # compaction (`llm_messages = _v643_compact_history(...)`)
+                    # doesn't create a new local and shadow the outer list
+                    # — that crash was UnboundLocalError on the first read
+                    # of llm_messages inside _chat_worker.
+                    nonlocal llm_messages
                     try:
                         from openai import OpenAI
+                        # v6.1.1: same <think> stripper as builder/compat path —
+                        # chat agent must not leak reasoning tokens into user-
+                        # visible output either.
+                        from ai_bridge import ThinkStripper, strip_think_tags_full
+                        _chat_think_strip = str(os.getenv("EVERMIND_STRIP_THINK", "1")).strip().lower() not in ("0", "false", "off", "no")
+                        _chat_think_stripper = ThinkStripper() if _chat_think_strip else None
 
                         # ── Model-aware routing via MODEL_REGISTRY ──
                         _model_info = MODEL_REGISTRY.get(chat_model, {})
@@ -6553,17 +9003,34 @@ async def websocket_endpoint(ws: WebSocket):
                         _env_key = PROVIDER_ENV_KEY_MAP.get(_provider, "OPENAI_API_KEY")
                         api_key = os.getenv(_env_key, "")
 
-                        # Resolve base URL: model-level api_base > env var > empty
-                        base_url = str(_model_info.get("api_base") or "").strip()
-                        if not base_url:
-                            _base_env_map = {
-                                "openai": "OPENAI_API_BASE", "anthropic": "ANTHROPIC_API_BASE",
-                                "google": "GEMINI_API_BASE", "deepseek": "DEEPSEEK_API_BASE",
-                                "kimi": "KIMI_API_BASE", "qwen": "QWEN_API_BASE",
-                                "zhipu": "ZHIPU_API_BASE", "doubao": "DOUBAO_API_BASE",
-                                "yi": "YI_API_BASE", "minimax": "MINIMAX_API_BASE",
-                            }
-                            base_url = os.getenv(_base_env_map.get(_provider, ""), "")
+                        # v6.3 (maintainer 2026-04-20) HOTFIX: resolve base URL with
+                        # env PRIORITY over MODEL_REGISTRY.api_base — previously
+                        # it was the opposite, so a user setting a new
+                        # OPENAI_API_BASE via UI got silently overridden by the
+                        # import-time hardcoded private-relay.com in the registry,
+                        # producing "Invalid token" 401s when the key was for a
+                        # different relay (e.g. relay.cn). This now matches
+                        # ai_bridge._execute_openai_compatible_chat (line ~16546)
+                        # so UI-saved base URLs work immediately across every
+                        # LLM code path.
+                        _base_env_map = {
+                            "openai": "OPENAI_API_BASE", "anthropic": "ANTHROPIC_API_BASE",
+                            "google": "GEMINI_API_BASE", "deepseek": "DEEPSEEK_API_BASE",
+                            "kimi": "KIMI_API_BASE", "qwen": "QWEN_API_BASE",
+                            "zhipu": "ZHIPU_API_BASE", "doubao": "DOUBAO_API_BASE",
+                            "yi": "YI_API_BASE", "minimax": "MINIMAX_API_BASE",
+                        }
+                        _env_base = os.getenv(_base_env_map.get(_provider, ""), "").strip()
+                        base_url = _env_base or str(_model_info.get("api_base") or "").strip()
+                        # v6.3 (maintainer 2026-04-20): diagnostic log so a failed
+                        # chat turn can always be traced to the exact base_url
+                        # that was used. Previous chat errors were swallowed
+                        # inside _chat_worker's bare except, leaving no trail.
+                        logger.info(
+                            "chat_worker: model=%s provider=%s base_url=%s key_present=%s",
+                            chat_model, _provider, base_url or "(none)",
+                            bool(api_key),
+                        )
 
                         # Resolve actual model ID (strip litellm prefix like "openai/")
                         _litellm_id = str(_model_info.get("litellm_id") or chat_model)
@@ -6592,7 +9059,32 @@ async def websocket_endpoint(ws: WebSocket):
                                 return
 
                         # ── OpenAI-compatible path (covers openai/kimi/deepseek/qwen/etc) ──
-                        client_kwargs = {}
+                        # v6.4.47 (maintainer 2026-04-23): force httpx-level
+                        # timeouts by constructing our OWN httpx.Client.
+                        # The openai SDK's per-call `timeout=` parameter and
+                        # our external watchdog both failed to break out of
+                        # a recv() blocked on relay.cn (observed at iter=6
+                        # and iter=7, 5+ minutes hung). By handing the SDK
+                        # a pre-configured httpx.Client with explicit
+                        # connect/read timeouts, the socket will raise
+                        # httpx.ReadTimeout on any single read that stays
+                        # silent longer than `read`. This is enforced at
+                        # the BSD socket level, so no watchdog, no thread
+                        # scheduling hazards, no SDK-version quirks.
+                        import httpx as _httpx_v647
+                        _chat_http_client = _httpx_v647.Client(
+                            timeout=_httpx_v647.Timeout(
+                                connect=10.0,
+                                read=45.0,    # max silence per chunk
+                                write=10.0,
+                                pool=None,
+                            ),
+                            limits=_httpx_v647.Limits(
+                                max_connections=20,
+                                max_keepalive_connections=10,
+                            ),
+                        )
+                        client_kwargs: Dict[str, Any] = {"http_client": _chat_http_client}
                         if api_key:
                             client_kwargs["api_key"] = api_key
                         if base_url:
@@ -6600,24 +9092,2020 @@ async def websocket_endpoint(ws: WebSocket):
                         _extra_headers = _model_info.get("extra_headers")
                         if _extra_headers:
                             client_kwargs["default_headers"] = _extra_headers
+                        # v6.3 (maintainer 2026-04-21) HOTFIX: some Chinese relays
+                        # (relay.cn, likely others) do anti-passthrough
+                        # fingerprinting on the exact string "User-Agent:
+                        # OpenAI/Python" and return 403 "Your request was
+                        # blocked." when they see it. Override the UA to a
+                        # neutral value so relay-hosted models stay reachable.
+                        # The official Python SDK exposes this via
+                        # `default_headers`. When the user has NOT supplied
+                        # custom extra_headers, stamp our own UA. When they
+                        # did supply headers (rare), honour theirs but still
+                        # ensure User-Agent is safe.
+                        _safe_ua = "evermind-chat/6.3 httpx/openai-compat"
+                        if "default_headers" in client_kwargs:
+                            _existing = dict(client_kwargs["default_headers"] or {})
+                            _existing.setdefault("User-Agent", _safe_ua)
+                            client_kwargs["default_headers"] = _existing
+                        else:
+                            client_kwargs["default_headers"] = {"User-Agent": _safe_ua}
                         client = OpenAI(**client_kwargs)
 
-                        stream = client.chat.completions.create(
-                            model=api_model_id,
-                            messages=llm_messages,
-                            stream=True,
-                            temperature=0.7,
-                            max_tokens=4096,
-                        )
+                        # v5.8.6: chat agent tool calling — file_ops.
+                        # v6.0: add `browser` tool so the chat agent can drive
+                        # the embedded Chromium. Wired to the shared
+                        # BrowserPlugin via run_coroutine_threadsafe so state
+                        # persists across navigate/click/screenshot within a
+                        # single chat turn AND across turns.
+                        _chat_tools = [{
+                            "type": "function",
+                            "function": {
+                                "name": "file_ops",
+                                "description": "Read, write, list, edit, search, or delete files on the user's local workspace. Use this whenever the user asks you to read/create/modify a file. Paths may be absolute (e.g. /Users/<you>/Desktop/test.html) or relative to the workspace root.",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "action": {"type": "string", "enum": ["read", "write", "edit", "search", "list", "delete"]},
+                                        "path": {"type": "string"},
+                                        "content": {"type": "string", "description": "For write action"},
+                                        "old_string": {"type": "string", "description": "For edit action"},
+                                        "new_string": {"type": "string", "description": "For edit action"},
+                                        "replace_all": {"type": "boolean"},
+                                        "pattern": {"type": "string", "description": "For search action"},
+                                        "glob": {"type": "string"},
+                                    },
+                                    "required": ["action", "path"],
+                                },
+                            },
+                        }, {
+                            "type": "function",
+                            "function": {
+                                "name": "browser",
+                                "description": (
+                                    "Drive the embedded Chromium browser. Actions:\n"
+                                    " - navigate(url): open a page\n"
+                                    " - observe(): return the accessibility tree + interactive elements\n"
+                                    " - click(selector=..., ref=N): click by CSS selector or by [N] from observe\n"
+                                    " - fill(selector, text): type into an input\n"
+                                    " - scroll(direction='down'|'up', amount=px): scroll the page\n"
+                                    " - screenshot(): return a screenshot\n"
+                                    " - extract(selector): return text/HTML of matched element\n"
+                                    " - wait_for(selector, timeout_ms=5000): wait for element\n"
+                                    "Use browser for any URL / search / web-form task. Always observe() before clicking to know what's on the page. AI cursor / click ripple shown to user automatically."
+                                ),
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "action": {
+                                            "type": "string",
+                                            "enum": [
+                                                "navigate", "observe", "click", "fill", "scroll",
+                                                "screenshot", "extract", "wait_for", "press",
+                                                "hover", "new_tab", "switch_tab", "close_tab",
+                                            ],
+                                        },
+                                        "url": {"type": "string"},
+                                        "selector": {"type": "string"},
+                                        "ref": {"type": "integer", "description": "[N] index from prior observe()"},
+                                        "text": {"type": "string", "description": "For fill / press"},
+                                        "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+                                        "amount": {"type": "integer", "description": "Scroll amount in px"},
+                                        "timeout_ms": {"type": "integer"},
+                                        "key": {"type": "string", "description": "For press (e.g. 'Enter', 'Tab')"},
+                                        "tab_index": {"type": "integer"},
+                                    },
+                                    "required": ["action"],
+                                },
+                            },
+                        }]
+                        # v6.5 Phase 3: mode-scoped tool whitelist.
+                        try:
+                            _pre_count = len(_chat_tools)
+                            _chat_tools = _filter_chat_tools_by_mode(_chat_tools, chat_mode)
+                            if len(_chat_tools) != _pre_count:
+                                logger.info(
+                                    "chat_worker: mode=%s tool-filter %d → %d",
+                                    chat_mode, _pre_count, len(_chat_tools),
+                                )
+                        except Exception as _filt_err:
+                            logger.warning("chat_worker: tool filter failed: %s", _filt_err)
+                        # v6.1.2: raised from 6 to 15. A typical GitHub search
+                        # flow (navigate → observe → scroll → observe → try-click
+                        # → retry with selector → type query → submit → observe
+                        # results → click first result → observe) needs 10+ calls.
+                        # At 6 the chat agent consistently hit the ceiling mid-task
+                        # and bailed silently, which users experienced as "it just
+                        # stopped doing anything". Also exposed as env var so power
+                        # users can crank higher for long browse sessions.
+                        # v6.1.3 (maintainer 2026-04-18): Chat agent ceiling raised
+                        # 15→80. Google-search-retry-with-Bing style flows need
+                        # 15+ rounds easily; users were hitting the cap and
+                        # seeing "Google search blocked, let me try Bing" cut
+                        # off mid-recovery. 80 gives real headroom; no-activity
+                        # watchdog still catches genuine deadlocks.
+                        try:
+                            _MAX_TOOL_ITERATIONS = int(
+                                str(os.getenv("EVERMIND_CHAT_TOOL_ITERATIONS", "80") or "80").strip()
+                            )
+                        except Exception:
+                            _MAX_TOOL_ITERATIONS = 80
+                        _MAX_TOOL_ITERATIONS = max(3, min(200, _MAX_TOOL_ITERATIONS))
+                        _iter = 0
                         full_content = ""
-                        for chunk in stream:
-                            delta = chunk.choices[0].delta if chunk.choices else None
-                            if delta and delta.content:
-                                full_content += delta.content
-                                token_queue.put(("token", delta.content))
+                        # v6.4.35 (maintainer 2026-04-23) — DISABLE thinking for chat
+                        # on kimi. Kimi k2.6-code-preview defaults to
+                        # thinking=enabled which requires every assistant
+                        # tool_call message in history to carry
+                        # `reasoning_content`. Our history from localStorage
+                        # doesn't, so kimi returns:
+                        #   400 "thinking is enabled but reasoning_content is
+                        #        missing in assistant tool call message at index N"
+                        # Chat is interactive — user wants fast responses, not
+                        # 30s of hidden thinking. Force thinking off.
+                        _lower_model = str(api_model_id or "").lower()
+                        _is_kimi = "kimi" in _lower_model or "moonshot" in _lower_model
+                        _is_claude = "claude" in _lower_model or "anthropic" in _lower_model
+                        _is_gpt = "gpt" in _lower_model or "o1" in _lower_model or "o3" in _lower_model or "o4" in _lower_model
+                        _is_gemini = "gemini" in _lower_model or "google" in _lower_model
+                        _is_qwen = "qwen" in _lower_model or "tongyi" in _lower_model or "dashscope" in _lower_model
+                        _is_glm = "glm" in _lower_model or "zhipu" in _lower_model or "chatglm" in _lower_model
+                        _is_deepseek = "deepseek" in _lower_model
+                        _is_doubao = "doubao" in _lower_model or "volcengine" in _lower_model
+                        _extra_body: Dict[str, Any] = {}
+                        if _is_kimi:
+                            _extra_body["thinking"] = {"type": "disabled"}
+                        # Also strip any stale reasoning_content from history
+                        # messages (older turns may have it; kimi-disabled
+                        # mode doesn't care, and dropping it avoids any
+                        # accidental re-enable of the strict validator).
+                        # v6.4.38 (maintainer 2026-04-23): message sanitizer. The
+                        # OpenAI SDK 1.x does deep equality/length checks on
+                        # message fields and will crash with opaque errors
+                        # like "'<' not supported between instances of 'map'
+                        # and 'int'" if ANY field is a Python `map`/`filter`
+                        # /generator object. Force every message field to a
+                        # concrete JSON-serializable type before sending.
+                        def _sanitize_chat_messages(msgs: list) -> list:
+                            import types as _types
+                            out = []
+                            for m in (msgs or []):
+                                if not isinstance(m, dict):
+                                    continue
+                                clean: Dict[str, Any] = {}
+                                for k, v in m.items():
+                                    # Unfold map/filter/generator → list
+                                    if isinstance(v, (map, filter, _types.GeneratorType)):
+                                        try:
+                                            v = list(v)
+                                        except Exception:
+                                            v = []
+                                    # Tool message content MUST be str
+                                    if k == "content" and v is not None and not isinstance(v, (str, list)):
+                                        try:
+                                            v = str(v)
+                                        except Exception:
+                                            v = ""
+                                    # tool_calls items must be dicts
+                                    if k == "tool_calls" and isinstance(v, list):
+                                        _tcs = []
+                                        for tc in v:
+                                            if isinstance(tc, (map, filter, _types.GeneratorType)):
+                                                try:
+                                                    tc = list(tc)
+                                                except Exception:
+                                                    continue
+                                            _tcs.append(tc)
+                                        v = _tcs
+                                    clean[k] = v
+                                # v6.4.41 — KIMI ONLY: if thinking is DISABLED
+                                # we strip stale reasoning_content. But if
+                                # thinking stays on (future default), kimi
+                                # requires every assistant tool_call message
+                                # to have a non-empty reasoning_content
+                                # field. Provide an empty one so replay of
+                                # old history without saved CoT doesn't 400.
+                                if (_is_kimi and clean.get("role") == "assistant"
+                                        and clean.get("tool_calls")
+                                        and not clean.get("reasoning_content")):
+                                    clean["reasoning_content"] = ""
+                                # Other providers silently ignore the field.
+                                out.append(clean)
+                            return out
+                        # v6.4.44-A (maintainer 2026-04-23): ENTRY POISON FILTER.
+                        # Kimi/GPT sometimes output "让我尝试读取..." /
+                        # "让我继续读取..." / "代码被截断了..." as PROSE —
+                        # no real tool_calls fired. That prose lands in
+                        # chat_messages; next turn the model sees its own
+                        # hallucination and mimics it, degenerating into a
+                        # read-loop forever. Before we even start the while
+                        # loop, scrub the tail of llm_messages of these
+                        # poison assistant messages (those WITHOUT
+                        # tool_calls AND containing ≥4 hallucination
+                        # markers). Then inject a one-shot system nudge
+                        # telling the model: use REAL tool_calls, do NOT
+                        # describe the action in prose.
+                        _HALLUCINATION_MARKERS = [
+                            "让我尝试读取", "让我继续读取", "让我检查",
+                            "让我用", "让我查看", "让我搜索", "让我滚动",
+                            "让我观察", "让我截图", "让我尝试用",
+                            "被截断", "代码被截断", "读取被截断",
+                            "仍然被截断", "文件读取被截断",
+                            "由于文件读取被截断",
+                        ]
+                        def _v644_is_poison(_m: Dict[str, Any]) -> bool:
+                            if not isinstance(_m, dict) or _m.get("role") != "assistant":
+                                return False
+                            if _m.get("tool_calls"):
+                                return False
+                            _c = _m.get("content") or ""
+                            if not isinstance(_c, str) or len(_c) < 200:
+                                return False
+                            _hits = sum(_c.count(_p) for _p in _HALLUCINATION_MARKERS)
+                            return _hits >= 4
+                        _v644_cleaned = [_m for _m in llm_messages if not _v644_is_poison(_m)]
+                        if len(_v644_cleaned) != len(llm_messages):
+                            _removed = len(llm_messages) - len(_v644_cleaned)
+                            logger.warning(
+                                "chat_worker: scrubbed %d hallucination message(s) from history",
+                                _removed,
+                            )
+                            # Insert one-shot nudge AFTER system prompt
+                            _nudge = {
+                                "role": "system",
+                                "content": (
+                                    "[NUDGE] 之前的对话里模型多次用自然语言描述"
+                                    "\"让我读取...\"\"被截断\" 但没有实际调用工具。"
+                                    "本轮必须使用 file_ops / browser 等结构化 tool_calls "
+                                    "才能真正读写文件/访问网页。禁止只用文字描述动作。"
+                                ),
+                            }
+                            if len(_v644_cleaned) >= 1 and _v644_cleaned[0].get("role") == "system":
+                                llm_messages = [_v644_cleaned[0], _nudge] + _v644_cleaned[1:]
+                            else:
+                                llm_messages = [_nudge] + _v644_cleaned
+                        else:
+                            llm_messages = _v644_cleaned
+                        # v6.4.44-C: KIMI first-turn tool_choice coercion.
+                        # If the user's latest message looks like an execution
+                        # task ("优化"/"读"/"看"/"修复"/"改") and the model
+                        # is kimi, force tool_choice="required" on iter=1 so
+                        # kimi emits a real tool_call instead of prose. Some
+                        # kimi endpoints don't support required — we fall
+                        # back gracefully.
+                        _v644_force_required_first = False
+                        if _is_kimi:
+                            _last_user = ""
+                            for _m in reversed(llm_messages):
+                                if isinstance(_m, dict) and _m.get("role") == "user":
+                                    _last_user = str(_m.get("content") or "")
+                                    break
+                            _exec_kw = ("优化", "读", "看", "修", "改", "删",
+                                        "写", "创建", "执行", "调试", "部署",
+                                        "访问", "打开", "查找", "搜索")
+                            if _last_user and any(_k in _last_user for _k in _exec_kw):
+                                _v644_force_required_first = True
+                                logger.info("chat_worker: kimi first-turn tool_choice=required")
+                        # v6.4.41 (maintainer 2026-04-23) — PROVIDER-AGNOSTIC
+                        # chat hardening. Previous fixes targeted specific
+                        # failure modes (kimi thinking, map/int leaks, search
+                        # rename). This layer catches the GENERIC pathologies
+                        # that every tool-calling LLM exhibits under load:
+                        #   1. Degenerate repetition ("好的我现在开始深度优化"
+                        #      N 次) — detect ≥3 consecutive identical 40-char
+                        #      suffixes in streamed content, abort turn.
+                        #   2. Empty-response deadlock — when finish_reason is
+                        #      "stop" with no content AND no tool_calls, break
+                        #      instead of spinning forever.
+                        #   3. Tool-call signature loop — if the same
+                        #      (tool_name, args-hash) appears ≥3 consecutive
+                        #      iterations, refuse and ask user to rephrase.
+                        #   4. Prose tool-call fallback — kimi/qwen sometimes
+                        #      emit `to=file_ops.read path` as plain text when
+                        #      the function-call API is confused; extract and
+                        #      synthesize a real tool_call.
+                        #   5. Adaptive tool_choice — first turn "auto", but
+                        #      after 40 iterations flip to "none" so the model
+                        #      is forced to produce a final answer instead of
+                        #      calling more tools.
+                        #   6. No-progress watchdog — if 3 iterations in a row
+                        #      produce neither new content nor new tool_calls,
+                        #      abort.
+                        # All logic is provider-agnostic; specific quirks are
+                        # handled above (_is_kimi, _is_claude, _is_gpt etc.).
+                        import hashlib as _hashlib_v641
+                        import re as _re_v641
+                        _v641_recent_text_hashes: list = []
+                        _v641_recent_tool_sigs: list = []
+                        _v641_no_progress = 0
+                        _v641_last_content_len = 0
+                        _PROSE_TOOL_RE = _re_v641.compile(
+                            r"(?:to=|tool=|<tool_call>\s*)(?P<name>[a-zA-Z_][a-zA-Z0-9_]*)(?:\.(?P<action>[a-zA-Z_][a-zA-Z0-9_]*))?\s*(?P<args>\{[^}]*\})?",
+                            _re_v641.MULTILINE,
+                        )
+                        def _v641_detect_repetition(text: str) -> bool:
+                            """True if last 600 chars contain a pattern that
+                            repeats ≥3 times — either as consecutive N-char
+                            windows OR as a phrase (sentence-split) that
+                            recurs ≥4 times anywhere in the tail.
+
+                            v6.4.44-B: added phrase-frequency detection —
+                            the consecutive-window check missed kimi's
+                            "让我尝试读取..." loop where each sentence
+                            repeats the idea with slight wording shifts."""
+                            if not text or len(text) < 120:
+                                return False
+                            tail = text[-600:]
+                            # Consecutive N-char windows (v6.4.41-1 original)
+                            for _w in (40, 60, 80, 120):
+                                if len(tail) < _w * 3:
+                                    continue
+                                _last = tail[-_w:]
+                                _count = 0
+                                _pos = len(tail)
+                                while _pos >= _w and tail[_pos - _w:_pos] == _last:
+                                    _count += 1
+                                    _pos -= _w
+                                    if _count >= 3:
+                                        return True
+                            # v6.4.44-B: phrase frequency. Split on CJK
+                            # punctuation; count phrases ≥10 chars that
+                            # appear ≥4 times in the tail.
+                            import re as _re_rep
+                            _phrases = _re_rep.split(r"[。！？；\n,，:：]+", tail)
+                            _phrase_counts: Dict[str, int] = {}
+                            for _ph in _phrases:
+                                _ph = _ph.strip()
+                                if len(_ph) >= 10:
+                                    _phrase_counts[_ph] = _phrase_counts.get(_ph, 0) + 1
+                            if _phrase_counts and max(_phrase_counts.values()) >= 4:
+                                return True
+                            # v6.4.44-B: hallucination marker density — if
+                            # the tail has ≥5 of "让我"/"被截断" style markers,
+                            # the model is prose-looping even without exact
+                            # repetition.
+                            _hallu = sum(
+                                tail.count(_p) for _p in
+                                ("让我尝试", "让我继续", "让我检查", "让我用",
+                                 "让我查看", "被截断", "让我搜索")
+                            )
+                            if _hallu >= 5:
+                                return True
+                            return False
+                        def _v641_tool_signature(tcs_acc: dict) -> str:
+                            if not tcs_acc:
+                                return ""
+                            _parts = []
+                            for _i in sorted(tcs_acc.keys()):
+                                _e = tcs_acc.get(_i) or {}
+                                _fn = (_e.get("function") or {})
+                                _parts.append(f"{_fn.get('name', '')}:{_fn.get('arguments', '')[:400]}")
+                            return _hashlib_v641.md5("|".join(_parts).encode("utf-8", "ignore")).hexdigest()
+                        # v6.4.42: total-turn budget watchdog. If the entire
+                        # chat turn exceeds this, break the loop with a user
+                        # message. Default 900s (15 min) — long enough for
+                        # complex browse-then-code-then-verify flows but
+                        # short enough that a stuck coroutine doesn't hang
+                        # the chat forever.
+                        _v642_turn_budget_sec = 900.0
+                        try:
+                            _v642_turn_budget_sec = float(os.getenv("EVERMIND_CHAT_TURN_BUDGET_SEC", "900") or 900)
+                        except Exception:
+                            _v642_turn_budget_sec = 900.0
+                        _v642_turn_budget_sec = max(60.0, min(_v642_turn_budget_sec, 3600.0))
+                        import time as _time_v642
+                        _v642_turn_started = _time_v642.monotonic()
+                        # v6.4.48-C (maintainer 2026-04-23) — behavioural guardrail.
+                        # Observed: kimi/gpt-5.4 sometimes spend 12+ iterations
+                        # just reading files, never moving to write/edit,
+                        # ending with content_len=0. This is a model-level
+                        # laziness/anxiety, not a plumbing bug — prompting
+                        # them helps. We track consecutive iterations that
+                        # fire ONLY read/list/search tool_calls; at 6 in a
+                        # row, inject a one-shot system nudge "读够了,现在
+                        # 用 file_ops.write / edit 落地修复". Nudge only
+                        # fires once per chat turn so we don't spam.
+                        _v648_readonly_streak = 0
+                        # v6.4.55-A: reset Cline no-tool-retry counter per
+                        # chat turn. Previously stored as a module-level
+                        # attribute on _sanitize_chat_messages, which leaked
+                        # across turns, causing Apr 23 13:33 session to skip
+                        # the nudge because the counter was already ≥ 2 from
+                        # a prior turn.
+                        _v655_no_tool_retry = 0
+                        # v6.4.50-B: nudge can fire MULTIPLE times.
+                        # Previously _v648_nudge_sent latched True and
+                        # the nudge only ever fired once per chat turn.
+                        # Observed in Apr 23 11:13 session: nudge at
+                        # iter=6 pushed kimi into browser for 3 iters,
+                        # browser screenshot/click failed, kimi fell back
+                        # to read loop for iter 12-23 — nudge could not
+                        # re-fire because the latch was stuck.
+                        _v648_nudge_count = 0
+                        _V648_READONLY_NUDGE_AFTER = 6
+                        _v648_force_no_tools_next = False
+                        # v6.4.43-B: history auto-compaction. Chat with
+                        # multiple file reads quickly pushes msg count into
+                        # the 30+ range and input tokens over 60K, which
+                        # causes gpt-5.x on relay.cn to respond in 4+
+                        # minutes or time out entirely. When the history
+                        # grows too large, fold the middle block (everything
+                        # except system prompt + last 12 msgs) into ONE
+                        # compact "[history digest]" message — the model
+                        # still sees the conversation arc plus the most
+                        # recent 6 turns which are what matter for next step.
+                        def _v643_compact_history(msgs: list) -> list:
+                            if not isinstance(msgs, list) or len(msgs) < 28:
+                                return msgs
+                            # Estimate size
+                            _total = 0
+                            for _m in msgs:
+                                _c = _m.get("content") if isinstance(_m, dict) else None
+                                if isinstance(_c, str):
+                                    _total += len(_c)
+                            if _total < 50000 and len(msgs) < 32:
+                                return msgs  # no need
+                            _head = msgs[:1]  # system
+                            # v6.4.56 ROI-2 (maintainer 2026-04-23): pin FIRST user
+                            # msg as the original goal — NEVER compact it
+                            # away. Observed in Apr 23 13:xx session: after 3
+                            # compactions, user's "3D 第三人称 怪物" goal was
+                            # gone, model drifted to first-person without
+                            # monsters. Cline's environment_details + Anthropic
+                            # "long-context tips" both say: keep original goal
+                            # close to the turn; never summarise it away.
+                            _first_user_idx = next(
+                                (_i for _i, _m in enumerate(msgs)
+                                 if isinstance(_m, dict) and _m.get("role") == "user"),
+                                None,
+                            )
+                            if _first_user_idx is not None and _first_user_idx < len(msgs) - 12:
+                                _pinned_goal = [msgs[_first_user_idx]]
+                                _middle = msgs[_first_user_idx + 1:-12]
+                            else:
+                                _pinned_goal = []
+                                _middle = msgs[1:-12]
+                            _tail = msgs[-12:]  # last ~6 user/assistant pairs
+                            if not _middle:
+                                return msgs
+                            # Build digest
+                            _tool_count = 0
+                            _files_seen: Dict[str, int] = {}
+                            _urls_seen: Dict[str, int] = {}
+                            _assistant_snippets: list = []
+                            for _m in _middle:
+                                if not isinstance(_m, dict):
+                                    continue
+                                _role = _m.get("role")
+                                if _role == "tool":
+                                    _tool_count += 1
+                                    _c = str(_m.get("content") or "")[:200]
+                                    # Extract path / url from tool result JSON
+                                    try:
+                                        import json as _jj
+                                        _d = _jj.loads(_m.get("content") or "{}")
+                                        if isinstance(_d, dict):
+                                            _p = _d.get("path") or ""
+                                            _u = _d.get("url") or ""
+                                            if _p:
+                                                _files_seen[_p] = _files_seen.get(_p, 0) + 1
+                                            if _u:
+                                                _urls_seen[_u] = _urls_seen.get(_u, 0) + 1
+                                    except Exception:
+                                        pass
+                                elif _role == "assistant":
+                                    _c = _m.get("content") or ""
+                                    if isinstance(_c, str) and _c.strip():
+                                        _assistant_snippets.append(_c.strip()[:140])
+                            _digest_parts = [
+                                # v6.4.56: make it clear the digest is a
+                                # trace, NOT a replacement for the user's
+                                # pinned original goal (which sits immediately
+                                # above this digest in the message list).
+                                f"[压缩摘要 — 工具调用痕迹,不得覆盖用户原始目标 · {len(_middle)} 条消息 / {_tool_count} 次工具调用]"
+                            ]
+                            if _files_seen:
+                                _top_files = sorted(_files_seen.items(), key=lambda x: -x[1])[:6]
+                                _digest_parts.append(
+                                    "已访问文件: " + ", ".join(f"{Path(p).name}×{n}" for p, n in _top_files)
+                                )
+                            if _urls_seen:
+                                _top_urls = sorted(_urls_seen.items(), key=lambda x: -x[1])[:4]
+                                _digest_parts.append(
+                                    "已访问URL: " + ", ".join(f"{u[:60]}×{n}" for u, n in _top_urls)
+                                )
+                            if _assistant_snippets:
+                                _digest_parts.append(
+                                    "之前的阶段性回复片段: " + " | ".join(_assistant_snippets[-4:])
+                                )
+                            _digest = "\n".join(_digest_parts)
+                            _result_msgs = _head + _pinned_goal + [{"role": "user", "content": _digest}] + _tail
+                            logger.info(
+                                "chat_worker: history compacted %d→%d msgs (digest %d chars, goal pinned=%s)",
+                                len(msgs), len(_result_msgs), len(_digest),
+                                bool(_pinned_goal),
+                            )
+                            return _result_msgs
+                        while _iter < _MAX_TOOL_ITERATIONS:
+                            _iter += 1
+                            # v6.4.43-B compact history every iteration (fast no-op when small)
+                            llm_messages = _v643_compact_history(llm_messages)
+                            # v6.4.42 turn budget check
+                            _v642_elapsed = _time_v642.monotonic() - _v642_turn_started
+                            if _v642_elapsed > _v642_turn_budget_sec:
+                                logger.warning(
+                                    "chat_worker: turn budget %.0fs exceeded at iter=%d — aborting",
+                                    _v642_turn_budget_sec, _iter,
+                                )
+                                token_queue.put(("token",
+                                    f"\n\n[本轮已运行 {_v642_elapsed:.0f}s,超过 {_v642_turn_budget_sec:.0f}s 上限,已终止。可再次发送消息继续。]"))
+                                break
+                            logger.info(
+                                "chat_worker: iter=%d/%d msgs=%d elapsed=%.1fs",
+                                _iter, _MAX_TOOL_ITERATIONS, len(llm_messages), _v642_elapsed,
+                            )
+                            # v6.4.41-5: Adaptive tool_choice. After 40 iters
+                            # the agent is very likely stuck in a tool-loop;
+                            # force it to write a final answer.
+                            _adaptive_tool_choice = "auto"
+                            if _iter > 40:
+                                _adaptive_tool_choice = "none"
+                            # v6.4.44-C: kimi first-turn force required
+                            if _iter == 1 and _v644_force_required_first:
+                                _adaptive_tool_choice = "required"
+                            # v6.4.50-B: after 3+ readonly-nudges, force no tools
+                            if _v648_force_no_tools_next:
+                                _adaptive_tool_choice = "none"
+                                _v648_force_no_tools_next = False
+                                logger.info("chat_worker: forcing tool_choice=none this iter to break read-loop")
+                            # v6.4.39 (maintainer 2026-04-23): don't shadow the
+                            # outer-scope `llm_messages` — use a separate
+                            # name. Assigning to `llm_messages` inside this
+                            # nested `_chat_worker` turns it into a local,
+                            # which made line ~8063 (reading llm_messages[0])
+                            # raise UnboundLocalError before reaching the
+                            # sanitizer. Now we only sanitize for the SDK
+                            # call; the mutable llm_messages list is
+                            # appended to directly (line ~8371 still works).
+                            _sanitized_messages = _sanitize_chat_messages(llm_messages)
+                            # v6.4.51 (maintainer 2026-04-23) — max_tokens ROOT FIX.
+                            # Previously 4096 → any file_ops.write of a
+                            # full HTML file (our test case is ~37KB ≈
+                            # 10000+ tokens) got truncated. The tool_call
+                            # arguments came back as malformed JSON
+                            # (unterminated string), json.loads failed, we
+                            # returned {"success": False, "error": ...},
+                            # kimi saw the error and fell back to read.
+                            # This is the REAL cause of the "read loop
+                            # never writes" we've been chasing for hours.
+                            # kimi k2.6 supports 32k output; gpt-5.x 16k+;
+                            # we pick 16384 as the safe default that also
+                            # works on smaller relays. Override via env.
+                            # v6.4.53-C: raised from 16384 → 32768. The Apr 23
+                            # 12:46 session observed kimi attempting a 58KB
+                            # HTML write that got truncated at 16384 tokens.
+                            # k2.6 / gpt-5.4 / claude sonnet 4.6 all support
+                            # 32k+ output. 58KB HTML ≈ 15-18k tokens so 32768
+                            # is comfortable for one-shot full rewrites.
+                            _chat_max_tokens = 32768
+                            try:
+                                _chat_max_tokens = int(os.getenv("EVERMIND_CHAT_MAX_TOKENS", "32768"))
+                            except Exception:
+                                _chat_max_tokens = 32768
+                            _chat_max_tokens = max(2048, min(_chat_max_tokens, 131072))
+                            _create_kwargs: Dict[str, Any] = {
+                                "model": api_model_id,
+                                "messages": _sanitized_messages,
+                                "stream": True,
+                                "temperature": 0.7,
+                                "max_tokens": _chat_max_tokens,
+                                "tools": _chat_tools,
+                                # v6.4.36: explicit tool_choice=auto so kimi
+                                # actually uses the function-call API instead
+                                # of hallucinating prose-style tool syntax
+                                # ("to=file_ops.read 体育彩票天天json").
+                                "tool_choice": _adaptive_tool_choice,
+                                # v6.4.45 (maintainer 2026-04-23) — ROOT FIX.
+                                # The v6.4.43-A chunk-gap watchdog NEVER
+                                # fires when relay.cn hangs BEFORE any
+                                # chunk arrives, because
+                                # `client.chat.completions.create(stream=True)`
+                                # itself blocks waiting for HTTP response
+                                # headers. Until the first byte comes back,
+                                # we're stuck in the openai SDK's urllib3
+                                # recv() call — the watchdog thread isn't
+                                # even started yet (it's defined AFTER
+                                # create() returns). Passing `timeout` here
+                                # hands the limit to httpx at the socket
+                                # level, so a silent upstream raises
+                                # ReadTimeout/APITimeoutError in ≤90s and
+                                # the error path runs, instead of hanging
+                                # for 4+ minutes.
+                                "timeout": 90.0,
+                            }
+                            if _extra_body:
+                                _create_kwargs["extra_body"] = _extra_body
+                            # v6.4.46 (maintainer 2026-04-23) — PRE-CREATE WATCHDOG.
+                            # The openai SDK 1.x `timeout` parameter is NOT
+                            # reliably enforced in stream=True mode — we saw
+                            # relay.cn hang 5+ minutes with timeout=90s set.
+                            # The SDK passes timeout into httpx but httpx
+                            # seems to only use it for connect, not for
+                            # server-to-first-byte. So we add a DEDICATED
+                            # pre-create watchdog that fires AT create() time
+                            # and brutally closes the underlying httpx client
+                            # — which wakes any blocked recv() with a
+                            # ConnectionClosedError and lets the chat move on.
+                            _v646_create_started = _time_v642.monotonic()
+                            _v646_create_done = {"value": False}
+                            _V646_CREATE_DEADLINE = 90.0
+                            def _v646_create_watchdog():
+                                import time as _tv646
+                                while not _v646_create_done["value"]:
+                                    _tv646.sleep(3.0)
+                                    if _v646_create_done["value"]:
+                                        return
+                                    if _cancel_requested["value"]:
+                                        logger.warning("chat_worker: cancel during create() — closing client")
+                                        try:
+                                            client.close()  # type: ignore[attr-defined]
+                                        except Exception:
+                                            pass
+                                        try:
+                                            _inner = getattr(client, "_client", None)
+                                            if _inner is not None:
+                                                _inner.close()
+                                        except Exception:
+                                            pass
+                                        return
+                                    _gap = _time_v642.monotonic() - _v646_create_started
+                                    if _gap > _V646_CREATE_DEADLINE:
+                                        logger.warning(
+                                            "chat_worker: create() stuck %.0fs > %.0fs — closing httpx client",
+                                            _gap, _V646_CREATE_DEADLINE,
+                                        )
+                                        # Try multiple levels of close so the
+                                        # blocked socket recv wakes up.
+                                        try:
+                                            client.close()  # type: ignore[attr-defined]
+                                        except Exception:
+                                            pass
+                                        try:
+                                            _inner = getattr(client, "_client", None)
+                                            if _inner is not None:
+                                                _inner.close()
+                                        except Exception:
+                                            pass
+                                        return
+                            _v646_wd = threading.Thread(target=_v646_create_watchdog, daemon=True)
+                            _v646_wd.start()
+                            # v6.4.53-G (maintainer 2026-04-23) — ROOT FIX for
+                            # create() blocking. Three previous layers all
+                            # failed to interrupt a hung
+                            # `client.chat.completions.create(stream=True)`:
+                            #   - v6.4.45 SDK timeout= param → ignored in stream
+                            #   - v6.4.46 watchdog + client.close() → recv still
+                            #     blocked (confirmed by 316s hang on Apr 23)
+                            #   - v6.4.47 httpx custom Client read=45 → SSE
+                            #     keep-alive bytes may reset the timer
+                            # Here we run create() in a dedicated
+                            # ThreadPoolExecutor and let the MAIN worker
+                            # thread wait with Future.result(timeout=90).
+                            # Python's Condition-variable wait is guaranteed
+                            # to return within the timeout regardless of what
+                            # the underlying TCP socket is doing. On timeout
+                            # the inner thread is leaked (daemon, will die
+                            # with process), but the worker recovers and
+                            # reports a clean error to the user.
+                            import concurrent.futures as _cf_v653g
+                            _v653g_executor = _cf_v653g.ThreadPoolExecutor(
+                                max_workers=1,
+                                thread_name_prefix="chat_create",
+                            )
+                            try:
+                                _v653g_future = _v653g_executor.submit(
+                                    client.chat.completions.create,
+                                    **_create_kwargs,
+                                )
+                                try:
+                                    stream = _v653g_future.result(timeout=90.0)
+                                except _cf_v653g.TimeoutError:
+                                    logger.warning(
+                                        "chat_worker: create() stuck > 90s — forcing httpx client close (v6.4.53-G)"
+                                    )
+                                    try:
+                                        _chat_http_client.close()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        _v653g_future.cancel()
+                                    except Exception:
+                                        pass
+                                    raise Exception(
+                                        f"模型 {chat_model} 对话建立超时（>90 秒）。中转站可能在排队或该模型暂不可用。"
+                                        "建议：1) 切到 kimi-k2.6-code-preview；2) 或 30 秒后重试。"
+                                    )
+                            finally:
+                                _v646_create_done["value"] = True
+                                try:
+                                    _v653g_executor.shutdown(wait=False, cancel_futures=False)
+                                except TypeError:
+                                    # Python < 3.9 may not support cancel_futures
+                                    try:
+                                        _v653g_executor.shutdown(wait=False)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                            _assistant_content = ""
+                            _tool_calls_acc: Dict[int, Dict[str, Any]] = {}
+                            _finish = None
+                            # v6.4.48-A (maintainer 2026-04-23) — QUEUE-PUMP SSE
+                            # idle watchdog. Replaces v6.4.43-A's background
+                            # thread + timestamp polling, which had two
+                            # problems confirmed by the GitHub research
+                            # (openai-python#2319, claude-code#33949, httpx
+                            # discussion #2055):
+                            #   1. `stream.close()` does NOT unblock a recv()
+                            #      already in flight at the TCP layer.
+                            #   2. Normal-completion paths didn't signal the
+                            #      watchdog to exit → thread leaked, later
+                            #      spammed stale "stream gap 120s" WARNs.
+                            # The queue-pump pattern puts a producer thread
+                            # between the SDK stream and the consumer, and
+                            # enforces idle-timeout via `queue.get(timeout)`.
+                            # The consumer (our chat_worker) is never blocked
+                            # in recv() — only in queue.get() which IS
+                            # interruptable. On idle, we abandon the pump
+                            # (daemon) and close the httpx client; next
+                            # iter starts with a fresh pump + fresh queue.
+                            # This is exactly how claude-code issue #33949
+                            # ended up being fixed upstream.
+                            import queue as _queue_v648
+                            _V648_CHUNK_IDLE_LIMIT = 45.0  # matches httpx read=45
+                            _chunk_q: "_queue_v648.Queue" = _queue_v648.Queue(maxsize=1024)
+                            def _v648_stream_pump():
+                                """v6.4.54 (maintainer 2026-04-23) — FILTER empty chunks.
+                                Previously we put EVERY chunk (including SSE
+                                keep-alive noise / empty deltas) into the
+                                queue. Consumer's queue.get(timeout=45) then
+                                never fired, because something was always
+                                arriving in the queue — even though there
+                                was zero real progress. Observed at iter=5
+                                Apr 23 13:19: 107s silent, no WARN.
+                                Now we only put chunks that carry actual
+                                content, tool_call fragments, reasoning,
+                                or a finish_reason. Heartbeats go straight
+                                in the trash. Consumer's 45s timeout is
+                                now meaningful again."""
+                                try:
+                                    for _pchunk in stream:
+                                        # Filter noise: skip chunks with no
+                                        # choices / empty delta / nothing useful
+                                        _is_meaningful = False
+                                        try:
+                                            if _pchunk.choices:
+                                                _ch0 = _pchunk.choices[0]
+                                                _d = getattr(_ch0, "delta", None)
+                                                if getattr(_ch0, "finish_reason", None):
+                                                    _is_meaningful = True
+                                                elif _d is not None:
+                                                    if (getattr(_d, "content", None)
+                                                            or getattr(_d, "tool_calls", None)
+                                                            or getattr(_d, "reasoning_content", None)
+                                                            or getattr(_d, "reasoning", None)
+                                                            or getattr(_d, "role", None)):
+                                                        _is_meaningful = True
+                                        except Exception:
+                                            _is_meaningful = True  # be permissive on unknown shape
+                                        if _is_meaningful:
+                                            _chunk_q.put(("chunk", _pchunk))
+                                        # heartbeat: drop silently so consumer can detect idle
+                                        if _cancel_requested["value"]:
+                                            break
+                                except Exception as _pump_exc:
+                                    try:
+                                        _chunk_q.put(("error", _pump_exc))
+                                    except Exception:
+                                        pass
+                                finally:
+                                    try:
+                                        _chunk_q.put(("end", None))
+                                    except Exception:
+                                        pass
+                            _v648_pump = threading.Thread(target=_v648_stream_pump, daemon=True)
+                            _v648_pump.start()
+                            _v648_stream_aborted = False
+                            while True:
+                                # v6.4.43-E (retained): Stop button秒停
+                                if _cancel_requested["value"]:
+                                    logger.info("chat_worker: Stop requested — closing stream (v6.4.48)")
+                                    try:
+                                        stream.close()  # type: ignore[attr-defined]
+                                    except Exception:
+                                        pass
+                                    try:
+                                        _chat_http_client.close()
+                                    except Exception:
+                                        pass
+                                    _v648_stream_aborted = True
+                                    break
+                                try:
+                                    _q_kind, _q_payload = _chunk_q.get(timeout=_V648_CHUNK_IDLE_LIMIT)
+                                except _queue_v648.Empty:
+                                    logger.warning(
+                                        "chat_worker: SSE idle %.0fs — closing httpx client (v6.4.48)",
+                                        _V648_CHUNK_IDLE_LIMIT,
+                                    )
+                                    try:
+                                        stream.close()  # type: ignore[attr-defined]
+                                    except Exception:
+                                        pass
+                                    try:
+                                        _chat_http_client.close()
+                                    except Exception:
+                                        pass
+                                    _finish = "length"
+                                    _assistant_content += (
+                                        f"\n[SSE 空闲 >{int(_V648_CHUNK_IDLE_LIMIT)} 秒,已终止本轮。中转站响应异常,请重试或切换模型。]"
+                                    )
+                                    _v648_stream_aborted = True
+                                    break
+                                if _q_kind == "end":
+                                    break
+                                if _q_kind == "error":
+                                    raise _q_payload
+                                chunk = _q_payload
+                                if not chunk.choices:
+                                    continue
+                                delta = chunk.choices[0].delta
+                                _finish = chunk.choices[0].finish_reason or _finish
+                                # v6.1.1: capture reasoning_content into stripper
+                                # log buffer so the model can think internally
+                                # without its CoT reaching the user.
+                                # v6.4.29 (maintainer 2026-04-22): ALSO stream
+                                # reasoning_content to the UI as a separate
+                                # event type so the frontend can show it in a
+                                # collapsible "thinking" bubble (Claude Web /
+                                # Gemini / o1 pattern). The reasoning no longer
+                                # reaches the MAIN content stream, but it
+                                # becomes visible, optional, and foldable.
+                                _rc = getattr(delta, "reasoning_content", None) or getattr(delta, "reasoning", None)
+                                if _rc and _chat_think_stripper is not None:
+                                    _chat_think_stripper.reasoning_parts.append(str(_rc))
+                                if _rc:
+                                    # Dedicated reasoning stream → UI folds it
+                                    token_queue.put(("reasoning_delta", str(_rc)))
+                                if delta and delta.content:
+                                    _raw = delta.content
+                                    _clean = _chat_think_stripper.feed(_raw) if _chat_think_stripper is not None else _raw
+                                    if _clean:
+                                        # Main content started → signal UI to
+                                        # auto-collapse the reasoning bubble.
+                                        # Idempotent: frontend only acts on the
+                                        # first reasoning_done per message.
+                                        if not getattr(_chat_think_stripper, "_reasoning_done_sent", False):
+                                            token_queue.put(("reasoning_done", ""))
+                                            try:
+                                                _chat_think_stripper._reasoning_done_sent = True  # type: ignore[attr-defined]
+                                            except Exception:
+                                                pass
+                                        _assistant_content += _clean
+                                        token_queue.put(("token", _clean))
+                                        # v6.4.41-1: streaming n-gram
+                                        # repetition breaker. Checks every
+                                        # ~40 tokens to keep cost low.
+                                        if len(_assistant_content) > 200 and len(_assistant_content) % 40 < len(_clean):
+                                            if _v641_detect_repetition(_assistant_content):
+                                                try:
+                                                    stream.close()  # type: ignore[attr-defined]
+                                                except Exception:
+                                                    pass
+                                                token_queue.put(("token", "\n\n[检测到模型输出重复 3 次以上，已自动中断本轮。请换个问法或提供更具体的目标。]"))
+                                                _finish = "length"  # sentinel to break outer loop
+                                                _assistant_content += "\n[auto-aborted: repetition]"
+                                                break
+                                if delta and delta.tool_calls:
+                                    for tc in delta.tool_calls:
+                                        idx = tc.index
+                                        entry = _tool_calls_acc.setdefault(idx, {
+                                            "id": "", "function": {"name": "", "arguments": ""}
+                                        })
+                                        if tc.id:
+                                            entry["id"] = tc.id
+                                        if tc.function:
+                                            if tc.function.name:
+                                                entry["function"]["name"] = tc.function.name
+                                            if tc.function.arguments:
+                                                entry["function"]["arguments"] += tc.function.arguments
+                            # v6.1.1: flush stripper buffer, post-process catch
+                            # v6.4.35 — preserve reasoning_content BEFORE
+                            # stripper reset so assistant_msg can carry it.
+                            _captured_reasoning = ""
+                            if _chat_think_stripper is not None:
+                                try:
+                                    _captured_reasoning = "".join(_chat_think_stripper.reasoning_parts or [])
+                                except Exception:
+                                    _captured_reasoning = ""
+                                _tail = _chat_think_stripper.flush()
+                                if _tail:
+                                    _assistant_content += _tail
+                                    token_queue.put(("token", _tail))
+                                if _assistant_content:
+                                    _cleaned_final = strip_think_tags_full(_assistant_content)
+                                    if _cleaned_final != _assistant_content:
+                                        _assistant_content = _cleaned_final
+                                _chat_think_stripper = ThinkStripper()  # reset for next turn
+                            if _assistant_content:
+                                full_content += _assistant_content
+                            # v6.4.53-E (maintainer 2026-04-23): detect max_tokens
+                            # truncation. If the LLM call ended with
+                            # finish_reason="length" AND we have an incomplete
+                            # tool_call (args mid-string), inject a system
+                            # nudge so the NEXT iter tells the model about
+                            # the cap. This short-circuits the Apr 23 12:46
+                            # pattern: kimi sends 58KB write, get cut off,
+                            # retries same strategy 3 more times. Now we
+                            # pre-emptively tell it to use edit instead.
+                            if _finish == "length" and _tool_calls_acc:
+                                _any_malformed = False
+                                for _tidx, _tentry in _tool_calls_acc.items():
+                                    _targs = (_tentry.get("function") or {}).get("arguments") or ""
+                                    if _targs and not _targs.rstrip().endswith("}"):
+                                        _any_malformed = True
+                                        break
+                                if _any_malformed:
+                                    logger.warning(
+                                        "chat_worker: finish=length + malformed tool_call args → nudging for edit (v6.4.53-E)"
+                                    )
+                                    llm_messages.append({
+                                        "role": "system",
+                                        "content": (
+                                            "[v6.4.53-E NUDGE] Your previous tool_call was TRUNCATED by the "
+                                            f"max_tokens cap ({_chat_max_tokens}). This means you tried to write "
+                                            "too much in one call. REMEDY on next turn:\n"
+                                            "  (A) Use file_ops.edit with a SMALL old_string → new_string diff, "
+                                            "not a full rewrite.\n"
+                                            "  (B) If you must rewrite, split the file into 3-5 smaller write "
+                                            "calls, one feature at a time.\n"
+                                            "Do NOT retry the same oversized call — it will fail again."
+                                        ),
+                                    })
+                            # v6.4.41-2: empty-response deadlock breaker.
+                            # When finish_reason == "stop" and both the
+                            # content and tool_calls are empty, we'd loop
+                            # forever asking the model what it wants. Break.
+                            if (not _tool_calls_acc) and (not _assistant_content):
+                                token_queue.put(("token", "[模型返回空响应，已终止本轮。]"))
+                                break
+                            # v6.4.41-1b: if repetition breaker tripped,
+                            # exit the outer loop too — don't re-prompt.
+                            if _finish == "length" and "auto-aborted: repetition" in _assistant_content:
+                                break
+                            # v6.4.41-4: prose tool_call fallback. Some
+                            # models emit `to=file_ops.read {"path":"x"}`
+                            # as plain text instead of a real tool_call.
+                            # If we have no structured tool_calls but the
+                            # content looks like a prose tool call, build
+                            # a synthetic tool_call.
+                            if (not _tool_calls_acc) and _assistant_content:
+                                _prose_match = _PROSE_TOOL_RE.search(_assistant_content)
+                                if _prose_match:
+                                    _pn = _prose_match.group("name") or ""
+                                    _pa = _prose_match.group("action") or ""
+                                    _pargs_raw = _prose_match.group("args") or "{}"
+                                    if _pn in {"file_ops", "browser"}:
+                                        try:
+                                            _pargs_obj = _json.loads(_pargs_raw)
+                                        except Exception:
+                                            _pargs_obj = {}
+                                        if _pa and "action" not in _pargs_obj:
+                                            _pargs_obj["action"] = _pa
+                                        _tool_calls_acc[0] = {
+                                            "id": f"prose_{int(time.time()*1000)}",
+                                            "function": {
+                                                "name": _pn,
+                                                "arguments": _json.dumps(_pargs_obj, ensure_ascii=False),
+                                            },
+                                        }
+                                        token_queue.put(("token", "\n[检测到散文形式的工具调用,已自动转为结构化调用]"))
+                            # No tool calls → done (or nudge and retry)
+                            if not _tool_calls_acc:
+                                # v6.4.55-A (maintainer 2026-04-23) — CLINE NUDGE.
+                                # Observed Apr 23 13:23: kimi read 2 files,
+                                # output "让我先完整读取代码..." (50 chars),
+                                # finish=stop, worker complete content_len=50
+                                # but NO real changes made. From Cline's
+                                # recursivelyMakeClineRequests: when the
+                                # model completes without calling a tool on
+                                # an execution task, inject a synthetic user
+                                # message demanding tool use, then CONTINUE
+                                # the loop. We don't latch forever — gate
+                                # with _v655_no_tool_retry count (max 2).
+                                # v6.4.55-A fix: use nonlocal-closure counter
+                                # (declared outside while) instead of module-
+                                # level attribute. See the per-turn reset
+                                # above near _v648 / _v648_nudge_count init.
+                                # Detect "execution task" keywords (same logic
+                                # as v6.4.44-C).
+                                # v6.7e (maintainer 2026-04-24): tightened keyword list
+                                # to avoid false-positive triggers on conversational
+                                # questions ("请介绍" contained "介" → matched).
+                                # Require an explicit action verb targeting file
+                                # artifacts, not casual prose.
+                                _exec_task = False
+                                try:
+                                    for _m in reversed(llm_messages):
+                                        if isinstance(_m, dict) and _m.get("role") == "user":
+                                            _lu = str(_m.get("content") or "")
+                                            # Require explicit "修改代码/改代码/写代码/
+                                            # 优化 X.html/部署 X/实现 Y" phrasings; generic
+                                            # "介绍/列出" no longer triggers.
+                                            _action_phrases = (
+                                                "修改代码", "改代码", "写代码", "部署",
+                                                "优化 ", "优化@", "优化index", "优化/",
+                                                "调试", "修 bug", "修bug", "fix this",
+                                                "edit the", "modify the", "implement",
+                                                "重构", "删除代码", "apply patch",
+                                            )
+                                            if any(_k in _lu for _k in _action_phrases):
+                                                _exec_task = True
+                                            break
+                                except Exception:
+                                    pass
+                                if (_exec_task and len(full_content.strip()) > 0
+                                        and _v655_no_tool_retry < 2
+                                        and _iter < _MAX_TOOL_ITERATIONS - 2):
+                                    _v655_no_tool_retry += 1
+                                    _cline_nudge = {
+                                        "role": "user",
+                                        "content": (
+                                            "[system nudge] 你刚才只输出了文字没有调用任何工具。"
+                                            "但这个任务明确要求你修改代码(优化/修/改/部署等)。"
+                                            "你必须使用 file_ops.edit 或 file_ops.write 做出"
+                                            "实际代码更改,不要再只做描述。如果还需要更多信息才能"
+                                            "开始改,请先用 file_ops.read 读取具体文件段落。"
+                                            "禁止只回复文字就结束。"
+                                        ),
+                                    }
+                                    llm_messages.append(_cline_nudge)
+                                    logger.warning(
+                                        "chat_worker: Cline nudge — model finished with no tool_call "
+                                        "(content_len=%d, retry %d/2)",
+                                        len(full_content), _v655_no_tool_retry,
+                                    )
+                                    # v6.7e (maintainer 2026-04-24): do NOT leak the
+                                    # nudge signal to the user-visible token
+                                    # stream. Observed 2026-04-24 chat_smoke:
+                                    # "[系统提示:请执行实际代码修改...]" was appearing
+                                    # 3× in the rendered answer on benign
+                                    # "介绍你自己" prompts. The retry signal belongs
+                                    # only in the server logs + llm_messages; do not
+                                    # pollute the user's reply transcript.
+                                    continue  # go to next iter in while
+                                # v6.4.41-6: no-progress watchdog. Even if
+                                # the turn had content, if we've been
+                                # looping without new content OR new
+                                # tool_calls for 3 rounds, stop.
+                                if _v641_last_content_len == len(full_content):
+                                    _v641_no_progress += 1
+                                else:
+                                    _v641_no_progress = 0
+                                    _v641_last_content_len = len(full_content)
+                                if _v641_no_progress >= 3:
+                                    token_queue.put(("token", "\n[已连续 3 轮无新进展，终止当前任务。]"))
+                                    break
+                                break
+                            # v6.4.41-3: tool-signature loop detection.
+                            # If the same (name, args) fires 3 iterations
+                            # in a row, the model is stuck. Abort.
+                            _v641_sig = _v641_tool_signature(_tool_calls_acc)
+                            _v641_recent_tool_sigs.append(_v641_sig)
+                            if len(_v641_recent_tool_sigs) > 3:
+                                _v641_recent_tool_sigs.pop(0)
+                            if (len(_v641_recent_tool_sigs) >= 3 and
+                                    len(set(_v641_recent_tool_sigs)) == 1 and
+                                    _v641_sig):
+                                token_queue.put(("token", "\n[检测到同一工具调用连续 3 次，可能进入死循环，已终止。请换个问法。]"))
+                                break
+                            # Append assistant tool_call message
+                            # v6.4.35: include reasoning_content when kimi had
+                            # thinking on, so next turn passes kimi's strict
+                            # tool_call validation.
+                            assistant_msg: Dict[str, Any] = {"role": "assistant", "content": _assistant_content or None}
+                            if _captured_reasoning:
+                                assistant_msg["reasoning_content"] = _captured_reasoning
+                            tool_calls_list = []
+                            for i in sorted(_tool_calls_acc.keys()):
+                                tc = _tool_calls_acc[i]
+                                if tc["function"].get("name"):
+                                    tool_calls_list.append({
+                                        "id": tc["id"] or f"call_{i}",
+                                        "type": "function",
+                                        "function": tc["function"],
+                                    })
+                            if tool_calls_list:
+                                assistant_msg["tool_calls"] = tool_calls_list
+                            llm_messages.append(assistant_msg)
+                            # Execute each tool call, append tool result
+                            for tc in tool_calls_list:
+                                fn_name = tc["function"]["name"]
+                                fn_args = tc["function"]["arguments"]
+                                # v6.4.32 (maintainer 2026-04-23): stream tool
+                                # trace as a DEDICATED event so the UI can
+                                # fold the raw args/result into a compact
+                                # "[file_ops read index.html]" badge instead
+                                # of dumping 20KB of HTML into chat. The
+                                # legacy "[tool: ...]" token line is gone.
+                                _tc_id = tc.get("id") or f"tc_{int(time.time()*1000)}"
+                                try:
+                                    _args_preview = str(fn_args)[:300]
+                                except Exception:
+                                    _args_preview = ""
+                                token_queue.put(("tool_call_start", {
+                                    "id": _tc_id,
+                                    "name": fn_name,
+                                    "args_preview": _args_preview,
+                                    "args": fn_args,
+                                }))
+                                tool_output = ""
+                                # v6.4.42: tool execution trace
+                                _v642_tool_started = _time_v642.monotonic()
+                                logger.info(
+                                    "chat_tool ▶ %s args_len=%d iter=%d",
+                                    fn_name, len(fn_args or ""), _iter,
+                                )
+                                # v6.4.49-B: large-args dump for debugging.
+                                # The Apr 23 10:55 session had args_len=11607
+                                # that we couldn't post-mortem — dump to
+                                # /tmp so we can analyse why kimi/gpt would
+                                # send such a big tool_call arguments body.
+                                if len(fn_args or "") > 3000:
+                                    try:
+                                        import time as _tld
+                                        _dump_path = f"/tmp/evermind_chat_large_args_{int(_tld.time())}_{fn_name}_iter{_iter}.json"
+                                        with open(_dump_path, "w", encoding="utf-8") as _dfh:
+                                            _dfh.write(fn_args or "")
+                                        logger.info(
+                                            "chat_tool large-args dumped: %s (%dB)",
+                                            _dump_path, len(fn_args or ""),
+                                        )
+                                    except Exception:
+                                        pass
+                                try:
+                                    import json as _json
+                                    _v651_truncated = False
+                                    try:
+                                        args = _json.loads(fn_args or "{}")
+                                    except _json.JSONDecodeError as _je:
+                                        # v6.4.51: truncated tool_call
+                                        # arguments (max_tokens hit mid
+                                        # content). Set a flag and fall
+                                        # through to a friendly error —
+                                        # DON'T run the tool dispatch.
+                                        _args_size = len(fn_args or "")
+                                        logger.warning(
+                                            "chat_tool: arguments JSON truncated (%dB) — %s",
+                                            _args_size, str(_je)[:100],
+                                        )
+                                        args = {}
+                                        _v651_truncated = True
+                                        tool_output = _json.dumps({
+                                            "success": False,
+                                            "error": (
+                                                f"Your tool_call arguments were TRUNCATED by max_tokens "
+                                                f"({_args_size} bytes, unterminated JSON). "
+                                                "SWITCH STRATEGY: use file_ops.edit with a small "
+                                                "old_string + new_string instead of rewriting the whole file, "
+                                                "OR split the write into multiple smaller chunks."
+                                            ),
+                                            "truncated_args_bytes": _args_size,
+                                        }, ensure_ascii=False)
+                                    if _v651_truncated:
+                                        # skip tool execution entirely; tool_output already
+                                        # contains the v6.4.51 truncation error message
+                                        # v6.4.53-A (maintainer 2026-04-23): explicitly reset
+                                        # _result to None so the downstream preview
+                                        # builder doesn't pick up stale _result from the
+                                        # previous iter's successful read (causing
+                                        # "success=True preview=37922B" on a truncated
+                                        # write as observed at iter=18 Apr 23 12:46).
+                                        _result = None
+                                        _r_trim = None
+                                    elif fn_name == "file_ops":
+                                        # v5.8.6: direct sync impl (no async
+                                        # plugin bridging from a worker thread).
+                                        # Uses same actions as plugins.file_ops
+                                        # so behavior matches pipeline mode.
+                                        _a = str(args.get("action", "")).strip().lower()
+                                        _p = str(args.get("path", "")).strip()
+                                        # Expand ~ and relative to workspace
+                                        if _p.startswith("~"):
+                                            _p = str(Path(_p).expanduser())
+                                        _result: Dict[str, Any] = {"success": False}
+                                        if _a == "read":
+                                            try:
+                                                with open(_p, "r", encoding="utf-8", errors="replace") as _fh:
+                                                    _content = _fh.read()
+                                                # v6.4.43-C: dedupe re-reads of
+                                                # unchanged files via content
+                                                # hash cached per session.
+                                                # v6.4.52-D: ALSO dedupe across
+                                                # paths — if iter=3 reads
+                                                # index.html.bak2 and its
+                                                # content matches a file we
+                                                # already returned (e.g. .bak
+                                                # or .bak2 are byte-identical
+                                                # copies of index.html), treat
+                                                # it as a duplicate-read and
+                                                # save the tokens. Track
+                                                # BOTH path→hash AND hash→
+                                                # known-path so we can report
+                                                # "same as /x/y".
+                                                import hashlib as _hashlib_v643
+                                                _content_hash = _hashlib_v643.md5(_content.encode("utf-8", "ignore")).hexdigest()
+                                                _session_mem_v643 = _SESSION_MEMORY.setdefault(session_id, {})
+                                                _fread_cache = _session_mem_v643.setdefault("_file_read_hash", {})
+                                                _hash_to_path = _session_mem_v643.setdefault("_hash_to_path", {})
+                                                _was_unchanged = (_fread_cache.get(_p) == _content_hash)
+                                                _duplicate_of = None
+                                                if not _was_unchanged and _content_hash in _hash_to_path:
+                                                    _duplicate_of = _hash_to_path.get(_content_hash)
+                                                _fread_cache[_p] = _content_hash
+                                                _hash_to_path.setdefault(_content_hash, _p)
+                                                # v6.4.43-D: smart pagination.
+                                                # Support offset/limit line
+                                                # params. For huge files
+                                                # without params, send head +
+                                                # tail + "[...N lines omitted]"
+                                                # so the model gets structural
+                                                # context without eating 60KB
+                                                # of token budget.
+                                                _lines_all = _content.splitlines(keepends=True)
+                                                _total_lines = len(_lines_all)
+                                                _offset = int(args.get("offset") or 0)
+                                                _limit = int(args.get("limit") or 0)
+                                                _omitted = 0
+                                                if _offset > 0 or _limit > 0:
+                                                    _end = _total_lines if _limit <= 0 else min(_total_lines, _offset + _limit)
+                                                    _slice = _lines_all[_offset:_end]
+                                                    _view_content = "".join(_slice)
+                                                    _view_note = f"[窗口 行{_offset + 1}–{_end} / 共{_total_lines}行]"
+                                                elif _total_lines > 400 and len(_content) > 20000:
+                                                    # Default head+tail window
+                                                    _head_lines = _lines_all[:200]
+                                                    _tail_lines = _lines_all[-100:]
+                                                    _omitted = _total_lines - 300
+                                                    _view_content = (
+                                                        "".join(_head_lines)
+                                                        + f"\n... [省略 {_omitted} 行,共 {_total_lines} 行,使用 offset/limit 读中段] ...\n"
+                                                        + "".join(_tail_lines)
+                                                    )
+                                                    _view_note = f"[head200+tail100 共 {_total_lines} 行]"
+                                                else:
+                                                    _view_content = _content[:20000]
+                                                    _view_note = ""
+                                                if _was_unchanged:
+                                                    # Content unchanged since last read → tiny result
+                                                    _result = {
+                                                        "success": True,
+                                                        "path": _p,
+                                                        "unchanged": True,
+                                                        "size": len(_content),
+                                                        "line_count": _total_lines,
+                                                        "content": f"[unchanged since last read · {_total_lines} 行 · {len(_content)}B]",
+                                                    }
+                                                elif _duplicate_of and _duplicate_of != _p:
+                                                    # v6.4.52-D: cross-path duplicate
+                                                    _result = {
+                                                        "success": True,
+                                                        "path": _p,
+                                                        "duplicate_of": _duplicate_of,
+                                                        "size": len(_content),
+                                                        "line_count": _total_lines,
+                                                        "content": (
+                                                            f"[此文件内容与 {_duplicate_of} 完全相同 (hash match) · "
+                                                            f"{_total_lines} 行 · {len(_content)}B]"
+                                                        ),
+                                                    }
+                                                else:
+                                                    _result = {
+                                                        "success": True,
+                                                        "path": _p,
+                                                        "content": _view_content,
+                                                        "size": len(_content),
+                                                        "line_count": _total_lines,
+                                                    }
+                                                    if _view_note:
+                                                        _result["view"] = _view_note
+                                                    if _omitted:
+                                                        _result["lines_omitted"] = _omitted
+                                                # v6.4.30: remember this file for next turn's prompt.
+                                                _record_focused_file_in_session(session_id, _p)
+                                            except Exception as _e:
+                                                _result = {"success": False, "error": f"read failed: {_e}"}
+                                        elif _a == "write":
+                                            try:
+                                                Path(_p).parent.mkdir(parents=True, exist_ok=True)
+                                                _c = str(args.get("content", ""))
+                                                # v6.4.42: count +N/-N lines
+                                                _old_lines = 0
+                                                try:
+                                                    if Path(_p).exists():
+                                                        with open(_p, "r", encoding="utf-8", errors="replace") as _fh_old:
+                                                            _old_lines = _fh_old.read().count("\n") + (0 if _fh_old else 0)
+                                                except Exception:
+                                                    _old_lines = 0
+                                                _new_lines = _c.count("\n") + (1 if _c and not _c.endswith("\n") else 0)
+                                                with open(_p, "w", encoding="utf-8") as _fh:
+                                                    _fh.write(_c)
+                                                _added = max(0, _new_lines - _old_lines)
+                                                _removed = max(0, _old_lines - _new_lines)
+                                                _result = {
+                                                    "success": True,
+                                                    "path": _p,
+                                                    "written": len(_c),
+                                                    "lines_total": _new_lines,
+                                                    "lines_added": _added,
+                                                    "lines_removed": _removed,
+                                                    "was_new": _old_lines == 0,
+                                                }
+                                                _record_focused_file_in_session(session_id, _p)
+                                            except Exception as _e:
+                                                _result = {"success": False, "error": f"write failed: {_e}"}
+                                        elif _a == "list":
+                                            try:
+                                                _entries = []
+                                                for _entry in os.scandir(_p or "."):
+                                                    _entries.append({"name": _entry.name, "is_dir": _entry.is_dir(), "size": _entry.stat().st_size if _entry.is_file() else 0})
+                                                _result = {"success": True, "path": _p, "entries": _entries[:200]}
+                                            except Exception as _e:
+                                                _result = {"success": False, "error": f"list failed: {_e}"}
+                                        elif _a == "edit":
+                                            try:
+                                                _old = str(args.get("old_string", ""))
+                                                _new = str(args.get("new_string", ""))
+                                                with open(_p, "r", encoding="utf-8", errors="replace") as _fh:
+                                                    _c = _fh.read()
+                                                # v6.4.53-F (maintainer 2026-04-23): lenient
+                                                # matching. Exact substring match is the
+                                                # fast path. If that fails, try a small
+                                                # set of safe normalisations before
+                                                # reporting "old_string not found". Most
+                                                # mismatches we observed (iter=11/15/19
+                                                # etc.) were one of:
+                                                #   - model used \n, file has \r\n
+                                                #   - model trimmed trailing whitespace
+                                                #     on each line, file kept it
+                                                #   - leading indent 4 spaces vs tab
+                                                # Each attempt runs a search that, if
+                                                # successful, rewrites _old to the
+                                                # actual matching string so replace()
+                                                # below hits.
+                                                _edit_lenient_hit = False
+                                                if _old and _old not in _c:
+                                                    _try_candidates = []
+                                                    # 1) CRLF ↔ LF
+                                                    _try_candidates.append(_old.replace("\n", "\r\n"))
+                                                    _try_candidates.append(_old.replace("\r\n", "\n"))
+                                                    # 2) Normalize trailing WS per line
+                                                    _trim_lines = "\n".join(
+                                                        _l.rstrip() for _l in _old.splitlines()
+                                                    )
+                                                    if _old.endswith("\n"):
+                                                        _trim_lines += "\n"
+                                                    _try_candidates.append(_trim_lines)
+                                                    # 3) Tab ↔ 4 spaces (light)
+                                                    _try_candidates.append(_old.replace("\t", "    "))
+                                                    _try_candidates.append(_old.replace("    ", "\t"))
+                                                    for _cand in _try_candidates:
+                                                        if _cand and _cand != _old and _cand in _c:
+                                                            logger.info(
+                                                                "chat_tool edit: lenient match hit (variant len=%d)",
+                                                                len(_cand),
+                                                            )
+                                                            _old = _cand
+                                                            _edit_lenient_hit = True
+                                                            break
+                                                # v6.4.55-B (maintainer 2026-04-23) — Aider-style
+                                                # SequenceMatcher fallback. If exact match
+                                                # AND lenient-normalization (v6.4.53-F) BOTH
+                                                # failed, try fuzzy matching: split the file
+                                                # into windows the same size as _old, score
+                                                # each with difflib.SequenceMatcher, and if
+                                                # best ratio >= 0.8 replace that window.
+                                                # This catches the common case where the
+                                                # model's old_string is semantically right
+                                                # but differs in 1-2 characters (comment,
+                                                # whitespace, typo).
+                                                if _old and _old not in _c:
+                                                    try:
+                                                        import difflib as _difflib_v655
+                                                        _old_lines_v655 = _old.splitlines(keepends=True)
+                                                        if 2 <= len(_old_lines_v655) <= 50:
+                                                            _file_lines_v655 = _c.splitlines(keepends=True)
+                                                            _window_size = len(_old_lines_v655)
+                                                            _best_ratio = 0.0
+                                                            _best_i = -1
+                                                            _limit_scan = min(len(_file_lines_v655) - _window_size + 1, 5000)
+                                                            for _i in range(max(0, _limit_scan)):
+                                                                _candidate = "".join(
+                                                                    _file_lines_v655[_i:_i + _window_size]
+                                                                )
+                                                                _r = _difflib_v655.SequenceMatcher(
+                                                                    None, _old, _candidate, autojunk=False,
+                                                                ).quick_ratio()
+                                                                if _r > _best_ratio:
+                                                                    _best_ratio = _r
+                                                                    _best_i = _i
+                                                                    if _r >= 0.98:
+                                                                        break
+                                                            if _best_ratio >= 0.8 and _best_i >= 0:
+                                                                _old = "".join(
+                                                                    _file_lines_v655[_best_i:_best_i + _window_size]
+                                                                )
+                                                                logger.info(
+                                                                    "chat_tool edit: fuzzy match hit (ratio=%.2f at line %d)",
+                                                                    _best_ratio, _best_i + 1,
+                                                                )
+                                                    except Exception as _fuzze:
+                                                        logger.warning("chat_tool edit fuzzy failed: %s", _fuzze)
+                                                if _old and _old in _c:
+                                                    _replace_all = bool(args.get("replace_all"))
+                                                    _c2 = _c.replace(_old, _new) if _replace_all else _c.replace(_old, _new, 1)
+                                                    # v6.4.42: +N/-N lines per edit
+                                                    _reps = _c.count(_old) if _replace_all else 1
+                                                    _old_nl = _old.count("\n") * _reps
+                                                    _new_nl = _new.count("\n") * _reps
+                                                    _added = max(0, _new_nl - _old_nl)
+                                                    _removed = max(0, _old_nl - _new_nl)
+                                                    with open(_p, "w", encoding="utf-8") as _fh:
+                                                        _fh.write(_c2)
+                                                    _result = {
+                                                        "success": True,
+                                                        "path": _p,
+                                                        "replacements": _reps,
+                                                        "lines_added": _added,
+                                                        "lines_removed": _removed,
+                                                    }
+                                                    _record_focused_file_in_session(session_id, _p)
+                                                else:
+                                                    # v6.4.53-B (maintainer 2026-04-23): fuzzy
+                                                    # suggestion. 3+ consecutive "old_string
+                                                    # not found" iters was the dominant
+                                                    # failure mode in the Apr 23 12:48
+                                                    # session. Now, when old_string doesn't
+                                                    # match, run difflib on the FIRST line
+                                                    # of the model's old_string and return
+                                                    # up to 3 closest 5-line windows from
+                                                    # the file, with line numbers. The model
+                                                    # can copy the exact text into its next
+                                                    # attempt.
+                                                    _hint_lines = []
+                                                    try:
+                                                        import difflib as _difflib_v653
+                                                        _file_lines = _c.splitlines()
+                                                        _old_first = ""
+                                                        for _ln_ol in _old.splitlines():
+                                                            if _ln_ol.strip():
+                                                                _old_first = _ln_ol.strip()
+                                                                break
+                                                        if _old_first and _file_lines:
+                                                            _candidates = [ _l.strip() for _l in _file_lines ]
+                                                            _close = _difflib_v653.get_close_matches(
+                                                                _old_first, _candidates,
+                                                                n=3, cutoff=0.55,
+                                                            )
+                                                            for _m in _close:
+                                                                try:
+                                                                    _idx = _candidates.index(_m)
+                                                                except ValueError:
+                                                                    continue
+                                                                _a_start = max(0, _idx - 2)
+                                                                _a_end = min(len(_file_lines), _idx + 4)
+                                                                _window = "\n".join(
+                                                                    _file_lines[_a_start:_a_end]
+                                                                )[:600]
+                                                                _hint_lines.append({
+                                                                    "near_line": _idx + 1,
+                                                                    "context": _window,
+                                                                })
+                                                    except Exception:
+                                                        pass
+                                                    _result = {
+                                                        "success": False,
+                                                        "error": "old_string not found",
+                                                        "hint": (
+                                                            "Your old_string does NOT match the file byte-for-byte. "
+                                                            "Common causes: tab vs 4-space indent, trailing whitespace, "
+                                                            "\\n at end missing, backslash-escaped quotes in HTML "
+                                                            "attributes. Below are the closest matching windows "
+                                                            "in the file — COPY ONE verbatim as your next old_string."
+                                                        ),
+                                                        "closest_matches": _hint_lines,
+                                                    }
+                                            except Exception as _e:
+                                                _result = {"success": False, "error": f"edit failed: {_e}"}
+                                        elif _a == "delete":
+                                            try:
+                                                if Path(_p).exists():
+                                                    os.remove(_p)
+                                                    _result = {"success": True, "deleted": _p}
+                                                else:
+                                                    _result = {"success": False, "error": "not found"}
+                                            except Exception as _e:
+                                                _result = {"success": False, "error": str(_e)}
+                                        elif _a == "search":
+                                            # v6.4.37 (maintainer 2026-04-23) — real
+                                            # search. Previously chat mode
+                                            # returned "unknown action: search"
+                                            # even though the system prompt told
+                                            # the model to use it. Supports a
+                                            # text pattern (substring by default,
+                                            # regex when pattern contains regex
+                                            # metachars and `regex=true`) across
+                                            # files under `path` (default
+                                            # OUTPUT_DIR). Returns up to 60
+                                            # matches with file:line.
+                                            try:
+                                                _pattern = str(args.get("pattern") or args.get("query") or "").strip()
+                                                if not _pattern:
+                                                    _result = {"success": False, "error": "search: missing 'pattern' arg"}
+                                                else:
+                                                    _search_root = Path(_p).expanduser() if _p else OUTPUT_DIR
+                                                    if not _search_root.exists():
+                                                        _result = {"success": False, "error": f"search: path not found: {_search_root}"}
+                                                    else:
+                                                        _glob = str(args.get("glob") or args.get("include") or "**/*")
+                                                        _use_regex = bool(args.get("regex"))
+                                                        _matches: list = []
+                                                        _max = int(args.get("max_results") or 60)
+                                                        _pat_re = None
+                                                        if _use_regex:
+                                                            try:
+                                                                _pat_re = re.compile(_pattern)
+                                                            except Exception as _re_e:
+                                                                _result = {"success": False, "error": f"invalid regex: {_re_e}"}
+                                                                _pat_re = "error"
+                                                        if _pat_re != "error":
+                                                            # v6.4.40 (maintainer 2026-04-23) RENAMED
+                                                            # from _iter → _search_paths. The old
+                                                            # name shadowed the outer while-loop
+                                                            # counter, making `while _iter <
+                                                            # _MAX_TOOL_ITERATIONS:` compare a
+                                                            # Path glob iterator to an int and
+                                                            # crash with "TypeError: '<' not
+                                                            # supported between instances of
+                                                            # 'list' and 'int'" after the first
+                                                            # search call.
+                                                            # v6.4.42 (maintainer 2026-04-23): accept
+                                                            # absolute globs. Path.glob() rejects
+                                                            # absolute patterns in 3.13+ with
+                                                            # "Non-relative patterns are
+                                                            # unsupported". Fall back to stdlib
+                                                            # glob for absolute patterns, or
+                                                            # rewrite pattern to relative.
+                                                            import glob as _stdglob
+                                                            if _search_root.is_dir():
+                                                                try:
+                                                                    _search_paths = list(_search_root.glob(_glob))
+                                                                except (ValueError, NotImplementedError):
+                                                                    # Absolute pattern → use stdlib glob
+                                                                    if os.path.isabs(_glob):
+                                                                        _search_paths = [Path(p) for p in _stdglob.glob(_glob, recursive=True)]
+                                                                    else:
+                                                                        # Try joining with root as string pattern
+                                                                        _combined = str(_search_root / _glob)
+                                                                        _search_paths = [Path(p) for p in _stdglob.glob(_combined, recursive=True)]
+                                                            else:
+                                                                _search_paths = [_search_root]
+                                                            for _fp in _search_paths:
+                                                                if len(_matches) >= _max:
+                                                                    break
+                                                                try:
+                                                                    if not _fp.is_file():
+                                                                        continue
+                                                                    if _fp.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".ico", ".mp3", ".mp4", ".wav", ".ogg"}:
+                                                                        continue
+                                                                    if _fp.stat().st_size > 2_000_000:
+                                                                        continue
+                                                                    _txt = _fp.read_text(encoding="utf-8", errors="replace")
+                                                                except Exception:
+                                                                    continue
+                                                                for _ln, _line in enumerate(_txt.splitlines(), 1):
+                                                                    hit = bool(_pat_re.search(_line)) if _pat_re else (_pattern in _line)
+                                                                    if hit:
+                                                                        _matches.append({
+                                                                            "file": str(_fp),
+                                                                            "line": _ln,
+                                                                            "text": _line.strip()[:200],
+                                                                        })
+                                                                        if len(_matches) >= _max:
+                                                                            break
+                                                            _result = {
+                                                                "success": True,
+                                                                "pattern": _pattern,
+                                                                "path": str(_search_root),
+                                                                "match_count": len(_matches),
+                                                                "matches": _matches,
+                                                            }
+                                            except Exception as _e:
+                                                _result = {"success": False, "error": f"search failed: {_e}"}
+                                        else:
+                                            _result = {"success": False, "error": f"unknown action: {_a}"}
+                                        tool_output = _json.dumps(_result, ensure_ascii=False)[:4000]
+                                    elif fn_name == "browser":
+                                        # v6.0: chat agent browser tool
+                                        _action = str(args.get("action", "")).strip().lower()
+                                        if not _action:
+                                            tool_output = _json.dumps({"success": False, "error": "browser: missing action"})
+                                        else:
+                                            _params: Dict[str, Any] = {"action": _action}
+                                            for _k in ("url", "selector", "text", "direction",
+                                                       "amount", "timeout_ms", "key", "tab_index"):
+                                                if _k in args and args[_k] is not None:
+                                                    _params[_k] = args[_k]
+                                            if "ref" in args and args["ref"] is not None:
+                                                _params["ref_index"] = int(args["ref"])
+                                            # v6.4.42: per-action sub-timeout so a
+                                            # single stuck navigate can't swallow
+                                            # the whole chat turn.
+                                            _r = _invoke_chat_browser_tool(
+                                                _params,
+                                                timeout_sec=_BROWSER_SUB_TIMEOUT(_action),
+                                            )
+                                            # Keep payload small (full screenshot bytes are dropped).
+                                            if isinstance(_r, dict):
+                                                _r_trim: Dict[str, Any] = {"success": _r.get("success")}
+                                                if _r.get("error"):
+                                                    _r_trim["error"] = _r["error"]
+                                                _data = _r.get("data") or {}
+                                                if isinstance(_data, dict):
+                                                    # Prefer summary text fields when present
+                                                    for _k in ("url", "title", "result_text",
+                                                                "extracted", "visible_text",
+                                                                "state_hash", "ax_tree_summary"):
+                                                        if _k in _data and _data[_k]:
+                                                            _v = _data[_k]
+                                                            if isinstance(_v, str):
+                                                                _r_trim[_k] = _v[:2000]
+                                                            else:
+                                                                _r_trim[_k] = _v
+                                                    # Screenshots become a note, not bytes
+                                                    if _data.get("screenshot"):
+                                                        _r_trim["screenshot"] = "[screenshot captured and shown to user]"
+                                                tool_output = _json.dumps(_r_trim, ensure_ascii=False)[:4000]
+                                            else:
+                                                tool_output = _json.dumps({"success": False, "error": "unexpected browser result"})
+                                    else:
+                                        tool_output = _json.dumps({"success": False, "error": f"tool {fn_name} not enabled in chat mode"})
+                                except Exception as exc:
+                                    tool_output = _json.dumps({"success": False, "error": str(exc)[:200]})
+                                # v6.4.32/37: tool result as dedicated event (not token).
+                                # Keep a short preview + success flag; full result
+                                # stays in llm_messages for the model, never hits
+                                # the user-visible chat stream.
+                                # v6.4.37 fix: DON'T re-parse tool_output — it's
+                                # truncated at 4000 chars and the trailing JSON
+                                # is broken, which makes _json.loads fail,
+                                # which set _success=False and showed a red ✗
+                                # in UI even when the read succeeded.
+                                # Use the original `_result` dict (or `_r` for
+                                # browser) which is still intact in memory.
+                                _r_obj_for_ui = None
+                                if fn_name == "file_ops":
+                                    # _result is defined in every action branch above
+                                    try:
+                                        _r_obj_for_ui = _result if isinstance(_result, dict) else None
+                                    except NameError:
+                                        _r_obj_for_ui = None
+                                elif fn_name == "browser":
+                                    try:
+                                        _r_obj_for_ui = _r_trim if isinstance(_r_trim, dict) else None
+                                    except NameError:
+                                        _r_obj_for_ui = None
+                                if _r_obj_for_ui is None:
+                                    try:
+                                        _r_obj_for_ui = _json.loads(tool_output) if tool_output else {}
+                                    except Exception:
+                                        _r_obj_for_ui = {}
+                                _r_obj = _r_obj_for_ui
+                                _success = bool(_r_obj.get("success", False)) if isinstance(_r_obj, dict) else False
+                                # Produce a 1-line preview: prefer path + status, strip big content blobs.
+                                _preview_parts = []
+                                if isinstance(_r_obj, dict):
+                                    _p = _r_obj.get("path") or _r_obj.get("url")
+                                    if _p: _preview_parts.append(str(_p)[:80])
+                                    if _r_obj.get("size") is not None:
+                                        _preview_parts.append(f"{_r_obj.get('size')}B")
+                                    # v6.4.42: show +N/-N lines for write/edit
+                                    _la = _r_obj.get("lines_added")
+                                    _lr = _r_obj.get("lines_removed")
+                                    if (_la is not None) or (_lr is not None):
+                                        _la_i = int(_la or 0)
+                                        _lr_i = int(_lr or 0)
+                                        if _la_i or _lr_i or _r_obj.get("was_new"):
+                                            _diff_str = f"+{_la_i}/-{_lr_i} 行"
+                                            if _r_obj.get("was_new"):
+                                                _diff_str = f"新文件 +{_la_i} 行"
+                                            _preview_parts.append(_diff_str)
+                                    if _r_obj.get("replacements") is not None:
+                                        _preview_parts.append(f"{_r_obj.get('replacements')} replaced")
+                                    _err = _r_obj.get("error")
+                                    if _err: _preview_parts.append(f"error: {str(_err)[:80]}")
+                                _preview = " · ".join(_preview_parts) or (tool_output[:120] if tool_output else "")
+                                # v6.4.42: log tool outcome
+                                _v642_tool_elapsed = _time_v642.monotonic() - _v642_tool_started
+                                logger.info(
+                                    "chat_tool %s %s success=%s elapsed=%.1fs preview=%s",
+                                    "✓" if _success else "✗", fn_name, _success,
+                                    _v642_tool_elapsed, _preview[:120],
+                                )
+                                token_queue.put(("tool_call_result", {
+                                    "id": _tc_id,
+                                    "name": fn_name,
+                                    "success": _success,
+                                    "preview": _preview,
+                                    "result_truncated": tool_output[:2000],
+                                }))
+                                llm_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": tc["id"],
+                                    "content": tool_output,
+                                })
+                            # v6.4.48-C: after all tool calls in this iter,
+                            # update read-only streak. If every tool_call in
+                            # this iter was a read/list/search (no write/edit),
+                            # increment; any write/edit resets to 0. After 6
+                            # read-only iters, inject a one-shot nudge urging
+                            # the model to commit changes.
+                            # v6.4.49-B: expanded readonly set. Previously
+                            # missed: observe/dom_snapshot/ax_tree/get/
+                            # query_selector/stat/exists, which are all
+                            # read-only — without these in the set,
+                            # iter=3's `browser observe` incorrectly reset
+                            # the streak and the read-only nudge never
+                            # fired in the Apr 23 10:53 session.
+                            _v648_all_readonly_actions = {
+                                # file_ops read-ish
+                                "read", "list", "search", "grep", "stat",
+                                "exists", "glob", "find",
+                                # browser read-ish
+                                "screenshot", "navigate", "visit", "goto",
+                                "observe", "extract_text", "get_html",
+                                "get", "query_selector", "dom_snapshot",
+                                "ax_tree", "get_text", "get_attribute",
+                                "wait_for_selector", "find",
+                            }
+                            _v648_this_iter_all_readonly = True
+                            for _tcl in tool_calls_list:
+                                _fname_v648 = _tcl.get("function", {}).get("name", "")
+                                try:
+                                    _args_v648 = _json.loads(_tcl.get("function", {}).get("arguments", "") or "{}")
+                                    _act_v648 = str(_args_v648.get("action", "")).strip().lower()
+                                except Exception:
+                                    _act_v648 = ""
+                                # file_ops with non-readonly action → breaks streak
+                                if _fname_v648 == "file_ops" and _act_v648 not in _v648_all_readonly_actions:
+                                    _v648_this_iter_all_readonly = False
+                                    break
+                                # browser with non-readonly action → breaks streak
+                                if _fname_v648 == "browser" and _act_v648 not in _v648_all_readonly_actions:
+                                    _v648_this_iter_all_readonly = False
+                                    break
+                            if _v648_this_iter_all_readonly:
+                                _v648_readonly_streak += 1
+                            else:
+                                _v648_readonly_streak = 0
+                            if _v648_readonly_streak >= _V648_READONLY_NUDGE_AFTER:
+                                _v648_nudge_count += 1
+                                if _v648_nudge_count == 1:
+                                    _nudge_text = (
+                                        f"[NUDGE #1] 你已连续 {_v648_readonly_streak} 轮只在 read/list/observe。"
+                                        "你已经有足够信息。**下一轮必须用 file_ops.write 或 file_ops.edit 改代码**,"
+                                        "或用 browser.click/fill 操作实际 UI。禁止再 read 同一个文件。"
+                                    )
+                                elif _v648_nudge_count == 2:
+                                    _nudge_text = (
+                                        f"[NUDGE #2 — 警告] 你又连续 {_v648_readonly_streak} 轮只在读取。"
+                                        "你的工具调用没有推进任务。现在立刻做以下之一:\n"
+                                        "(A) 用 file_ops.edit 修改具体代码片段(提供 old_string 和 new_string);\n"
+                                        "(B) 用 file_ops.write 重写整个文件;\n"
+                                        "(C) 用文字告诉用户你的诊断结论和建议 — 不要再调任何工具。\n"
+                                        "如果你想调用但工具失败过(例如 browser.screenshot Unknown action),"
+                                        "请绕过它 — 不要重试同一个失败工具。"
+                                    )
+                                else:  # 第 3 次及以上 — 直接 kill tools
+                                    _nudge_text = (
+                                        f"[NUDGE #{_v648_nudge_count} — 强制终止工具链] "
+                                        "你已 3 次以上陷入只读循环。现在 **禁止** 再调用任何工具,"
+                                        "下一轮必须 **只输出纯文字**:总结你已收集的信息 + 给用户一个明确结论 "
+                                        "(\"我建议改这里\" 或 \"需要更多信息\")。"
+                                    )
+                                    _v648_force_no_tools_next = True
+                                llm_messages.append({"role": "system", "content": _nudge_text})
+                                logger.warning(
+                                    "chat_worker: injected read-only nudge #%d after %d iters (force_no_tools_next=%s)",
+                                    _v648_nudge_count, _v648_readonly_streak, _v648_force_no_tools_next,
+                                )
+                                _v648_readonly_streak = 0  # reset so next nudge needs another 6 iters
+                            # Loop — let AI consume tool result and respond
+                        # v6.1.2: tell the user explicitly when the loop hit its
+                        # ceiling. Previously the chat just stopped with no
+                        # explanation, which users read as "it broke".
+                        if _iter >= _MAX_TOOL_ITERATIONS:
+                            _hit_msg = (
+                                f"\n\n[达到工具调用上限 {_MAX_TOOL_ITERATIONS} 次未完成任务。"
+                                f"你可以再次发送消息（例如\"继续\"）让 AI 接着之前的工具结果做下一步。"
+                                f"如果是浏览器操作卡在选择器上，告诉 AI 具体想点哪个按钮/链接的文字更容易成功。]"
+                            )
+                            token_queue.put(("token", _hit_msg))
+                            full_content += _hit_msg
+                        # v6.4.49-A (maintainer 2026-04-23) — SILENT COMPLETION
+                        # RESCUE. Root cause of the "12 iter content_len=0"
+                        # we kept seeing: kimi (and sometimes gpt-5.x)
+                        # finishes a long tool_call chain with
+                        # `finish_reason=stop` and NO text content. The
+                        # frontend sees "done" event with empty string,
+                        # renders nothing, user thinks Stop failed → user
+                        # spams the same question → session bloats with
+                        # identical user messages, 0 assistant messages
+                        # (exactly what we observed in session_moavbmsq).
+                        # Fix: if full_content is empty when we're about
+                        # to send "done", make ONE last non-streaming LLM
+                        # call with tool_choice="none" + a terse user
+                        # prompt asking for a diagnostic summary. Guaranteed
+                        # to yield ≥1 line of content in 99% of cases.
+                        if not full_content.strip() and _iter >= 1:
+                            logger.warning(
+                                "chat_worker: SILENT COMPLETION detected "
+                                "(iter=%d, 0 chars). Running rescue call.",
+                                _iter,
+                            )
+                            try:
+                                _rescue_messages = _sanitize_chat_messages(llm_messages) + [{
+                                    "role": "user",
+                                    "content": (
+                                        "[rescue] 基于你刚才收集的所有工具结果,请直接用中文回答:\n"
+                                        "1. 你发现的核心问题是什么?\n"
+                                        "2. 你建议的修复方案(具体到哪个文件哪一段代码)?\n"
+                                        "3. 下一步你想做什么? "
+                                        "(如果需要继续改代码,请告诉我你打算用 file_ops.edit 修改哪些片段 "
+                                        "—— 不要再调工具,只说文字。)"
+                                    ),
+                                }]
+                                _rescue_kwargs = {
+                                    "model": api_model_id,
+                                    "messages": _rescue_messages,
+                                    "stream": False,
+                                    "temperature": 0.6,
+                                    "max_tokens": 2048,
+                                    "tool_choice": "none",
+                                    "timeout": 60.0,
+                                }
+                                if _extra_body:
+                                    _rescue_kwargs["extra_body"] = _extra_body
+                                _rescue_resp = client.chat.completions.create(**_rescue_kwargs)
+                                _rescue_text = ""
+                                try:
+                                    _rescue_text = _rescue_resp.choices[0].message.content or ""
+                                except Exception:
+                                    _rescue_text = ""
+                                if _rescue_text.strip():
+                                    # Strip think tags just in case
+                                    try:
+                                        _rescue_text = strip_think_tags_full(_rescue_text)
+                                    except Exception:
+                                        pass
+                                    token_queue.put(("token", _rescue_text))
+                                    full_content += _rescue_text
+                                    logger.warning(
+                                        "chat_worker: rescue produced %d chars",
+                                        len(_rescue_text),
+                                    )
+                                else:
+                                    _fallback_msg = (
+                                        "\n[我收集了一些文件信息但没有成功生成文字结论。"
+                                        "请重新发送消息并具体说明你想改哪个行为(例如\"把 index.html 里的准星改成可点击\")。]"
+                                    )
+                                    token_queue.put(("token", _fallback_msg))
+                                    full_content += _fallback_msg
+                            except Exception as _resc_err:
+                                logger.warning(
+                                    "chat_worker: rescue call failed: %s",
+                                    str(_resc_err)[:200],
+                                )
+                                _fallback_msg = (
+                                    "\n[抱歉,模型这轮没有生成文字回复,请重发消息。"
+                                    f"错误:{str(_resc_err)[:120]}]"
+                                )
+                                token_queue.put(("token", _fallback_msg))
+                                full_content += _fallback_msg
+                        # v6.4.42: log worker completion
+                        _v642_total_elapsed = _time_v642.monotonic() - _v642_turn_started
+                        logger.info(
+                            "chat_worker ✓ complete iter=%d content_len=%d elapsed=%.1fs model=%s",
+                            _iter, len(full_content), _v642_total_elapsed, chat_model,
+                        )
                         token_queue.put(("done", full_content))
                     except Exception as e:
-                        token_queue.put(("error", str(e)))
+                        # v6.3 (maintainer 2026-04-20): log chat errors with FULL
+                        # detail (http status + response body + message count
+                        # + tool count) so a "Your request was blocked"
+                        # mystery error from the upstream relay can be
+                        # correlated with what we actually sent.
+                        # v6.4.38 (maintainer 2026-04-23): also log the FULL
+                        # Python traceback to the backend log — we had a
+                        # TypeError "'<' not supported between instances of
+                        # 'map' and 'int'" from deep in the OpenAI SDK with
+                        # no frame info, making it unfixable from outside.
+                        try:
+                            import traceback as _tb
+                            _full_tb = _tb.format_exc()
+                            if _full_tb:
+                                logger.error(
+                                    "chat_worker FULL traceback (v6.4.38):\n%s",
+                                    _full_tb,
+                                )
+                        except Exception:
+                            pass
+                        try:
+                            _err_type = type(e).__name__
+                            _err_status = getattr(e, "status_code", None) or getattr(e, "http_status", None)
+                            _err_body = ""
+                            _resp = getattr(e, "response", None)
+                            if _resp is not None:
+                                try:
+                                    _err_body = _resp.text[:800] if hasattr(_resp, "text") else ""
+                                except Exception:
+                                    pass
+                            if not _err_body:
+                                _body = getattr(e, "body", None)
+                                if _body:
+                                    _err_body = str(_body)[:800]
+                            _msg_count = len(llm_messages) if isinstance(llm_messages, list) else 0
+                            _first_user_chars = 0
+                            _sys_chars = 0
+                            if isinstance(llm_messages, list):
+                                for _m in llm_messages:
+                                    if _m.get("role") == "system":
+                                        _sys_chars = max(_sys_chars, len(str(_m.get("content") or "")))
+                                    elif _m.get("role") == "user" and not _first_user_chars:
+                                        _first_user_chars = len(str(_m.get("content") or ""))
+                            logger.warning(
+                                "chat_worker error: model=%s type=%s status=%s msgs=%d sys_chars=%d user_chars=%d tools=%d err=%s body=%s",
+                                chat_model, _err_type, _err_status, _msg_count,
+                                _sys_chars, _first_user_chars,
+                                len(_chat_tools) if isinstance(_chat_tools, list) else 0,
+                                str(e)[:200], _err_body[:400],
+                            )
+                            # v6.3 (maintainer 2026-04-20): dump full request body
+                            # to /tmp so mystery content-filter blocks can be
+                            # inspected without adding 50KB to the log.
+                            try:
+                                import time as _t, json as _j
+                                _dump_path = f"/tmp/evermind_chat_block_{int(_t.time())}.json"
+                                with open(_dump_path, "w", encoding="utf-8") as _fh:
+                                    _j.dump({
+                                        "model": chat_model,
+                                        "error_type": _err_type,
+                                        "status": _err_status,
+                                        "err": str(e)[:1000],
+                                        "messages": llm_messages if isinstance(llm_messages, list) else [],
+                                        "tools": _chat_tools if isinstance(_chat_tools, list) else [],
+                                    }, _fh, ensure_ascii=False, indent=2, default=str)
+                                logger.warning("chat_worker error dump: %s", _dump_path)
+                            except Exception as _dump_err:
+                                logger.warning("chat_worker dump failed: %s", _dump_err)
+                        except Exception:
+                            logger.warning("chat_worker error (fallback): model=%s err=%s", chat_model, str(e)[:300])
+                        _user_err = str(e)
+                        try:
+                            _status_hint = _err_status
+                        except NameError:
+                            _status_hint = None
+                        _low = _user_err.lower()
+                        _is_block = (_status_hint == 403) or ("your request was blocked" in _low) or ("request was blocked" in _low)
+                        if _is_block:
+                            _user_err = (
+                                f"模型 {chat_model} 被中转站拒绝（403）：余额耗尽或该模型在当前中转不可用。"
+                                "请在左上角切换到 kimi-k2.6-code-preview，或在设置里更换 API key/base_url。"
+                            )
+                        elif _status_hint == 401:
+                            _user_err = f"模型 {chat_model} 鉴权失败（401）：API key 无效或已过期，请到设置里更新。"
+                        elif _status_hint in (404, 400) and ("model" in _low or "not found" in _low):
+                            _user_err = f"模型 {chat_model} 在当前中转不存在（{_status_hint}）：请切换其他模型。"
+                        elif ("timeout" in _low or "timed out" in _low
+                              or "read timeout" in _low
+                              or "apitimeout" in _low):
+                            # v6.4.45: friendlier message for the httpx
+                            # 90s read timeout we just added.
+                            _user_err = (
+                                f"模型 {chat_model} 响应超时（>90 秒无首字节）。中转站拥塞或模型暂时不可用。"
+                                "建议: 1) 在左上角切到 kimi-k2.6-code-preview（国产模型更稳）; "
+                                "2) 或稍等 30 秒后重发消息。"
+                            )
+                        token_queue.put(("error", _user_err))
 
                 worker = threading.Thread(target=_chat_worker, daemon=True)
                 worker.start()
@@ -6625,31 +11113,150 @@ async def websocket_endpoint(ws: WebSocket):
                 # Drain queue and send tokens via WS
                 import asyncio as _aio
                 full_response = ""
+                # v6.4.34 (maintainer 2026-04-23) — NO fixed timeout on chat.
+                # Chat is user-driven; if the model takes 20 min to finish
+                # a complex /fix task, that's fine. User clicks Stop to
+                # cancel. We still use a large sanity ceiling (1 hour) so
+                # a truly wedged backend thread doesn't leak a WS forever.
+                # A heartbeat every 30s keeps WebSocket infrastructure
+                # (proxies, load balancers, Electron's own socket layer)
+                # happy — pure NO-timeout can be killed by intermediaries
+                # after their own 60-90s idle cutoff.
+                _chat_idle_sanity_sec = 3600
+                _chat_heartbeat_every = 30
+                _last_activity = time.time()
+                # v6.4.43: _cancel_requested is HOISTED above worker start so
+                # chat_worker closure can see it. (Removed the duplicate
+                # definition here.)
+                async def _heartbeat_pulse():
+                    while True:
+                        await _aio.sleep(_chat_heartbeat_every)
+                        if _cancel_requested["value"]:
+                            return
+                        if time.time() - _last_activity >= _chat_heartbeat_every - 2:
+                            try:
+                                await ws.send_json({
+                                    "type": "chat_heartbeat",
+                                    "conversation_id": conv_id,
+                                    "elapsed_sec": int(time.time() - _last_activity),
+                                })
+                            except Exception:
+                                return
+                _hb_task = _aio.create_task(_heartbeat_pulse())
                 while True:
+                    if _cancel_requested["value"]:
+                        await ws.send_json({
+                            "type": "chat_complete",
+                            "conversation_id": conv_id,
+                            "content": full_response,
+                            "cancelled": True,
+                        })
+                        break
                     try:
                         kind, data = await _aio.get_event_loop().run_in_executor(
-                            None, lambda: token_queue.get(timeout=120)
+                            None, lambda: token_queue.get(timeout=_chat_idle_sanity_sec)
                         )
+                        _last_activity = time.time()
                     except Exception:
-                        await ws.send_json({"type": "chat_error", "conversation_id": conv_id, "error": "Chat timeout"})
+                        await ws.send_json({
+                            "type": "chat_error",
+                            "conversation_id": conv_id,
+                            "error": f"Chat sanity ceiling hit (no activity for {_chat_idle_sanity_sec // 60} min). This is very rare; check backend logs.",
+                        })
+                        break
+                    # v6.4.34: explicit poison-pill from chat_stop handler
+                    if kind == "cancel":
+                        await ws.send_json({
+                            "type": "chat_complete",
+                            "conversation_id": conv_id,
+                            "content": full_response,
+                            "cancelled": True,
+                        })
                         break
 
                     if kind == "token":
                         await ws.send_json({"type": "chat_token", "conversation_id": conv_id, "token": data})
+                    elif kind == "reasoning_delta":
+                        # v6.4.29: stream reasoning to a separate UI bubble
+                        # that the frontend can fold. Existence of these events
+                        # is optional — older frontends simply ignore them.
+                        await ws.send_json({
+                            "type": "chat_reasoning_delta",
+                            "conversation_id": conv_id,
+                            "text": data,
+                        })
+                    elif kind == "reasoning_done":
+                        await ws.send_json({
+                            "type": "chat_reasoning_done",
+                            "conversation_id": conv_id,
+                        })
+                    elif kind == "tool_call_start":
+                        # v6.4.32: tool-call trace as foldable UI badge.
+                        # Older frontends that don't know this event simply
+                        # ignore it — they see no tool trace, which is fine
+                        # (legacy behavior dumped 20KB to chat; silence is
+                        # strictly an improvement).
+                        await ws.send_json({
+                            "type": "chat_tool_call_start",
+                            "conversation_id": conv_id,
+                            **(data if isinstance(data, dict) else {"raw": data}),
+                        })
+                    elif kind == "tool_call_result":
+                        await ws.send_json({
+                            "type": "chat_tool_call_result",
+                            "conversation_id": conv_id,
+                            **(data if isinstance(data, dict) else {"raw": data}),
+                        })
                     elif kind == "done":
                         full_response = data
                         _store_chat_message_in_session(session_id, "assistant", full_response)
+                        # v6.5 Phase 3: auto-memory persistence (best-effort).
+                        try:
+                            _maybe_persist_chat_memory(OUTPUT_DIR, chat_text, full_response, chat_mode)
+                        except Exception as _mem_err:
+                            logger.warning("chat_worker: memory persist failed: %s", _mem_err)
                         await ws.send_json({"type": "chat_complete", "conversation_id": conv_id, "content": full_response})
                         break
                     elif kind == "error":
                         await ws.send_json({"type": "chat_error", "conversation_id": conv_id, "error": data})
                         break
+                # v6.4.33: stop heartbeat when the chat turn ends.
+                try:
+                    _hb_task.cancel()
+                except Exception:
+                    pass
+                # v6.4.34: clear cancel handles so the next turn starts clean.
+                _chat_cancel_handles.pop(client_id, None)
+                _chat_queue_handles.pop(client_id, None)
 
             elif msg_type == "chat_stop":
-                # Client requested stop — currently a no-op since we can't
-                # cancel the OpenAI stream from outside the thread, but the
-                # frontend will stop displaying tokens.
-                pass
+                # v6.4.34/36: real cancellation. The worker thread can't be
+                # killed from outside, but we poison-pill the token queue +
+                # flip the cancel flag so the consumer exits immediately.
+                # Worker thread finishes on its own (writes to a dead queue
+                # = harmless). Log so we can see whether the stop actually
+                # reached this handler.
+                handle = _chat_cancel_handles.get(client_id)
+                q = _chat_queue_handles.get(client_id)
+                logger.info(
+                    "chat_stop received: client_id=%s handle_found=%s queue_found=%s",
+                    client_id, handle is not None, q is not None,
+                )
+                if handle is not None:
+                    handle["value"] = True
+                if q is not None:
+                    try:
+                        q.put(("cancel", ""))
+                    except Exception as _qe:
+                        logger.warning("chat_stop: queue put failed: %s", _qe)
+                # ACK the stop so frontend doesn't think it was ignored.
+                try:
+                    await ws.send_json({
+                        "type": "chat_stop_ack",
+                        "received": True,
+                    })
+                except Exception:
+                    pass
 
     except WebSocketDisconnect:
         logger.info(f"Client {client_id} disconnected")
@@ -6696,7 +11303,7 @@ if __name__ == "__main__":
 
     print(f"""
 ╔══════════════════════════════════════════╗
-║     🧠 Evermind Backend Server          ║
+║     Evermind Backend Server             ║
 ║     Frontend: http://{host}:{port}/       ║
 ║     WebSocket: ws://{host}:{port}/ws      ║
 ║     REST API:  http://{host}:{port}/api   ║

@@ -62,9 +62,27 @@ BUILTIN_PATTERNS = {
         "label_en": "IP Address",
         "mask": "***IP***",
     },
-    # API keys (sk-..., key-..., etc.)
+    # API keys — v7.3.9 audit-fix: cover modern key formats
+    # • OpenAI legacy:    sk-xxxxxxxxxxxxxxxxxxxx
+    # • OpenAI project:   sk-proj-xxx-xxx-xxx (multiple hyphens, mixed-case body)
+    # • Anthropic:        sk-ant-api03-xxx-xxx (multi-segment)
+    # • Kimi/Moonshot:    sk-kimi-xxx-xxx
+    # • GitHub PAT:       ghp_xxxx, gho_xxx, ghu_xxx, ghs_xxx, ghr_xxx
+    # • GitHub fine-grain: github_pat_<22>_<59>
+    # Old regex `(?:sk|key|token|api[_-]?key)[-_]?[a-zA-Z0-9]{20,}` requires
+    # 20+ contiguous alphanumeric chars after one separator → fails on
+    # `sk-proj-xxx-xxx` (extra hyphen breaks the run); the body's digit suffix
+    # then gets mis-classified as bank_card.
     "api_key": {
-        "regex": r"(?:sk|key|token|api[_-]?key)[-_]?[a-zA-Z0-9]{20,}",
+        "regex": (
+            r"(?:"
+            r"sk-(?:proj|ant|kimi|moonshot|or|svcacct|live|test)?-?[a-zA-Z0-9_\-]{20,}"
+            r"|"
+            r"(?:key|token|api[_-]?key|access[_-]?key|secret[_-]?key)[-_=]?[a-zA-Z0-9_\-]{20,}"
+            r"|"
+            r"github_pat_[a-zA-Z0-9_]{22}_[a-zA-Z0-9_]{59,}"
+            r")"
+        ),
         "label": "API密钥",
         "label_en": "API Key",
         "mask": "***API_KEY***",
@@ -111,9 +129,9 @@ BUILTIN_PATTERNS = {
         "label_en": "AWS Key",
         "mask": "***AWS_KEY***",
     },
-    # GitHub/GitLab tokens
+    # GitHub/GitLab tokens — v7.3.9 audit: include `github_pat_` fine-grained PATs
     "github_token": {
-        "regex": r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}",
+        "regex": r"(?:ghp|gho|ghu|ghs|ghr)_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{22,}",
         "label": "GitHub令牌",
         "label_en": "GitHub Token",
         "mask": "***GITHUB_TOKEN***",
@@ -148,10 +166,25 @@ class PrivacyMasker:
         # Thread safety for concurrent mask/unmask operations
         self._lock = threading.Lock()
 
-        # Build active pattern list
+        # Build active pattern list.
+        # v7.3.4 audit: SECRETS-FIRST priority — process tokens that contain
+        # long digit runs (sk-xxxx..., ghp_xxx...) BEFORE generic patterns
+        # like bank_card (16-19 digits), otherwise the digit suffix of an
+        # API key is mis-classified as a card number and the prefix leaks.
+        # Order: ssh_key → password_field → bearer_token → api_key →
+        # github_token → aws_key → url_with_creds → bank_card → id_card_cn
+        # → phone_cn/intl → email → ipv4 → file_path.
+        SECRET_PRIORITY = [
+            "ssh_key", "password_field", "bearer_token", "api_key",
+            "github_token", "aws_key", "url_with_creds",
+        ]
         self._patterns: List[Dict] = []
         active_names = patterns or list(BUILTIN_PATTERNS.keys())
-        for name in active_names:
+        ordered_names = (
+            [n for n in SECRET_PRIORITY if n in active_names]
+            + [n for n in active_names if n not in SECRET_PRIORITY]
+        )
+        for name in ordered_names:
             if name in BUILTIN_PATTERNS:
                 p = BUILTIN_PATTERNS[name].copy()
                 p["name"] = name
@@ -202,13 +235,16 @@ class PrivacyMasker:
 
             stats[pattern["name"]] = len(matches)
 
-            # Replace each match with a unique token
+            # Replace each match with a deterministic token.
+            # v7.4: was hashlib.md5(f"{original}:{uuid.uuid4().hex[:8]}") —
+            # the uuid randomness produced a fresh token every call, which
+            # changed the prompt prefix on every iteration and collapsed the
+            # relay prompt cache to ~0% hit rate on PII-heavy goals. Same
+            # value → same token is safe here because restore_map is scoped
+            # per call (unmask never confuses across calls).
             for match in reversed(matches):  # reversed to preserve positions
                 original = match.group(0)
-                # Generate unique token so we can unmask later
-                token_id = hashlib.md5(
-                    f"{original}:{uuid.uuid4().hex[:8]}".encode()
-                ).hexdigest()[:8]
+                token_id = hashlib.md5(original.encode()).hexdigest()[:8]
                 mask_token = f"[{pattern['mask']}:{token_id}]"
                 restore_map[mask_token] = original
                 masked_text = (

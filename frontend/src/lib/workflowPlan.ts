@@ -7,6 +7,7 @@ const SUPPORTED_RUN_GOAL_NODE_TYPES = new Set([
     'scribe',
     'builder',
     'polisher',
+    'patcher',
     'reviewer',
     'deployer',
     'tester',

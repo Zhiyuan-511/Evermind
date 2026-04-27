@@ -6,42 +6,47 @@
 @import "tailwindcss";
 
 :root {
-  --bg1: #0a0a1a;
-  --bg2: #12122a;
-  --bg3: #1a1a3e;
-  --surface: rgba(26, 26, 62, 0.7);
-  --surface-strong: rgba(18, 18, 42, 0.88);
-  --glass: rgba(255, 255, 255, 0.04);
-  --glass-border: rgba(255, 255, 255, 0.08);
-  --text1: #e8e8f0;
-  --text2: #a0a0c0;
-  --text3: #6a6a8a;
-  --blue: #4f8fff;
-  --green: #40d67c;
-  --orange: #ff9a40;
-  --red: #ff4f6a;
-  --yellow: #ffd740;
-  --purple: #a855f7;
-  --cyan: #06b6d4;
-  --pink: #ec4899;
+  /* Evermind v5.8 — "Steel Ink" palette.
+     Strategy: cold-neutral dark with R<G<B tint (Linear / JetBrains lineage),
+     desaturated steel-blue accent, three-tier text greys. Replaces the
+     previous AI-generic purple palette while keeping node-type colours
+     (NODE_TYPES dict in code) untouched so pipeline semantics don't shift. */
+  --bg1: #0E1013;              /* deepest — canvas / editor */
+  --bg2: #16181C;              /* chrome — sidebars / panels (lighter than bg1: JetBrains inversion) */
+  --bg3: #1E2127;              /* elevated — modals / hover cards */
+  --surface: rgba(22, 24, 28, 0.72);
+  --surface-strong: rgba(14, 16, 19, 0.92);
+  --glass: rgba(255, 255, 255, 0.035);
+  --glass-border: rgba(255, 255, 255, 0.07);
+  --text1: #E4E6EB;            /* not pure white — softer on the eyes */
+  --text2: #9BA1AC;
+  --text3: #5F6572;
+  --blue: #5B8CFF;             /* steel blue HSL(220,100%,68%) — desaturated, non-purple */
+  --green: #4CB782;            /* desaturated (was #40d67c) */
+  --orange: #E0A355;
+  --red: #E5484D;              /* Radix red-9 */
+  --yellow: #ffd740;           /* kept — used by node colouring */
+  --purple: #a855f7;           /* kept — used by node colouring */
+  --cyan: #06b6d4;             /* kept — used by node colouring */
+  --pink: #ec4899;             /* kept — used by node colouring */
   --node-w: 200px;
   --sidebar-w: 260px;
   --header-h: 48px;
   --radius: 12px;
-  --shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
-  --canvas-bg: #0a0a1a;
+  --shadow: 0 4px 24px rgba(0, 0, 0, 0.55);
+  --canvas-bg: #0E1013;
   --canvas-dot: rgba(255, 255, 255, 0.05);
-  --edge-color: rgba(79, 143, 255, 0.45);
+  --edge-color: rgba(91, 140, 255, 0.45);
   --minimap-mask: rgba(0, 0, 0, 0.7);
-  /* Node card - dark */
-  --node-bg: rgba(14, 14, 32, 0.92);
+  /* Node card — surface aligned to new palette but NODE_TYPES accent colours are unchanged. */
+  --node-bg: rgba(22, 24, 28, 0.92);
   --node-border: rgba(255, 255, 255, 0.07);
-  --node-shadow: 0 3px 16px rgba(0, 0, 0, 0.35);
+  --node-shadow: 0 3px 16px rgba(0, 0, 0, 0.45);
   --node-divider: rgba(255, 255, 255, 0.05);
-  --node-dot-idle: #2a2a4a;
-  --tag-bg: rgba(79, 143, 255, 0.08);
-  --tag-text: #5a8ad4;
-  --tag-border: rgba(79, 143, 255, 0.12);
+  --node-dot-idle: #32363F;
+  --tag-bg: rgba(91, 140, 255, 0.08);
+  --tag-text: #7BA3FF;
+  --tag-border: rgba(91, 140, 255, 0.16);
 }
 
 :root[data-theme='light'] {
@@ -156,7 +161,7 @@ select {
 
 .btn-primary:hover {
   background: linear-gradient(135deg, #5a9aff, #7c7fff);
-  box-shadow: 0 4px 16px rgba(79, 143, 255, 0.3);
+  box-shadow: 0 4px 16px rgba(91, 140, 255, 0.3);
 }
 
 .btn-success {
@@ -219,11 +224,11 @@ select {
 
   0%,
   100% {
-    box-shadow: 0 0 8px rgba(79, 143, 255, 0.3);
+    box-shadow: 0 0 8px rgba(91, 140, 255, 0.3);
   }
 
   50% {
-    box-shadow: 0 0 20px rgba(79, 143, 255, 0.6);
+    box-shadow: 0 0 20px rgba(91, 140, 255, 0.6);
   }
 }
 
@@ -276,7 +281,7 @@ select {
 }
 
 .node-card.selected {
-  box-shadow: 0 0 0 2px var(--blue), 0 8px 32px rgba(79, 143, 255, 0.2);
+  box-shadow: 0 0 0 2px var(--blue), 0 8px 32px rgba(91, 140, 255, 0.2);
 }
 
 .node-card.running {
@@ -353,8 +358,8 @@ select {
 }
 
 .chat-msg.user {
-  background: linear-gradient(135deg, rgba(79, 143, 255, 0.15), rgba(99, 102, 241, 0.1));
-  border: 1px solid rgba(79, 143, 255, 0.2);
+  background: linear-gradient(135deg, rgba(91, 140, 255, 0.15), rgba(99, 102, 241, 0.1));
+  border: 1px solid rgba(91, 140, 255, 0.2);
   margin-left: auto;
 }
 
@@ -606,9 +611,9 @@ select {
    Model Selector
    ═══════════════════════════ */
 .model-selector-tag:hover {
-  background: rgba(79, 143, 255, 0.15) !important;
-  border-color: rgba(79, 143, 255, 0.3) !important;
-  box-shadow: 0 0 6px rgba(79, 143, 255, 0.15);
+  background: rgba(91, 140, 255, 0.15) !important;
+  border-color: rgba(91, 140, 255, 0.3) !important;
+  box-shadow: 0 0 6px rgba(91, 140, 255, 0.15);
 }
 
 .model-dropdown {
@@ -629,7 +634,7 @@ select {
 }
 
 .model-dropdown-item:hover {
-  background: rgba(79, 143, 255, 0.12) !important;
+  background: rgba(91, 140, 255, 0.12) !important;
   color: var(--blue) !important;
 }
 
@@ -886,7 +891,7 @@ select {
 }
 
 .s-badge.blue {
-  background: rgba(79, 143, 255, 0.15);
+  background: rgba(91, 140, 255, 0.15);
   color: var(--blue);
 }
 
@@ -909,8 +914,8 @@ select {
 }
 
 .tpl-card:hover {
-  background: rgba(79, 143, 255, 0.08);
-  border-color: rgba(79, 143, 255, 0.25);
+  background: rgba(91, 140, 255, 0.08);
+  border-color: rgba(91, 140, 255, 0.25);
   transform: translateY(-2px);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
 }
@@ -1200,9 +1205,9 @@ select {
 }
 
 .task-col.task-col-dragover {
-  background: rgba(79, 143, 255, 0.06);
-  border-color: rgba(79, 143, 255, 0.25);
-  box-shadow: inset 0 0 20px rgba(79, 143, 255, 0.08);
+  background: rgba(91, 140, 255, 0.06);
+  border-color: rgba(91, 140, 255, 0.25);
+  box-shadow: inset 0 0 20px rgba(91, 140, 255, 0.08);
 }
 
 .task-col-header {
@@ -1238,8 +1243,8 @@ select {
 }
 
 .task-col-add:hover {
-  background: rgba(79, 143, 255, 0.12);
-  border-color: rgba(79, 143, 255, 0.3);
+  background: rgba(91, 140, 255, 0.12);
+  border-color: rgba(91, 140, 255, 0.3);
   color: var(--blue);
 }
 
@@ -1274,7 +1279,7 @@ select {
 }
 
 .task-card:hover {
-  border-color: rgba(79, 143, 255, 0.25);
+  border-color: rgba(91, 140, 255, 0.25);
   background: rgba(255, 255, 255, 0.06);
   transform: translateY(-1px);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
@@ -1427,7 +1432,7 @@ select {
 .task-card-input {
   width: 100%;
   background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(79, 143, 255, 0.3);
+  border: 1px solid rgba(91, 140, 255, 0.3);
   border-radius: 6px;
   padding: 6px 8px;
   font-size: 11px;
@@ -1438,7 +1443,7 @@ select {
 
 .task-card-input:focus {
   border-color: var(--blue);
-  box-shadow: 0 0 8px rgba(79, 143, 255, 0.15);
+  box-shadow: 0 0 8px rgba(91, 140, 255, 0.15);
 }
 
 .task-btn-sm {
@@ -1452,13 +1457,13 @@ select {
 }
 
 .task-btn-ok {
-  background: rgba(79, 143, 255, 0.1);
-  border-color: rgba(79, 143, 255, 0.3);
+  background: rgba(91, 140, 255, 0.1);
+  border-color: rgba(91, 140, 255, 0.3);
   color: var(--blue);
 }
 
 .task-btn-ok:hover {
-  background: rgba(79, 143, 255, 0.2);
+  background: rgba(91, 140, 255, 0.2);
 }
 
 .task-btn-cancel {
@@ -1486,12 +1491,12 @@ select {
 /* ─── Task Board Kanban ────────────────────── */
 .task-card-item:hover {
   border-color: var(--blue) !important;
-  box-shadow: 0 2px 12px rgba(79, 143, 255, 0.15);
+  box-shadow: 0 2px 12px rgba(91, 140, 255, 0.15);
   transform: translateY(-1px);
 }
 
 .task-column.drag-over {
-  background: rgba(79, 143, 255, 0.06) !important;
+  background: rgba(91, 140, 255, 0.06) !important;
   border-color: var(--blue) !important;
   box-shadow: inset 0 0 0 1px var(--blue);
 }
@@ -1557,7 +1562,7 @@ select {
 }
 .s-input:focus {
   border-color: var(--blue);
-  box-shadow: 0 0 0 2px rgba(79, 143, 255, 0.1);
+  box-shadow: 0 0 0 2px rgba(91, 140, 255, 0.1);
 }
 
 /* ─── Buttons ─────────────────────────────── */

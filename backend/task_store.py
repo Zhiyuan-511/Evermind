@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import threading
+import shutil
 import time
 import uuid
 from copy import deepcopy
@@ -463,11 +464,28 @@ _file_lock = threading.Lock()
 
 
 def _read_json_file(path: Path) -> Any:
-    """Read and parse a JSON file, return empty list/dict on failure."""
+    """Read and parse a JSON file, return empty list/dict on failure.
+
+    v7.3.9 audit-fix CRITICAL — when JSON is corrupt (truncated, invalid),
+    move it to `<path>.corrupt-<timestamp>` BEFORE returning the empty
+    list. Without this, the caller's next save() overwrites the bad file
+    with `[]`, total data loss. Quarantining preserves a forensic copy
+    the user can manually recover from.
+    """
     try:
         if path.exists():
             raw = path.read_text(encoding="utf-8")
             return json.loads(raw) if raw.strip() else []
+    except json.JSONDecodeError as e:
+        try:
+            quarantine = path.with_name(f"{path.name}.corrupt-{int(time.time())}")
+            shutil.copy2(path, quarantine)
+            logger.error(
+                f"Corrupt JSON at {path} — quarantined to {quarantine}. "
+                f"Refusing to overwrite with empty data. Reason: {e}"
+            )
+        except Exception as _q_err:
+            logger.error(f"Failed to quarantine corrupt {path}: {_q_err}")
     except Exception as e:
         logger.warning(f"Failed to read {path}: {e}")
     return []
@@ -1078,7 +1096,11 @@ class RunStore:
 class NodeExecutionStore:
     """Thread-safe file-backed NodeExecution store."""
 
-    MAX_ITEMS = 2000
+    # v5.8.5: 2000 → 600. The JSON file was growing to 13 MB which meant every
+    # node-start update (5+ writes per subtask) did a 200-400 ms whole-file flush.
+    # 11-node pipelines paid ~3-5 s of pure IO on each run. 600 retains plenty
+    # of history for UI hydration while slashing the per-write cost ~4x.
+    MAX_ITEMS = 600
 
     def __init__(self):
         self._nodes: Dict[str, NodeExecutionRecord] = {}

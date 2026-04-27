@@ -96,15 +96,45 @@ class PluginRegistry:
 # Default plugin assignments per node type
 NODE_DEFAULT_PLUGINS = {
     # V4.3.1: All pipeline nodes get file_ops + shell (Claude Code-style agentic tools).
-    "builder":   ["file_ops", "shell"],
+    # v6.5 Phase 2 (#13): builders opt into source_fetch so they can chase the
+    # analyst's <follow_hints> entries (README/docs/source-code snippets) on
+    # demand without a rebuild round-trip. Guarded by analyst-set per-tool
+    # limits; a cold goal with no hints never fires a fetch.
+    "builder":   ["file_ops", "shell", "source_fetch"],
     "polisher":  ["file_ops", "shell"],
+    # v6.4 (maintainer 2026-04-21): patcher had NO plugins registered → every run
+    # the patcher node was launched with zero tools. It tried to output
+    # unified-diff blocks in plain text which kimi/gpt-5.4 reliably refuse
+    # to do, wasting ~4 min per rejection. Giving it file_ops + shell (same
+    # as polisher) lets it actually read & edit the flagged files.
+    "patcher":   ["file_ops", "shell"],
+    # v6.4.6 (maintainer 2026-04-21): merger was ALSO unregistered like patcher.
+    # It currently works only because orchestrator creates it with
+    # agent_type="builder" so it inherits builder plugins at runtime — but
+    # that's a fragile accident. Register explicitly for stability.
+    "merger":    ["file_ops", "shell"],
     "tester":    ["file_ops", "shell", "browser"],
     "reviewer":  ["file_ops", "shell", "browser"],
     "deployer":  ["file_ops", "shell"],
     "debugger":  ["file_ops", "shell"],
-    "analyst":   ["file_ops", "shell", "source_fetch", "browser"],
+    # v6.1.2: analyst drops `browser` and `shell` — it's a text-research node
+    # that only needs source_fetch (raw HTML/markdown from GitHub/docs/raw).
+    # Giving it a rendered browser caused two regressions: (1) on CDP-attach
+    # failure Playwright spawned a visible external Chromium window during
+    # long-running GitHub research, (2) the model wasted tool-loop rounds
+    # choosing between source_fetch and browser when source_fetch is strictly
+    # sufficient for README/source inspection. file_ops is also unneeded —
+    # analyst MUST produce a text report, never write files (enforced by
+    # _plain_text_node_write_guard_error). Reviewer/tester keep browser for
+    # QA screenshots. uidesign defaults to text-only and may opt into browser
+    # explicitly when live reference capture is worth the latency.
+    "analyst":   ["source_fetch"],
     "scribe":    ["file_ops", "shell"],
-    "planner":   ["file_ops", "shell"],
+    # v5.8.6: planner.yaml HARD RULE says "DO NOT call any tools". Giving it
+    # file_ops + shell here contradicted that — kimi would try tool calls
+    # anyway, waste 4-5 tool_loop iterations at 2-3s each before converging
+    # on plain-text output. Empty plugin list makes the contract machine-enforced.
+    "planner":   [],
     "spritesheet": ["file_ops"],
     "assetimport": ["file_ops"],
     "router":    [],
@@ -120,7 +150,7 @@ NODE_DEFAULT_PLUGINS = {
     "imagegen":    ["file_ops", "comfyui"],
     "bgremove":    [],
     "videoedit":   [],
-    "uidesign":    ["browser"],
+    "uidesign":    [],
     # v5.1: spritesheet/assetimport now produce code files — moved above with file_ops
 }
 
@@ -186,15 +216,50 @@ def get_image_generation_config(config: Optional[Dict[str, Any]] = None) -> Dict
     }
 
 
-def is_image_generation_available(config: Optional[Dict[str, Any]] = None) -> bool:
-    """
-    Only treat image generation as available when a real backend URL and workflow
-    template are both configured. Kimi text models do not count as image capability.
-    """
-    image_cfg = get_image_generation_config(config=config)
+def is_video_review_available(config: Optional[Dict[str, Any]] = None) -> bool:
+    """v6.2 (maintainer 2026-04-20): VideoReview adapter is usable when a vision
+    model is configured (qwen-vl via DashScope, doubao-vision via Volcengine,
+    or Gemini). Also triggers on explicit video_review.api_key."""
+    try:
+        from video_review import is_video_review_available as _probe
+    except Exception:
+        return False
+    try:
+        return bool(_probe(config))
+    except Exception:
+        return False
+
+
+def is_direct_image_provider_configured(config: Optional[Dict[str, Any]] = None) -> bool:
+    """v6.2 (maintainer 2026-04-20): True iff image_generation has both provider AND api_key.
+    Used to branch imagegen node defaults between the preferred direct adapter
+    (ImageGenPlugin) and the legacy ComfyUI plugin."""
     enabled_override = _get_config_value(config, "image_generation.enabled", "enable_image_generation")
     if enabled_override is not None and not _is_truthy(enabled_override):
         return False
+    if isinstance(config, dict):
+        ig = config.get("image_generation") if isinstance(config.get("image_generation"), dict) else {}
+        if str(ig.get("provider") or "").strip() and str(ig.get("api_key") or "").strip():
+            return True
+    return False
+
+
+def is_image_generation_available(config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Only treat image generation as available when EITHER:
+    (1) v6.1.15 (maintainer 2026-04-20): Direct provider+api_key configured (tongyi /
+        doubao / flux-fal / openai-compat / ...). Path: image_generation.provider
+        + image_generation.api_key.
+    (2) Legacy: ComfyUI URL + workflow template configured.
+    Kimi text models do NOT count as image capability.
+    """
+    if is_direct_image_provider_configured(config=config):
+        return True
+    enabled_override = _get_config_value(config, "image_generation.enabled", "enable_image_generation")
+    if enabled_override is not None and not _is_truthy(enabled_override):
+        return False
+    # Path 2: legacy ComfyUI
+    image_cfg = get_image_generation_config(config=config)
     return bool(image_cfg["comfyui_url"] and image_cfg["workflow_template"])
 
 
@@ -227,6 +292,22 @@ def is_polisher_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool
         if isinstance(nested_polisher, dict) and "enable_browser_search" in nested_polisher:
             return _is_truthy(nested_polisher.get("enable_browser_search"))
     return _is_truthy(os.getenv("EVERMIND_POLISHER_ENABLE_BROWSER", "0"))
+
+
+def is_uidesign_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
+    """
+    Optional flag for letting uidesign inspect a live reference site.
+    Default is OFF because broad browser research turned uidesign into a slow
+    pseudo-analyst node instead of a compact builder-facing design brief.
+    """
+    if isinstance(config, dict):
+        for key in ("uidesign_enable_browser", "uidesign_browser_enabled", "enable_uidesign_browser"):
+            if key in config:
+                return _is_truthy(config.get(key))
+        nested_uidesign = config.get("uidesign")
+        if isinstance(nested_uidesign, dict) and "enable_browser_search" in nested_uidesign:
+            return _is_truthy(nested_uidesign.get("enable_browser_search"))
+    return _is_truthy(os.getenv("EVERMIND_UIDESIGN_ENABLE_BROWSER", "0"))
 
 
 def is_imagegen_browser_enabled(config: Optional[Dict[str, Any]] = None) -> bool:
@@ -330,7 +411,11 @@ def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]
     normalized_node_type = normalize_node_role(node_type)
     if normalized_node_type == "imagegen":
         defaults = ["file_ops"]
-        if is_image_generation_available(config=config):
+        # v6.2 (maintainer 2026-04-20): prefer the direct ImageGen adapter when provider+key set.
+        # Fall back to ComfyUI for legacy users. No-image → browser research mode.
+        if is_direct_image_provider_configured(config=config):
+            defaults.append("image_gen")
+        elif is_image_generation_available(config=config):
             defaults.append("comfyui")
         elif is_imagegen_browser_enabled(config=config):
             defaults.append("source_fetch")
@@ -343,6 +428,9 @@ def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]
     if normalized_node_type == "polisher" and is_polisher_browser_enabled(config=config):
         if "browser" not in defaults:
             defaults.append("browser")
+    if normalized_node_type == "uidesign" and is_uidesign_browser_enabled(config=config):
+        if "browser" not in defaults:
+            defaults.append("browser")
     if normalized_node_type in ("reviewer", "tester") and is_qa_browser_use_enabled(config=config):
         if "browser_use" not in defaults:
             insert_at = 1 if "file_ops" in defaults else 0
@@ -350,6 +438,12 @@ def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]
     if normalized_node_type in ("reviewer", "tester") and is_qa_computer_use_enabled(config=config):
         if "computer_use" not in defaults:
             defaults.append("computer_use")
+    # v6.2 (maintainer 2026-04-20): reviewer/tester may opt into video review when
+    # a vision model is reachable. Adapter returns None on failure so the flow
+    # silently falls back to screenshot-based review.
+    if normalized_node_type == "reviewer" and is_video_review_available(config=config):
+        if "video_review" not in defaults:
+            defaults.append("video_review")
     if "browser" in defaults and not is_browser_runtime_available(config=config):
         defaults = [name for name in defaults if name != "browser"]
     if "browser_use" in defaults and not is_browser_use_runtime_available(config=config):
@@ -374,6 +468,8 @@ def sanitize_plugin_names_for_node(
             continue
         if normalized_node_type == "polisher" and name == "browser" and not is_polisher_browser_enabled(config=config):
             continue
+        if normalized_node_type == "uidesign" and name == "browser" and not is_uidesign_browser_enabled(config=config):
+            continue
         if name == "browser" and not is_browser_runtime_available(config=config):
             continue
         if (
@@ -383,6 +479,10 @@ def sanitize_plugin_names_for_node(
         ):
             continue
         if normalized_node_type == "imagegen" and name == "comfyui" and not is_image_generation_available(config=config):
+            continue
+        if normalized_node_type == "imagegen" and name == "image_gen" and not is_direct_image_provider_configured(config=config):
+            continue
+        if name == "video_review" and not is_video_review_available(config=config):
             continue
         if normalized_node_type in ("reviewer", "tester") and name == "browser_use" and (
             not is_qa_browser_use_enabled(config=config)

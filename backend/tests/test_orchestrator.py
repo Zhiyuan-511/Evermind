@@ -3169,6 +3169,502 @@ class TestAnalystHandoffFallback(unittest.TestCase):
         self.assertIn("gdquest-demos/godot-4-3d-third-person-controller", self.orch._extract_tagged_section(augmented, "asset_sourcing_plan"))
         self.assertIn("Projectile readability baseline", self.orch._extract_tagged_section(augmented, "game_mechanics_spec"))
 
+    def test_v6_4_23_implementation_blueprint_in_expected_tags(self):
+        """v6.4.23: implementation_blueprint must be in the required tag list so
+        missing-blueprint triggers synthesized fallback instead of silent drop."""
+        plan = Plan(
+            goal="a 3D game",
+            subtasks=[
+                SubTask(id="1", agent_type="analyst", description="x"),
+                SubTask(id="2", agent_type="builder", description="x"),
+                SubTask(id="3", agent_type="reviewer", description="x"),
+            ],
+        )
+        tags = self.orch._expected_analyst_handoff_tags(plan)
+        self.assertIn("implementation_blueprint", tags,
+                      "v6.4.23: analyst must be required to emit implementation_blueprint")
+
+    def test_v6_4_23_missing_blueprint_gets_synthesized(self):
+        """v6.4.23: if analyst forgets the blueprint, orchestrator fills a safe
+        fallback so builder still has a skeleton to translate."""
+        plan = Plan(
+            goal="build a premium editorial landing page",
+            subtasks=[
+                SubTask(id="1", agent_type="analyst", description="x"),
+                SubTask(id="2", agent_type="builder", description="x"),
+                SubTask(id="3", agent_type="reviewer", description="x"),
+            ],
+        )
+        synth = self.orch._synthesized_analyst_handoff_sections(plan, "minimal brand direction")
+        self.assertIn("implementation_blueprint", synth)
+        blueprint = synth["implementation_blueprint"]
+        # Must contain the three structural anchors we promised builder
+        self.assertIn("HTML skeleton", blueprint)
+        self.assertIn("JS signatures", blueprint)
+        self.assertIn("CSS selector map", blueprint)
+        # Must NOT be a massive dump — keep builder context healthy
+        self.assertLess(len(blueprint), 2000,
+                        "fallback blueprint should be a terse skeleton, not a verbose design doc")
+
+    def test_v6_4_23_analyst_blueprint_routes_to_builder_via_shared_tags(self):
+        """v6.4.23: when analyst emits <implementation_blueprint>, the
+        _build_analyst_handoff_context must surface it to the builder node so
+        builder's system prompt includes it."""
+        plan = Plan(
+            goal="build a landing page",
+            subtasks=[
+                SubTask(id="1", agent_type="analyst", description="x"),
+                SubTask(id="2", agent_type="builder", description="x"),
+            ],
+        )
+        analyst_output = (
+            "<reference_sites>https://example.com</reference_sites>\n"
+            "<implementation_blueprint>\n"
+            "HTML skeleton: <header><h1>TODO: hero</h1></header>\n"
+            "JS signatures: function initHero(root) -> void\n"
+            "CSS selector map: .hero { gradient }\n"
+            "</implementation_blueprint>\n"
+            "<builder_1_handoff>build the whole page</builder_1_handoff>\n"
+        )
+        builder_task = next(st for st in plan.subtasks if st.agent_type == "builder")
+        context = self.orch._build_analyst_handoff_context(plan, builder_task, analyst_output)
+        self.assertIn("Implementation Blueprint", context,
+                      "blueprint section label must appear in builder's context")
+        self.assertIn("function initHero", context,
+                      "blueprint contents must reach builder context")
+
+    def test_v6_4_24_critical_algorithms_in_expected_tags(self):
+        """v6.4.24: analyst must be required to emit <critical_algorithms> so
+        builder always has runnable code to paste for hard logic."""
+        plan = Plan(
+            goal="a simple landing page",
+            subtasks=[
+                SubTask(id="1", agent_type="analyst", description="x"),
+                SubTask(id="2", agent_type="builder", description="x"),
+                SubTask(id="3", agent_type="reviewer", description="x"),
+            ],
+        )
+        tags = self.orch._expected_analyst_handoff_tags(plan)
+        self.assertIn("critical_algorithms", tags)
+
+    def test_v6_4_24_missing_algorithms_get_game_fallback(self):
+        """v6.4.24: for a game goal the synthesized fallback must include a
+        real runnable bullet-update function + WASD motion mapping — so
+        builder can still paste something working even if analyst skipped."""
+        plan = Plan(
+            goal="创建一个 3D 射击游戏，有怪物、武器和关卡",  # classifier recognises 游戏 → game
+            subtasks=[
+                SubTask(id="1", agent_type="analyst", description="x"),
+                SubTask(id="2", agent_type="builder", description="x"),
+                SubTask(id="3", agent_type="reviewer", description="x"),
+            ],
+        )
+        synth = self.orch._synthesized_analyst_handoff_sections(plan, "third-person shooter")
+        self.assertIn("critical_algorithms", synth)
+        algos = synth["critical_algorithms"]
+        # Must contain a real bullet-update routine
+        self.assertIn("updateBullets", algos)
+        # Must contain WASD motion mapping (sign-correct)
+        self.assertIn("moveFromKeys", algos)
+        self.assertIn("KeyW", algos)
+
+    def test_v6_4_24_missing_algorithms_get_nongame_stub(self):
+        """v6.4.24: for a non-game task the synthesized fallback is a terse
+        stub — not useless fabricated code."""
+        plan = Plan(
+            goal="an editorial landing page",
+            subtasks=[
+                SubTask(id="1", agent_type="analyst", description="x"),
+                SubTask(id="2", agent_type="builder", description="x"),
+                SubTask(id="3", agent_type="reviewer", description="x"),
+            ],
+        )
+        synth = self.orch._synthesized_analyst_handoff_sections(plan, "editorial brand")
+        self.assertIn("critical_algorithms", synth)
+        algos = synth["critical_algorithms"]
+        # No fake game functions
+        self.assertNotIn("updateBullets", algos)
+        # Has clear "None required" messaging
+        self.assertTrue(
+            ("None required" in algos) or ("无复杂算法" in algos),
+            f"non-game stub should say 'None required' or equivalent, got: {algos[:120]}",
+        )
+
+    def test_v6_4_24_algorithms_route_to_builder_via_shared_tags(self):
+        """v6.4.24: analyst's <critical_algorithms> must be piped into the
+        builder's handoff context so builder sees the real functions."""
+        plan = Plan(
+            goal="a game",
+            subtasks=[
+                SubTask(id="1", agent_type="analyst", description="x"),
+                SubTask(id="2", agent_type="builder", description="x"),
+            ],
+        )
+        analyst_output = (
+            "<reference_sites>https://example.com</reference_sites>\n"
+            "<critical_algorithms>\n"
+            "function REAL_BULLET_UPDATE(bullets, dt) { /* body */ }\n"
+            "</critical_algorithms>\n"
+            "<builder_1_handoff>own</builder_1_handoff>\n"
+        )
+        builder_task = next(st for st in plan.subtasks if st.agent_type == "builder")
+        ctx = self.orch._build_analyst_handoff_context(plan, builder_task, analyst_output)
+        self.assertIn("Critical Algorithms", ctx)
+        self.assertIn("REAL_BULLET_UPDATE", ctx)
+
+
+class TestV6_4_26_DeclarativeQualityGates(unittest.TestCase):
+    """v6.4.26: declarative quality gates — planner produces
+    acceptance_checks per node, validator enforces them, analyst can refine,
+    default fallback when neither is provided."""
+
+    def setUp(self):
+        import tempfile, pathlib
+        from orchestrator import Orchestrator
+        import orchestrator as _o
+        self._tmp = tempfile.mkdtemp(prefix='ev26test_')
+        self._orig = _o.OUTPUT_DIR
+        _o.OUTPUT_DIR = pathlib.Path(self._tmp)
+        self.orch = Orchestrator(ai_bridge=None, executor=None)
+
+    def tearDown(self):
+        import shutil, orchestrator as _o
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        _o.OUTPUT_DIR = self._orig
+
+    def test_registry_has_core_checks(self):
+        reg = self.orch._quality_check_registry()
+        # All expected check ids present
+        required = {
+            "has_doctype", "has_viewport_meta", "balanced_html_tags",
+            "balanced_script_style", "min_html_bytes", "min_text_density",
+            "no_placeholder_copy", "no_truncation_markers",
+            "has_runtime_surface", "has_game_loop", "has_input_bindings",
+            "has_start_flow", "has_restart_or_end_state", "has_hud_or_progress",
+            "has_module_exports", "no_js_syntax_errors",
+            "no_duplicate_script_tags", "no_multiple_doctype",
+            "has_shared_nav", "all_routes_exist",
+            "no_emoji_icons", "no_cdn_fonts",
+        }
+        self.assertTrue(required.issubset(set(reg.keys())))
+
+    def test_default_primary_game_builder_has_runtime_checks(self):
+        plan = Plan(goal="创建一个 3D 射击游戏", subtasks=[
+            SubTask(id="1", agent_type="builder", description="primary"),
+            SubTask(id="2", agent_type="builder", description="support"),
+        ])
+        defaults = self.orch._default_acceptance_checks(plan.subtasks[0], plan)
+        self.assertIn("has_runtime_surface", defaults)
+        self.assertIn("has_input_bindings", defaults)
+
+    def test_default_support_lane_builder_skips_gameplay_ui_checks(self):
+        """KEY FIX: support-lane builder was being rejected for missing
+        input_bindings / start_flow. Defaults for slot > 1 must NOT demand
+        those — they are module-level checks."""
+        plan = Plan(goal="创建一个 3D 射击游戏", subtasks=[
+            SubTask(id="1", agent_type="builder", description="primary"),
+            SubTask(id="2", agent_type="builder", description="support"),
+        ])
+        defaults = self.orch._default_acceptance_checks(plan.subtasks[1], plan)
+        self.assertIn("has_module_exports", defaults)
+        self.assertNotIn("has_input_bindings", defaults,
+                         "support-lane builder must not demand gameplay input bindings")
+        self.assertNotIn("has_start_flow", defaults,
+                         "support-lane builder must not demand start/play flow")
+
+    def test_resolver_reads_planner_acceptance_checks(self):
+        plan = Plan(goal="a game", subtasks=[
+            SubTask(id="1", agent_type="planner", description="plan",
+                    output='```json\n{"node_briefs": {'
+                           '"builder_1": {"acceptance_checks": ["has_doctype", "has_runtime_surface"]}}}\n```'),
+            SubTask(id="2", agent_type="builder", description="primary"),
+        ])
+        resolved = self.orch._resolve_acceptance_checks(plan.subtasks[1], plan)
+        self.assertEqual(resolved, ["has_doctype", "has_runtime_surface"])
+
+    def test_resolver_merges_analyst_build_checks_with_planner(self):
+        plan = Plan(goal="a game", subtasks=[
+            SubTask(id="1", agent_type="planner", description="p",
+                    output='```json\n{"node_briefs": {'
+                           '"builder_1": {"acceptance_checks": ["has_doctype"]}}}\n```'),
+            SubTask(id="2", agent_type="analyst", description="a", output=(
+                '<build_checks>\n'
+                '  <check node="builder_1">has_runtime_surface has_game_loop</check>\n'
+                '</build_checks>'
+            )),
+            SubTask(id="3", agent_type="builder", description="primary"),
+        ])
+        merged = self.orch._resolve_acceptance_checks(plan.subtasks[2], plan)
+        self.assertIn("has_doctype", merged)
+        self.assertIn("has_runtime_surface", merged)
+        self.assertIn("has_game_loop", merged)
+
+    def test_resolver_dedupes_unknown_check_ids(self):
+        """Unknown check ids from planner should be silently dropped so
+        older Evermind builds stay forward-compatible."""
+        plan = Plan(goal="a game", subtasks=[
+            SubTask(id="1", agent_type="planner", description="p",
+                    output='```json\n{"node_briefs": {'
+                           '"builder_1": {"acceptance_checks": ["has_doctype", "made_up_check_99", "has_game_loop"]}}}\n```'),
+            SubTask(id="2", agent_type="builder", description="primary"),
+        ])
+        resolved = self.orch._resolve_acceptance_checks(plan.subtasks[1], plan)
+        self.assertIn("has_doctype", resolved)
+        self.assertIn("has_game_loop", resolved)
+        self.assertNotIn("made_up_check_99", resolved)
+
+    def test_run_acceptance_checks_flags_missing_doctype(self):
+        html = "<html><body>Hi there</body></html>"
+        fails = self.orch._run_acceptance_checks(html, ["has_doctype", "min_text_density"])
+        ids = [cid for cid, _ in fails]
+        self.assertIn("has_doctype", ids)
+
+    def test_run_acceptance_checks_passes_valid_game_html(self):
+        html = (
+            "<!DOCTYPE html><html><head><title>OK</title></head><body>"
+            "<canvas id='game'></canvas>" + ("x" * 600) +
+            "<script>requestAnimationFrame(function(){});"
+            "addEventListener('keydown', function(){}); window.game = {};</script>"
+            "</body></html>"
+        )
+        fails = self.orch._run_acceptance_checks(html, [
+            "has_doctype", "has_runtime_surface", "has_game_loop",
+            "has_input_bindings", "has_module_exports", "min_html_bytes",
+        ])
+        # min_html_bytes requires ≥ 8KB; our test html is shorter. Allow that one.
+        failed_ids = {cid for cid, _ in fails}
+        blocked = failed_ids - {"min_html_bytes"}
+        self.assertEqual(blocked, set(), f"unexpected failures: {fails}")
+
+    def test_assetimport_manifest_classifies_md_as_text(self):
+        import orchestrator as _o, pathlib, json
+        asset_dir = _o.OUTPUT_DIR / "assets"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        (asset_dir / "brief.md").write_text("# hi")
+        (asset_dir / "hero.svg").write_text("<svg/>")
+        plan = Plan(goal="a game", subtasks=[SubTask(id="1", agent_type="assetimport", description="x")])
+        self.orch._assetimport_fast_path(plan, plan.subtasks[0])
+        mani = json.loads((asset_dir/"manifest.json").read_text())
+        types = {a['name']: a['type'] for a in mani['assets']}
+        self.assertEqual(types['brief'], 'text', "v6.4.26 fix: .md should be text not binary")
+        self.assertEqual(types['hero'], 'image')
+
+    def test_assetimport_runtime_mapping_points_to_real_files(self):
+        import orchestrator as _o, pathlib, json
+        asset_dir = _o.OUTPUT_DIR / "assets"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        (asset_dir / "character_hero_sheet.svg").write_text("<svg/>")
+        (asset_dir / "weapon_primary_sheet.svg").write_text("<svg/>")
+        plan = Plan(goal="a game", subtasks=[SubTask(id="1", agent_type="assetimport", description="x")])
+        self.orch._assetimport_fast_path(plan, plan.subtasks[0])
+        mani = json.loads((asset_dir/"manifest.json").read_text())
+        for key, path in mani['runtime_mapping'].items():
+            real = pathlib.Path(path.replace("./assets", str(asset_dir)))
+            self.assertTrue(real.exists(),
+                            f"v6.4.26 fix: runtime_mapping {key}->{path} must point to real file")
+
+    def test_v6_4_28_file_ops_redirects_evermind_app_path_to_output_root(self):
+        """v6.4.28: patcher write to 'Evermind.app/Contents/Resources/backend/
+        index.html' should auto-redirect to output_root/index.html, not reject.
+        This is the core fix for the 20-round empty-retry patcher bug."""
+        from plugins.implementations import FileOpsPlugin
+        import orchestrator as _o, pathlib
+        plugin = FileOpsPlugin()
+        output_root = _o.OUTPUT_DIR
+        output_root.mkdir(parents=True, exist_ok=True)
+        (output_root / "index.html").write_text("<html></html>")
+        ctx = {"file_ops_output_dir": str(output_root)}
+        # Simulate the kimi bug: it resolved `index.html` vs backend CWD
+        bad_path = "/path/to/Desktop/Evermind.app/Contents/Resources/backend/index.html"
+        result = plugin._guard_output_dir_escape(bad_path, "edit", ctx)
+        self.assertIsNone(result, "v6.4.28: path inside Evermind bundle must auto-redirect, not reject")
+        self.assertIn("_auto_corrected_path", ctx)
+        self.assertTrue(ctx["_auto_corrected_path"].endswith("index.html"))
+
+    def test_v6_4_28_file_ops_redirects_basename_matching_existing_file(self):
+        """v6.4.28: basename match fallback — if LLM passes a wrong absolute
+        path but the basename exists in output_root, redirect to that."""
+        from plugins.implementations import FileOpsPlugin
+        import orchestrator as _o
+        plugin = FileOpsPlugin()
+        output_root = _o.OUTPUT_DIR
+        output_root.mkdir(parents=True, exist_ok=True)
+        (output_root / "styles.css").write_text("body {}")
+        ctx = {"file_ops_output_dir": str(output_root)}
+        bad_path = "/tmp/some/unrelated/dir/styles.css"
+        result = plugin._guard_output_dir_escape(bad_path, "edit", ctx)
+        self.assertIsNone(result, "basename match should auto-redirect")
+        self.assertIn("_auto_corrected_path", ctx)
+
+    def test_v6_4_28_file_ops_rejects_truly_malicious_paths(self):
+        """v6.4.28: sanity — paths with no basename match AND not inside
+        Evermind.app AND not whitelisted should still reject (sandbox intact)."""
+        from plugins.implementations import FileOpsPlugin
+        import orchestrator as _o
+        plugin = FileOpsPlugin()
+        output_root = _o.OUTPUT_DIR
+        output_root.mkdir(parents=True, exist_ok=True)
+        ctx = {"file_ops_output_dir": str(output_root)}
+        bad_path = "/etc/passwd"
+        result = plugin._guard_output_dir_escape(bad_path, "write", ctx)
+        self.assertIsNotNone(result, "security: malicious path must still reject")
+        self.assertFalse(result.success)
+
+    def test_fast_path_walkthrough_markdown_is_rich(self):
+        md = self.orch._fast_path_walkthrough_markdown(
+            "spritesheet", ["/tmp/x.json", "/tmp/x.js"], 0.05,
+            goal="a 3D shooter",
+        )
+        # Must have title, snapshot table, files section, why section.
+        # Accept both locales — actual text depends on report_language setting.
+        self.assertIn("Walkthrough", md)
+        self.assertTrue("Execution Snapshot" in md or "执行概览" in md,
+                        "missing snapshot section in either locale")
+        self.assertTrue("Files Produced" in md or "产出文件" in md)
+        self.assertTrue("Why This Path" in md or "路径说明" in md)
+        # Must mention files (these are file names, locale-independent)
+        self.assertIn("x.json", md)
+        self.assertIn("x.js", md)
+
+
+class TestV6_4_25_AssetFastPath(unittest.TestCase):
+    """v6.4.25: spritesheet/assetimport Python fast_path + imagegen enhancement.
+    Covers the architectural shift: asset planning no longer calls LLM for
+    deterministic JSON/JS templates. Imagegen's visual_config.json now
+    injects external picsum.photos URLs for builder use."""
+
+    def setUp(self):
+        import tempfile, pathlib
+        from orchestrator import Orchestrator
+        import orchestrator as _o
+        self._tmp = tempfile.mkdtemp(prefix='evermind_test_')
+        self._orig_output = _o.OUTPUT_DIR
+        _o.OUTPUT_DIR = pathlib.Path(self._tmp)
+        self.orch = Orchestrator(ai_bridge=None, executor=None)
+
+    def tearDown(self):
+        import shutil, orchestrator as _o
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        _o.OUTPUT_DIR = self._orig_output
+
+    def test_spritesheet_fast_path_produces_two_files_for_game(self):
+        plan = Plan(
+            goal="创建一个 3D 射击游戏，有怪物和武器",
+            subtasks=[SubTask(id="1", agent_type="spritesheet", description="x")],
+        )
+        files = self.orch._spritesheet_fast_path(plan, plan.subtasks[0])
+        self.assertEqual(len(files), 2)
+        names = sorted(p.split('/')[-1] for p in files)
+        self.assertEqual(names, ['sprite_config.json', 'sprites.js'])
+        import json
+        cfg = json.load(open([f for f in files if f.endswith('.json')][0]))
+        self.assertIn('sprites', cfg)
+        self.assertIn('hero', cfg['sprites'])
+        self.assertGreater(cfg['atlas_height'], 0)
+        js = open([f for f in files if f.endswith('.js')][0]).read()
+        self.assertIn('class AnimationController', js)
+        self.assertIn('drawSprite', js)
+        self.assertIn('globalThis', js)  # browser-native IIFE
+
+    def test_spritesheet_fast_path_skipped_for_nongame(self):
+        plan = Plan(
+            goal="an editorial landing page",
+            subtasks=[SubTask(id="1", agent_type="spritesheet", description="x")],
+        )
+        files = self.orch._spritesheet_fast_path(plan, plan.subtasks[0])
+        self.assertEqual(files, [], "non-game task should skip fast_path and let LLM handle it")
+
+    def test_spritesheet_derive_families_game_keywords(self):
+        fams = self.orch._spritesheet_derive_families("创建一个 shooter game with monster and weapon")
+        self.assertIn("weapon_primary", fams)
+        self.assertIn("enemy_primary", fams)
+        self.assertIn("hero", fams)  # always added
+        # Each family must have states
+        for name, spec in fams.items():
+            self.assertIn("states", spec)
+            self.assertGreater(len(spec["states"]), 0)
+
+    def test_assetimport_fast_path_scans_existing_assets(self):
+        # Prepopulate assets/ with a pretend image + audio
+        import pathlib, orchestrator as _o
+        asset_dir = _o.OUTPUT_DIR / "assets"
+        asset_dir.mkdir(parents=True, exist_ok=True)
+        (asset_dir / "hero.png").write_bytes(b"\x89PNG")
+        (asset_dir / "shoot.mp3").write_bytes(b"ID3")
+        (asset_dir / "level_1.json").write_text('{"x":1}')
+        plan = Plan(goal="a game", subtasks=[SubTask(id="1", agent_type="assetimport", description="x")])
+        files = self.orch._assetimport_fast_path(plan, plan.subtasks[0])
+        self.assertEqual(len(files), 2)
+        import json
+        mani = json.load(open([f for f in files if f.endswith('manifest.json')][0]))
+        asset_names = {a['name'] for a in mani['assets']}
+        self.assertIn('hero', asset_names)
+        self.assertIn('shoot', asset_names)
+        self.assertIn('level_1', asset_names)
+        # Types classified correctly
+        type_map = {a['name']: a['type'] for a in mani['assets']}
+        self.assertEqual(type_map['hero'], 'image')
+        self.assertEqual(type_map['shoot'], 'audio')
+        self.assertEqual(type_map['level_1'], 'json')
+        loader_js = open([f for f in files if f.endswith('loader.js')][0]).read()
+        self.assertIn('preloadAll', loader_js)
+        self.assertIn('getAsset', loader_js)
+
+    def test_imagegen_visual_config_includes_picsum_urls(self):
+        import json
+        content = self.orch._imagegen_synthesized_core_pack_content(
+            "visual_config.json", goal="a 3D shooter with enemies"
+        )
+        vc = json.loads(content)
+        self.assertIn('external_asset_policy', vc)
+        picsum_assets = [a for a in vc['assets']
+                         if isinstance(a.get('src', ''), str) and 'picsum.photos' in a.get('src', '')]
+        self.assertEqual(len(picsum_assets), 3,
+                         "expect bg_arena_texture + bg_skybox_source + bg_mood_reference from picsum")
+        for p in picsum_assets:
+            self.assertIn('license', p)
+            self.assertIn('Unsplash', p['license'])
+
+    def test_analyst_yaml_has_v6_4_25_tag_order_contract(self):
+        import ai_bridge
+        a = ai_bridge.AGENT_PRESETS['analyst']['instructions']
+        self.assertIn('TAG-ORDER OUTPUT CONTRACT', a)
+        self.assertIn('TIER-1 MUST-LAND', a)
+        self.assertIn('<output_budget_status>', a)
+        # Critical constraint: reference_sites capped
+        self.assertIn('ONE LINE per site', a)
+
+
+class TestV6_4_24_PromptTemplates(unittest.TestCase):
+    """v6.4.24: planner/analyst YAML role-discipline + algorithm-mining checks."""
+
+    def _load_preset(self, name: str) -> str:
+        import ai_bridge
+        # Force-reload so test sees latest YAML if edited during session.
+        preset = ai_bridge.AGENT_PRESETS.get(name)
+        self.assertIsNotNone(preset, f"preset {name} missing")
+        return preset.get("instructions", "")
+
+    def test_planner_has_role_discipline_v6_4_24(self):
+        instr = self._load_preset("planner")
+        self.assertIn("ROLE DISCIPLINE", instr,
+                      "planner v6.4.24 must include ROLE DISCIPLINE section")
+        self.assertIn("architect", instr.lower())
+        # Planner must explicitly hand off code decisions to analyst
+        self.assertIn("implementation_blueprint", instr)
+        self.assertIn("critical_algorithms", instr)
+
+    def test_analyst_requires_critical_algorithms_tag_v6_4_24(self):
+        instr = self._load_preset("analyst")
+        self.assertIn("<critical_algorithms>", instr)
+        self.assertIn("CRITICAL ALGORITHMS", instr)
+        # Must require real runnable code, not pseudo
+        self.assertIn("runnable", instr.lower())
+        # Must enforce 5-min wall budget
+        self.assertIn("5 minutes", instr)
+        # Must require raw source file fetching
+        self.assertIn("raw.githubusercontent.com", instr)
+
 
 class TestPlannerContextIsolation(unittest.TestCase):
     def setUp(self):
@@ -4177,10 +4673,11 @@ class TestReportIntegrity(unittest.TestCase):
             ],
         )
 
-        # v3.5.1: summary now uses content-aware labels
-        self.assertIn("设计规范", summary)
-        # No real image files, only .md docs
-        self.assertNotIn("视觉资产", summary)
+        # v5.4: structured markdown report — check for new labels
+        self.assertIn("视觉资产产出", summary)
+        self.assertIn("设计文档", summary)  # .md files counted as design docs
+        # No image files produced (only .md)
+        self.assertNotIn("视觉资产 | ", summary)  # table entry for 视觉资产 should not appear (images==[])
 
     def test_extract_xml_tagged_narrative_returns_ai_content(self):
         """v4.0-fix: Analyst XML-tagged output should be extracted as markdown narrative."""
@@ -4254,9 +4751,9 @@ class TestReportIntegrity(unittest.TestCase):
             files_created=[],
         )
 
-        # v3.5.1: summary now uses Chinese labels for asset import features
-        self.assertIn("资产导入方案完成", summary)
-        self.assertIn("清单索引", summary)
+        # v5.4: structured markdown report — check for new labels
+        self.assertIn("资源加载器", summary)  # new section header
+        self.assertIn("资产清单索引", summary)  # feature mentioned when "manifest" in lower
 
 
 class TestAINarrativeReport(unittest.TestCase):
@@ -6556,13 +7053,12 @@ class TestDifficultyPlansAndRetryTargets(unittest.TestCase):
             ],
         )
         policy = orch._analyst_runtime_policy_block(plan)
-        self.assertIn("crawl_intensity=high", policy)
+        self.assertIn("[Analyst Research Policy]", policy)
+        self.assertIn("query passes", policy)
+        self.assertIn("query_search=on", policy)
+        self.assertIn("scrapling=on", policy)
         self.assertIn("https://github.com", policy)
-        self.assertIn("<builder_1_handoff>", policy)
-        self.assertIn("gdquest-demos/godot-4-3d-third-person-controller", policy)
-        self.assertIn("Scrapling is already wired behind source_fetch", policy)
-        self.assertIn("<builder_3_handoff>", policy)
-        self.assertIn("LAST builder acts as assembler/refiner", policy)
+        self.assertIn("3 builder handoff", policy)
 
 
 class TestCustomPlanPreservation(unittest.TestCase):
@@ -8417,6 +8913,76 @@ class TestBuilderDirectMultifileRetry(unittest.TestCase):
         self.assertIn(1, timeout_calls)
         self.assertIn(3, timeout_calls)
 
+    def test_builder_runtime_multifile_mode_ignores_conflicting_direct_text_signal(self):
+        class ConflictingBridge:
+            config = {
+                "node_model_preferences": {
+                    "builder": ["gpt-5.4", "kimi-coding"],
+                },
+            }
+
+            def preferred_model_for_node(self, node, model):
+                return "gpt-5.4"
+
+            def _resolve_model(self, model_name):
+                provider = "kimi" if model_name == "kimi-coding" else "openai"
+                return {"provider": provider}
+
+            async def execute(self, **kwargs):
+                on_progress = kwargs.get("on_progress")
+                await on_progress({
+                    "stage": "model_fallback",
+                    "assignedModel": "kimi-coding",
+                    "assignedProvider": "kimi",
+                })
+                await on_progress({
+                    "stage": "forcing_text_output",
+                    "builder_delivery_mode": "direct_text",
+                    "builder_direct_text": True,
+                    "assignedModel": "kimi-coding",
+                    "assignedProvider": "kimi",
+                })
+                return {
+                    "success": True,
+                    "output": (
+                        "```html index.html\n<!DOCTYPE html><html><body><h1>Home</h1></body></html>\n```\n"
+                        "```html pricing.html\n<!DOCTYPE html><html><body><h1>Pricing</h1></body></html>\n```\n"
+                        "```html contact.html\n<!DOCTYPE html><html><body><h1>Contact</h1></body></html>\n```"
+                    ),
+                    "tool_results": [],
+                    "tool_call_stats": {},
+                }
+
+        orch = Orchestrator(ai_bridge=ConflictingBridge(), executor=None)
+        orch.emit = AsyncMock()
+        orch._sync_ne_status = AsyncMock()
+        orch._emit_ne_progress = AsyncMock()
+        orch._configured_progress_heartbeat = lambda: 0.2  # type: ignore[method-assign]
+
+        subtask = SubTask(
+            id="1",
+            agent_type="builder",
+            description="build premium multi-page site",
+            depends_on=[],
+        )
+        plan = Plan(goal="做一个三页面轻奢品牌网站，包含首页、定价页和联系页", subtasks=[subtask])
+
+        with tempfile.TemporaryDirectory() as td:
+            tmp_out = Path(td)
+            with patch.object(orchestrator_module, "OUTPUT_DIR", tmp_out), \
+                 patch.object(orchestrator_module, "validate_html_file", return_value={"ok": True, "errors": [], "warnings": [], "checks": {"score": 95}}), \
+                 patch.object(orch, "_validate_builder_quality", return_value={"pass": True, "score": 88, "errors": [], "warnings": []}):
+                result = asyncio.run(orch._execute_subtask(subtask, plan, "gpt-5.4", prev_results={}))
+
+        self.assertTrue(result.get("success"))
+        emitted_stages = [
+            call.args[1].get("stage")
+            for call in orch.emit.await_args_list
+            if call.args and call.args[0] == "subtask_progress"
+        ]
+        self.assertIn("builder_direct_multifile_mode", emitted_stages)
+        self.assertNotIn("builder_direct_text_mode", emitted_stages)
+
     def test_builder_direct_multifile_batch_ready_saves_files_and_skips_idle_timeout(self):
         events = []
 
@@ -9524,10 +10090,20 @@ class TestImagegenExecutionGuards(unittest.TestCase):
             repaired_names = {Path(path).name for path in repaired}
             self.assertEqual(
                 repaired_names,
-                {"asset_sources.md", "material_texture_directions.md", "orthographic_prompts.md"},
+                {
+                    "asset_sources.md",
+                    "material_texture_directions.md",
+                    "orthographic_prompts.md",
+                    # v5.3: deterministic code-asset fallbacks also part of the companion pack
+                    "visuals.css",
+                    "visual_config.json",
+                },
             )
             for path in empty_paths:
                 self.assertGreater(path.stat().st_size, 32)
+            # v5.3: verify the new code-asset fallbacks were created with meaningful content
+            self.assertGreater((assets_dir / "visuals.css").stat().st_size, 256)
+            self.assertGreater((assets_dir / "visual_config.json").stat().st_size, 256)
 
     def test_execute_subtask_completes_imagegen_early_when_healthy_assets_exist(self):
         with tempfile.TemporaryDirectory() as td:
@@ -15507,10 +16083,15 @@ class TestReviewerNonRetryableRejection(unittest.TestCase):
             finally:
                 orchestrator_module.OUTPUT_DIR = original_output
 
-        self.assertFalse(result.get("success"))
+        # v6.1.3 (maintainer 2026-04-19): premium 3D game rejection budget exhaustion
+        # now SOFT-PASSES (keeps pipeline alive) rather than hard-failing. The
+        # rejection details must remain visible via output_summary so the user
+        # sees what was flagged without losing the downstream deployer/tester.
+        self.assertTrue(result.get("success"))
         self.assertFalse(result.get("retryable", True))
-        self.assertIn("Delivery blocked", str(result.get("error", "")))
-        self.assertEqual(reviewer.status, TaskStatus.FAILED)
+        self.assertIn("premium 3D game", str(result.get("output", "")))
+        self.assertEqual(reviewer.status, TaskStatus.COMPLETED)
+        self.assertTrue(bool(getattr(reviewer, "warning", "")))
 
     def test_reviewer_rejection_requeues_patch_mode_builder_for_single_entry_game(self):
         class StubBridge:
@@ -15737,9 +16318,17 @@ class TestReviewerNonRetryableRejection(unittest.TestCase):
 
         self.assertFalse(result.get("success"))
         self.assertTrue(result.get("requeue_requested"))
-        self.assertIn("1", result.get("requeue_subtasks", []))
-        self.assertEqual(builder.status, TaskStatus.PENDING)
+        # v6.1.14h (maintainer 2026-04-20): on ROUND 1 reject, Evermind routes to
+        # polisher-patch branch (surgical file_ops edit) instead of the
+        # expensive builder rewrite. Polisher (id=2) + reviewer (id=3) are
+        # requeued, builder (id=1) stays COMPLETED. On round 2+ the builder
+        # comes back into scope if polisher can't fix it.
+        self.assertIn("2", result.get("requeue_subtasks", []))
+        self.assertIn("3", result.get("requeue_subtasks", []))
+        self.assertEqual(polisher.status, TaskStatus.PENDING)
         self.assertEqual(reviewer.status, TaskStatus.PENDING)
+        # Builder stays completed on round 1 — polisher handles the patch
+        self.assertEqual(builder.status, TaskStatus.COMPLETED)
 
     def test_collect_transitive_downstream_ids_is_order_independent(self):
         orch = Orchestrator(ai_bridge=None, executor=None)
@@ -16199,6 +16788,9 @@ class TestTrackerIntegrationInHandleFailure(unittest.TestCase):
         self.assertEqual(orch._run_failure_tracker.kind, "builder:empty_output")
 
     def test_builder_invalid_salvage_loop_fails_fast_in_handle_failure(self):
+        # v6.1.9: salvage loop now grants ONE direct_text rescue retry before
+        # fast-failing — the first call should return True (retry granted),
+        # and the second (post-rescue-attempt) should fail-fast.
         orch = Orchestrator(ai_bridge=SimpleNamespace(config={}), executor=None, on_event=None)
         subtask = SubTask(id="b2", agent_type="builder", description="build", max_retries=5)
         subtask.error = "builder direct-text max-stream timeout"
@@ -16211,11 +16803,20 @@ class TestTrackerIntegrationInHandleFailure(unittest.TestCase):
 
         orch.on_event = _noop
 
-        ok = asyncio.run(orch._handle_failure(subtask, plan, "kimi-coding", {}))
+        # First call: direct_text rescue granted
+        ok1 = asyncio.run(orch._handle_failure(subtask, plan, "kimi-coding", {}))
+        self.assertTrue(ok1, "first salvage should trigger direct_text rescue")
+        self.assertTrue(subtask.builder_force_direct_text)
+        self.assertTrue(subtask._direct_text_salvage_rescue_attempted)
 
-        self.assertFalse(ok)
+        # Simulate the rescue still failing
+        subtask.builder_invalid_salvage_tripped = True
+        subtask.builder_invalid_salvage_message = "Repeated invalid salvaged HTML loop detected."
+
+        # Second call: rescue already attempted → fast-fail
+        ok2 = asyncio.run(orch._handle_failure(subtask, plan, "kimi-coding", {}))
+        self.assertFalse(ok2)
         self.assertEqual(subtask.status, TaskStatus.FAILED)
-        self.assertEqual(subtask.retries, 0)
         self.assertIn("Repeated invalid salvaged HTML loop detected", subtask.error)
 
 

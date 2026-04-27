@@ -69,8 +69,8 @@ function defineEvermindTheme(monaco: typeof Monaco) {
         ],
         colors: {
             // Editor background — matches Evermind's #0d1117
-            'editor.background': '#0d1117',
-            'editor.foreground': '#e6edf3',
+            'editor.background': '#0E1013',
+            'editor.foreground': '#E4E6EB',
             // Selection
             'editor.selectionBackground': '#264f78',
             'editor.inactiveSelectionBackground': '#1d3b5c',
@@ -80,32 +80,32 @@ function defineEvermindTheme(monaco: typeof Monaco) {
             'editor.lineHighlightBorder': '#1e2430',
             // Line numbers
             'editorLineNumber.foreground': '#484f58',
-            'editorLineNumber.activeForeground': '#8b949e',
+            'editorLineNumber.activeForeground': '#9BA1AC',
             // Gutter
-            'editorGutter.background': '#0d1117',
+            'editorGutter.background': '#0E1013',
             // Cursor
-            'editorCursor.foreground': '#58a6ff',
+            'editorCursor.foreground': '#5B8CFF',
             // Bracket matching
             'editorBracketMatch.background': '#3b82f633',
             'editorBracketMatch.border': '#3b82f699',
             // Indent guides
-            'editorIndentGuide.background': '#21262d',
+            'editorIndentGuide.background': '#23262D',
             'editorIndentGuide.activeBackground': '#484f58',
             // Whitespace
-            'editorWhitespace.foreground': '#21262d',
+            'editorWhitespace.foreground': '#23262D',
             // Scrollbar
             'scrollbar.shadow': '#00000000',
             'scrollbarSlider.background': '#484f5833',
             'scrollbarSlider.hoverBackground': '#484f5866',
             'scrollbarSlider.activeBackground': '#484f5899',
             // Minimap
-            'minimap.background': '#0d1117',
+            'minimap.background': '#0E1013',
             'minimapSlider.background': '#484f5833',
             // Overview ruler
-            'editorOverviewRuler.border': '#0d1117',
+            'editorOverviewRuler.border': '#0E1013',
             // Widget (autocomplete, hover)
-            'editorWidget.background': '#161b22',
-            'editorWidget.border': '#30363d',
+            'editorWidget.background': '#16181C',
+            'editorWidget.border': '#32363F',
             // Find
             'editor.findMatchBackground': '#f2cc6044',
             'editor.findMatchHighlightBackground': '#f2cc6022',
@@ -174,11 +174,11 @@ function getMonacoLang(ext: string): string {
 function Breadcrumb({ path }: { path: string }) {
     const parts = path.replace(/^\//, '').split('/');
     return (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: '#8b949e', padding: '4px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: '#9BA1AC', padding: '4px 12px', borderBottom: '1px solid rgba(255,255,255,0.06)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
             {parts.map((p, i) => (
                 <span key={i} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                     {i > 0 && <span style={{ color: '#484f58' }}>/</span>}
-                    <span style={i === parts.length - 1 ? { color: '#e6edf3', fontWeight: 500 } : {}}>{p}</span>
+                    <span style={i === parts.length - 1 ? { color: '#E4E6EB', fontWeight: 500 } : {}}>{p}</span>
                 </span>
             ))}
         </div>
@@ -191,11 +191,29 @@ export default function CodeEditorPanel({
 }: CodeEditorPanelProps) {
     const [viewMode, setViewMode] = useState<'code' | 'diff'>('code');
     const [saving, setSaving] = useState(false);
+    // v6.2 (maintainer 2026-04-20): live preview toggle — shows iframe srcdoc
+    // alongside editor for .html files with 500ms debounce.
+    const [livePreviewOn, setLivePreviewOn] = useState(false);
+    const [debouncedContent, setDebouncedContent] = useState<string>('');
     const editorRef = useRef<editor.IStandaloneCodeEditor | null>(null);
     const activeFile = openFiles[activeFileIndex] || null;
     const hasDiff = activeFile?.originalContent != null;
     const effectiveMode = hasDiff && viewMode === 'diff' ? 'diff' : 'code';
+    const isHtmlFile = (activeFile?.ext || '').toLowerCase() === 'html';
     const t = useCallback((zh: string, en: string) => lang === 'zh' ? zh : en, [lang]);
+
+    // v6.2 live preview: debounce the active file content by 500ms and reflect
+    // to iframe srcdoc. Avoids re-renders on every keystroke.
+    useEffect(() => {
+        if (!livePreviewOn || !isHtmlFile || !activeFile) {
+            setDebouncedContent('');
+            return;
+        }
+        const handle = window.setTimeout(() => {
+            setDebouncedContent(activeFile.content || '');
+        }, 500);
+        return () => window.clearTimeout(handle);
+    }, [livePreviewOn, isHtmlFile, activeFile, activeFile?.content]);
 
     // Cmd+S save
     useEffect(() => {
@@ -261,7 +279,7 @@ export default function CodeEditorPanel({
 
     if (!openFiles.length) {
         return (
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#8b949e', background: '#0d1117' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#9BA1AC', background: '#0E1013' }}>
                 <div style={{ textAlign: 'center' }}>
                     <div style={{ fontSize: 32, opacity: 0.2, marginBottom: 12 }}>
                         <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
@@ -273,42 +291,119 @@ export default function CodeEditorPanel({
     }
 
     return (
-        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0d1117' }}>
-            {/* Tab bar */}
-            <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #21262d', background: '#161b22', flexShrink: 0, minHeight: 35 }}>
-                <div style={{ display: 'flex', flex: 1, overflow: 'auto' }}>
-                    {openFiles.map((f, i) => (
-                        <button key={f.path} onClick={() => onSwitchFile(i)} style={{
-                            display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px', fontSize: 11,
-                            border: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
-                            background: i === activeFileIndex ? '#0d1117' : '#161b22',
-                            color: i === activeFileIndex ? '#e6edf3' : '#8b949e',
-                            borderRight: '1px solid #21262d',
-                            borderTop: i === activeFileIndex ? '2px solid #58a6ff' : '2px solid transparent',
-                        }}>
-                            <span style={{ width: 6, height: 6, borderRadius: '50%', background: EXT_COLORS[normalizeExt(f.ext)] || '#8b949e' }} />
-                            {f.name}
-                            {f.modified && <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#e6edf3', opacity: 0.7 }} />}
-                            <span onClick={e => { e.stopPropagation(); onCloseFile(i); }}
-                                style={{ marginLeft: 4, opacity: 0.3, cursor: 'pointer', fontSize: 13 }}
-                                onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
-                                onMouseLeave={e => (e.currentTarget.style.opacity = '0.3')}>×</span>
-                        </button>
-                    ))}
+        <div style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#0E1013' }}>
+            {/* v5.5 Tab bar — VS Code-esque polish: gradient hover, animated active underline,
+                red-on-hover close button, subtle backdrop blur seam */}
+            <div style={{
+                display: 'flex', alignItems: 'center',
+                borderBottom: '1px solid #21262d',
+                background: '#16181C',
+                flexShrink: 0, minHeight: 36,
+                boxShadow: 'inset 0 -1px 0 rgba(255,255,255,0.02)',
+            }}>
+                <div style={{ display: 'flex', flex: 1, overflow: 'auto', scrollbarWidth: 'thin' }}>
+                    {openFiles.map((f, i) => {
+                        const active = i === activeFileIndex;
+                        return (
+                            <button key={f.path} onClick={() => onSwitchFile(i)}
+                                onMouseEnter={e => {
+                                    if (!active) e.currentTarget.style.background = 'rgba(255,255,255,0.04)';
+                                }}
+                                onMouseLeave={e => {
+                                    if (!active) e.currentTarget.style.background = 'transparent';
+                                }}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: 6,
+                                    padding: '7px 14px 6px', fontSize: 11,
+                                    border: 'none', cursor: 'pointer', whiteSpace: 'nowrap',
+                                    background: active ? '#0E1013' : 'transparent',
+                                    color: active ? '#E4E6EB' : '#9BA1AC',
+                                    borderRight: '1px solid #21262d',
+                                    position: 'relative',
+                                    transition: 'background 120ms ease, color 120ms ease',
+                                }}>
+                                <span style={{
+                                    width: 7, height: 7, borderRadius: '50%',
+                                    background: EXT_COLORS[normalizeExt(f.ext)] || '#9BA1AC',
+                                    boxShadow: active ? '0 0 6px rgba(88,166,255,0.6)' : 'none',
+                                }} />
+                                <span style={{ fontFamily: 'ui-monospace, SF Mono, Menlo, monospace' }}>{f.name}</span>
+                                {f.modified && (
+                                    <span title="Unsaved changes" style={{
+                                        width: 7, height: 7, borderRadius: '50%',
+                                        background: '#f0883e', boxShadow: '0 0 6px rgba(240,136,62,0.5)',
+                                    }} />
+                                )}
+                                <span onClick={e => { e.stopPropagation(); onCloseFile(i); }}
+                                    style={{
+                                        marginLeft: 4, padding: '0 4px', borderRadius: 4,
+                                        opacity: 0.35, cursor: 'pointer', fontSize: 13, lineHeight: 1,
+                                        transition: 'opacity 120ms ease, background 120ms ease, color 120ms ease',
+                                    }}
+                                    onMouseEnter={e => {
+                                        e.currentTarget.style.opacity = '1';
+                                        e.currentTarget.style.background = 'rgba(248,81,73,0.18)';
+                                        e.currentTarget.style.color = '#f85149';
+                                    }}
+                                    onMouseLeave={e => {
+                                        e.currentTarget.style.opacity = '0.35';
+                                        e.currentTarget.style.background = 'transparent';
+                                        e.currentTarget.style.color = 'inherit';
+                                    }}>×</span>
+                                {/* Animated active underline */}
+                                {active && (
+                                    <span style={{
+                                        position: 'absolute', left: 8, right: 8, bottom: 0,
+                                        height: 2, borderRadius: 2,
+                                        background: 'linear-gradient(90deg, transparent, #58a6ff 15%, #58a6ff 85%, transparent)',
+                                        boxShadow: '0 0 8px rgba(88,166,255,0.5)',
+                                    }} />
+                                )}
+                            </button>
+                        );
+                    })}
                 </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 4, padding: '0 8px', flexShrink: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 10px', flexShrink: 0 }}>
                     {hasDiff && ['code', 'diff'].map(m => (
                         <button key={m} onClick={() => setViewMode(m as 'code' | 'diff')} style={{
-                            fontSize: 10, padding: '2px 8px', borderRadius: 3, border: 'none', cursor: 'pointer',
-                            background: effectiveMode === m ? 'rgba(88,166,255,0.2)' : 'rgba(255,255,255,0.04)',
-                            color: effectiveMode === m ? '#58a6ff' : '#8b949e',
-                        }}>{m === 'code' ? 'Code' : 'Diff'}</button>
+                            fontSize: 10, padding: '3px 10px', borderRadius: 5,
+                            border: `1px solid ${effectiveMode === m ? 'rgba(88,166,255,0.3)' : 'transparent'}`,
+                            cursor: 'pointer',
+                            background: effectiveMode === m ? 'rgba(88,166,255,0.15)' : 'transparent',
+                            color: effectiveMode === m ? '#5B8CFF' : '#9BA1AC',
+                            fontWeight: 500, letterSpacing: 0.3,
+                            transition: 'all 120ms ease',
+                        }}>{m === 'code' ? '◼︎ Code' : '⇄ Diff'}</button>
                     ))}
+                    {isHtmlFile && (
+                        <button
+                            onClick={() => setLivePreviewOn(v => !v)}
+                            title={t('实时预览（500ms 防抖）', 'Live preview (500ms debounce)')}
+                            style={{
+                                fontSize: 10, padding: '3px 10px', borderRadius: 5,
+                                border: `1px solid ${livePreviewOn ? 'rgba(168,85,247,0.4)' : 'transparent'}`,
+                                cursor: 'pointer',
+                                background: livePreviewOn ? 'rgba(168,85,247,0.18)' : 'transparent',
+                                color: livePreviewOn ? '#d4a8ff' : '#9BA1AC',
+                                fontWeight: 500, letterSpacing: 0.3,
+                                transition: 'all 120ms ease',
+                            }}
+                        >
+                            {livePreviewOn ? '● Preview' : '○ Preview'}
+                        </button>
+                    )}
                     {activeFile?.modified && (
-                        <button onClick={() => { if (activeFile && onSaveFile) { setSaving(true); onSaveFile(activeFile).finally(() => setSaving(false)); } }}
-                            style={{ fontSize: 10, padding: '3px 10px', borderRadius: 3, border: 'none', cursor: 'pointer',
-                                background: '#238636', color: '#fff', fontWeight: 600 }}>
-                            {saving ? '...' : 'Save'}
+                        <button
+                            onClick={() => { if (activeFile && onSaveFile) { setSaving(true); onSaveFile(activeFile).finally(() => setSaving(false)); } }}
+                            title="⌘S / Ctrl+S"
+                            style={{
+                                fontSize: 10, padding: '4px 12px', borderRadius: 5,
+                                border: '1px solid rgba(35,134,54,0.4)', cursor: 'pointer',
+                                background: 'linear-gradient(180deg, #2ea043, #238636)',
+                                color: '#fff', fontWeight: 600, letterSpacing: 0.3,
+                                boxShadow: '0 1px 2px rgba(0,0,0,0.3), inset 0 1px 0 rgba(255,255,255,0.1)',
+                            }}>
+                            {saving ? '⟳ Saving…' : '✓ Save  ⌘S'}
                         </button>
                     )}
                 </div>
@@ -317,23 +412,42 @@ export default function CodeEditorPanel({
             {activeFile && <Breadcrumb path={activeFile.path} />}
 
             {/* Editor content */}
-            <div style={{ flex: 1, minHeight: 0 }}>
+            <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'row' }}>
                 {activeFile && effectiveMode === 'code' && (
-                    <MonacoEditor
-                        key={activeFile.path}
-                        language={getMonacoLang(activeFile.ext)}
-                        value={activeFile.content}
-                        theme={EVERMIND_THEME_NAME}
-                        beforeMount={handleBeforeMount}
-                        options={editorOptions}
-                        onChange={handleEditorChange}
-                        onMount={handleEditorMount}
-                        loading={
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#8b949e', background: '#0d1117' }}>
-                                <span style={{ fontSize: 12 }}>{t('编辑器加载中...', 'Loading editor...')}</span>
-                            </div>
-                        }
-                    />
+                    <div style={{ flex: livePreviewOn && isHtmlFile ? 1 : 'auto', minWidth: 0, width: livePreviewOn && isHtmlFile ? undefined : '100%' }}>
+                        <MonacoEditor
+                            key={activeFile.path}
+                            language={getMonacoLang(activeFile.ext)}
+                            value={activeFile.content}
+                            theme={EVERMIND_THEME_NAME}
+                            beforeMount={handleBeforeMount}
+                            options={editorOptions}
+                            onChange={handleEditorChange}
+                            onMount={handleEditorMount}
+                            loading={
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#9BA1AC', background: '#0E1013' }}>
+                                    <span style={{ fontSize: 12 }}>{t('编辑器加载中...', 'Loading editor...')}</span>
+                                </div>
+                            }
+                        />
+                    </div>
+                )}
+                {activeFile && effectiveMode === 'code' && livePreviewOn && isHtmlFile && (
+                    <div style={{ flex: 1, minWidth: 0, borderLeft: '1px solid rgba(168,85,247,0.35)', background: '#fff', position: 'relative' }}>
+                        <div style={{
+                            position: 'absolute', top: 6, right: 10, zIndex: 2,
+                            fontSize: 10, color: '#666', background: 'rgba(255,255,255,0.88)',
+                            padding: '2px 8px', borderRadius: 4, pointerEvents: 'none',
+                        }}>
+                            {t('实时预览 · 500ms 防抖', 'Live · 500ms debounce')}
+                        </div>
+                        <iframe
+                            title={t('实时预览', 'Live Preview')}
+                            srcDoc={debouncedContent}
+                            sandbox="allow-scripts allow-forms allow-pointer-lock allow-popups allow-modals"
+                            style={{ width: '100%', height: '100%', border: 'none', background: '#fff' }}
+                        />
+                    </div>
                 )}
                 {activeFile && effectiveMode === 'diff' && (
                     <DiffEditor
@@ -344,7 +458,7 @@ export default function CodeEditorPanel({
                         beforeMount={handleBeforeMount}
                         options={diffOptions}
                         loading={
-                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#8b949e', background: '#0d1117' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#9BA1AC', background: '#0E1013' }}>
                                 <span style={{ fontSize: 12 }}>{t('差异视图加载中...', 'Loading diff view...')}</span>
                             </div>
                         }

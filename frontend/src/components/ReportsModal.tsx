@@ -400,7 +400,7 @@ export default function ReportsModal({
                                         width: '100%', display: 'block', textAlign: 'left',
                                         marginBottom: 6, padding: '7px 8px',
                                         borderColor: isActive ? 'var(--blue)' : 'var(--glass-border)',
-                                        background: isActive ? 'rgba(79,143,255,0.08)' : undefined,
+                                        background: isActive ? 'rgba(91,140,255,0.08)' : undefined,
                                         overflow: 'hidden',
                                     }}
                                 >

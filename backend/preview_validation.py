@@ -670,6 +670,22 @@ def _collect_defined_global_function_names(html: str, source_file: Optional[Path
     return names
 
 
+_INLINE_HANDLER_BUILTIN_WHITELIST = {
+    # Window APIs that work without `window.` prefix in inline handlers.
+    "scrollto", "scrollby", "scroll", "alert", "confirm", "prompt",
+    "open", "close", "focus", "blur", "print", "stop",
+    "settimeout", "cleartimeout", "setinterval", "clearinterval",
+    "requestanimationframe", "cancelanimationframe",
+    "history.back", "history.forward", "history.go",
+    # Document APIs
+    "getelementbyid", "queryselector", "queryselectorall",
+    # Common JS event helpers
+    "preventdefault", "stoppropagation", "stopimmediatepropagation",
+    # Number/Math/JSON globals (used in inline calculators)
+    "parseint", "parsefloat", "isnan", "isfinite",
+}
+
+
 def inspect_inline_handler_contract(html: str, source_file: Optional[Path] = None) -> Dict[str, Any]:
     errors: List[str] = []
     warnings: List[str] = []
@@ -691,7 +707,15 @@ def inspect_inline_handler_contract(html: str, source_file: Optional[Path] = Non
                     continue
                 referenced_handlers.append(fn_name)
                 error_key = (attr_name, fn_name.lower())
-                if fn_name.lower() in defined_lookup or error_key in seen_errors:
+                # v7.1k (maintainer 2026-04-26): whitelist Window/Document/timer
+                # builtins that work without explicit `window.` prefix.
+                # `scrollTo()` etc. were false-positive failing the validator
+                # and forcing builder to retry the entire 30KB HTML write.
+                if (
+                    fn_name.lower() in defined_lookup
+                    or fn_name.lower() in _INLINE_HANDLER_BUILTIN_WHITELIST
+                    or error_key in seen_errors
+                ):
                     continue
                 seen_errors.add(error_key)
                 errors.append(f"Inline event handler {attr_name} references undefined function {fn_name}()")

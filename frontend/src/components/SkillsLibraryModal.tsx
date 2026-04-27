@@ -274,7 +274,7 @@ export default function SkillsLibraryModal({ open, onClose, lang }: SkillsLibrar
                                         </div>
                                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                                             {item.tags.map((tag) => (
-                                                <span key={tag} style={{ fontSize: 10, padding: '3px 7px', borderRadius: 999, background: 'rgba(79,143,255,0.12)', color: 'var(--blue)' }}>
+                                                <span key={tag} style={{ fontSize: 10, padding: '3px 7px', borderRadius: 999, background: 'rgba(91,140,255,0.12)', color: 'var(--blue)' }}>
                                                     {tag}
                                                 </span>
                                             ))}

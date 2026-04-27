@@ -391,7 +391,7 @@ export default function RunTimeline({
                                                             {ne.retry_count > 0 && <span style={chipStyle()}>RETRY {ne.retry_count}</span>}
                                                             {ne.retried_from_id && <span style={chipStyle()}>{tr('重试副本', 'Retried')}</span>}
                                                             {(ne.artifact_ids?.length || 0) > 0 && (
-                                                                <span style={chipStyle('#4f8fff', 'rgba(79, 143, 255, 0.1)')}>
+                                                                <span style={chipStyle('#5B8CFF', 'rgba(91, 140, 255, 0.1)')}>
                                                                     ARTIFACTS {ne.artifact_ids.length}
                                                                 </span>
                                                             )}

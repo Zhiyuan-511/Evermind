@@ -101,8 +101,8 @@ export default function RunCompletionCard({
                     <span style={{
                         fontSize: 9, fontWeight: 700,
                         padding: '3px 8px', borderRadius: 999,
-                        background: 'rgba(79,143,255,0.12)', color: '#60a5fa',
-                        border: '1px solid rgba(79,143,255,0.2)',
+                        background: 'rgba(91,140,255,0.12)', color: '#60a5fa',
+                        border: '1px solid rgba(91,140,255,0.2)',
                     }}>
                         {modeLabel}
                     </span>
@@ -231,7 +231,7 @@ export default function RunCompletionCard({
                             planner: '#60a5fa', analyst: '#f59e0b', builder: '#a78bfa',
                             merger: '#ec4899', reviewer: '#06b6d4', tester: '#22c55e',
                             deployer: '#f97316', debugger: '#ef4444', scribe: '#8b5cf6',
-                            uidesign: '#fb7185', imagegen: '#eab308', polisher: '#c084fc',
+                            uidesign: '#fb7185', imagegen: '#eab308', polisher: '#c084fc', patcher: '#facc15',
                         };
                         const agentColor = agentColors[st.agent] || '#6b7280';
                         return (

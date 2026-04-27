@@ -75,7 +75,7 @@ function PreviewCenter({
                 padding: 32,
                 color: 'var(--text3)',
                 background:
-                    'radial-gradient(circle at 20% 20%, rgba(79,143,255,0.08), transparent 34%), linear-gradient(180deg, var(--canvas-bg) 0%, color-mix(in srgb, var(--canvas-bg) 78%, black 22%) 100%)',
+                    'radial-gradient(circle at 20% 20%, rgba(91,140,255,0.08), transparent 34%), linear-gradient(180deg, var(--canvas-bg) 0%, color-mix(in srgb, var(--canvas-bg) 78%, black 22%) 100%)',
             }}>
                 <div style={{
                     width: 'min(420px, 90%)',
@@ -118,9 +118,9 @@ function PreviewCenter({
                         <div style={{
                             height: 120,
                             borderRadius: 12,
-                            border: '1px dashed rgba(79,143,255,0.28)',
+                            border: '1px dashed rgba(91,140,255,0.28)',
                             background:
-                                'linear-gradient(180deg, rgba(79,143,255,0.08), rgba(79,143,255,0.02)), repeating-linear-gradient(90deg, transparent, transparent 22px, rgba(255,255,255,0.03) 22px, rgba(255,255,255,0.03) 23px)',
+                                'linear-gradient(180deg, rgba(91,140,255,0.08), rgba(91,140,255,0.02)), repeating-linear-gradient(90deg, transparent, transparent 22px, rgba(255,255,255,0.03) 22px, rgba(255,255,255,0.03) 23px)',
                         }} />
                         <div style={{ display: 'grid', gap: 8 }}>
                             <div style={{ width: '62%', height: 10, borderRadius: 999, background: 'rgba(255,255,255,0.06)' }} />
@@ -143,7 +143,7 @@ function PreviewCenter({
                         <span style={{
                             width: 8, height: 8, borderRadius: '50%',
                             background: 'var(--blue)',
-                            boxShadow: '0 0 8px rgba(79,143,255,0.45)',
+                            boxShadow: '0 0 8px rgba(91,140,255,0.45)',
                             animation: 'previewPulse 1.5s infinite',
                         }} />
                     )}
@@ -248,7 +248,7 @@ function PreviewCenter({
                         padding: '2px 8px',
                         borderRadius: 999,
                         border: '1px solid rgba(255,255,255,0.08)',
-                        background: running ? 'rgba(79,143,255,0.10)' : 'rgba(64,214,124,0.10)',
+                        background: running ? 'rgba(91,140,255,0.10)' : 'rgba(64,214,124,0.10)',
                         color: running ? 'var(--blue)' : 'var(--green)',
                         fontSize: 10,
                         fontWeight: 600,
@@ -259,7 +259,7 @@ function PreviewCenter({
                             height: 6,
                             borderRadius: '50%',
                             background: running ? 'var(--blue)' : 'var(--green)',
-                            boxShadow: running ? '0 0 8px rgba(79,143,255,0.45)' : '0 0 8px rgba(64,214,124,0.35)',
+                            boxShadow: running ? '0 0 8px rgba(91,140,255,0.45)' : '0 0 8px rgba(64,214,124,0.35)',
                             animation: running ? 'previewPulse 1.5s infinite' : 'none',
                         }} />
                         {running ? tr('实时', 'Live') : tr('稳定', 'Stable')}

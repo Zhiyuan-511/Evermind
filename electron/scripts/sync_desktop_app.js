@@ -141,18 +141,34 @@ const sourceApp = resolveSourceApp();
 const stagingRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'evermind-sync-'));
 const stagingApp = path.join(stagingRoot, 'Evermind.app');
 
+// v5.8.6: sign with hardened runtime + entitlements so the Python subprocess
+// inherits TCC grants (see electron/build/entitlements.mac.plist). Plain
+// ad-hoc without these caused re-prompts every new pipeline run.
+const entitlements = path.join(__dirname, '..', 'build', 'entitlements.mac.plist');
+const signIdentity = process.env.EVERMIND_CODESIGN_IDENTITY || '-';
+const signArgs = (target) => [
+  '--force',
+  '--deep',
+  '--timestamp=none',
+  '--options=runtime',
+  '--entitlements', entitlements,
+  '-s', signIdentity,
+  target,
+];
+
 try {
   console.log(`[sync_desktop_app] using base ${distApp}`);
   console.log(`[sync_desktop_app] overlaying resources from ${sourceApp}`);
+  console.log(`[sync_desktop_app] signing with identity=${signIdentity === '-' ? 'ad-hoc' : signIdentity}`);
   execFileSync('ditto', [distApp, stagingApp], { stdio: 'inherit' });
   overlayResources(sourceApp, stagingApp);
   execFileSync('xattr', ['-cr', stagingApp], { stdio: 'inherit' });
-  execFileSync('codesign', ['--force', '--deep', '-s', '-', stagingApp], { stdio: 'inherit' });
+  execFileSync('codesign', signArgs(stagingApp), { stdio: 'inherit' });
 
   fs.rmSync(desktopApp, { recursive: true, force: true });
   execFileSync('ditto', [stagingApp, desktopApp], { stdio: 'inherit' });
   execFileSync('xattr', ['-cr', desktopApp], { stdio: 'inherit' });
-  execFileSync('codesign', ['--force', '--deep', '-s', '-', desktopApp], { stdio: 'inherit' });
+  execFileSync('codesign', signArgs(desktopApp), { stdio: 'inherit' });
   verifyBackendMirror(sourceApp, desktopApp);
   verifyFrontendMirror(sourceApp, desktopApp);
 } catch (error) {

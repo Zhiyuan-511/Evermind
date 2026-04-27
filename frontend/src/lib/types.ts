@@ -216,10 +216,11 @@ export interface NodeTypeInfo {
 }
 
 export const NODE_TYPES: Record<string, NodeTypeInfo> = {
-    router: { icon: 'RT', color: '#4f8fff', label_en: 'Router', label_zh: '路由器', desc_en: 'Intake & Dispatch', desc_zh: '接收分发', inputs: [{ id: 'task', label: 'Task' }], outputs: [{ id: 'dispatch', label: 'Dispatch' }] },
+    router: { icon: 'RT', color: '#5B8CFF', label_en: 'Router', label_zh: '路由器', desc_en: 'Intake & Dispatch', desc_zh: '接收分发', inputs: [{ id: 'task', label: 'Task' }], outputs: [{ id: 'dispatch', label: 'Dispatch' }] },
     planner: { icon: 'PL', color: '#a855f7', label_en: 'Planner', label_zh: '规划师', desc_en: 'Architecture', desc_zh: '架构设计', inputs: [{ id: 'goal', label: 'Goal' }], outputs: [{ id: 'plan', label: 'Plan' }] },
     builder: { icon: 'BD', color: '#40d67c', label_en: 'Builder', label_zh: '构建者', desc_en: 'Engineer', desc_zh: '代码工程', inputs: [{ id: 'spec', label: 'Spec' }], outputs: [{ id: 'code', label: 'Code' }] },
     polisher: { icon: 'PF', color: '#f59e0b', label_en: 'Polisher', label_zh: '精修师', desc_en: 'Premium Finish', desc_zh: '高级润色', inputs: [{ id: 'draft', label: 'Draft' }], outputs: [{ id: 'refined', label: 'Refined' }] },
+    patcher: { icon: 'PT', color: '#facc15', label_en: 'Patcher', label_zh: '补丁师', desc_en: 'Surgical Udiff Patch', desc_zh: '外科手术式补丁', inputs: [{ id: 'issues', label: 'Issues' }], outputs: [{ id: 'patched', label: 'Patched' }] },
     tester: { icon: 'QA', color: '#ff9a40', label_en: 'Tester', label_zh: '测试员', desc_en: 'QA', desc_zh: '质量测试', inputs: [{ id: 'code', label: 'Code' }], outputs: [{ id: 'report', label: 'Report' }] },
     reviewer: { icon: 'RV', color: '#06b6d4', label_en: 'Reviewer', label_zh: '审查员', desc_en: 'Gatekeeper', desc_zh: '质量审核', inputs: [{ id: 'input', label: 'Input' }], outputs: [{ id: 'verdict', label: 'Verdict' }] },
     deployer: { icon: 'DP', color: '#ec4899', label_en: 'Deployer', label_zh: '部署员', desc_en: 'DevOps', desc_zh: '运维部署', inputs: [{ id: 'artifact', label: 'Artifact' }], outputs: [{ id: 'url', label: 'URL' }] },

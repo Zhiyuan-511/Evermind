@@ -8,6 +8,34 @@
 
 const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const { spawn, execSync } = require('child_process');
+
+// v6.4.8 (maintainer 2026-04-22): CDP port is OPT-IN ONLY.
+// Rationale: previously we auto-opened port 19222 for Chrome DevTools Protocol
+// so the Python browser_use runner could attach to Evermind's embedded
+// Chromium. In practice this made the AI agent hijack the user's visible
+// browser — every AI navigate/click yanked the tab the user was on. AI
+// automation must drive its own browser context, separate from the user's.
+//
+// To re-enable (e.g. for internal QA tooling that genuinely needs to inspect
+// the running page), set EVERMIND_ENABLE_CDP=1 before launching the app.
+const EVERMIND_CDP_PORT = '19222';
+if (String(process.env.EVERMIND_ENABLE_CDP || '').trim().toLowerCase() === '1') {
+    try {
+        app.commandLine.appendSwitch('remote-debugging-port', EVERMIND_CDP_PORT);
+        app.commandLine.appendSwitch('remote-allow-origins', '*');
+        process.env.EVERMIND_BROWSER_CDP_URL = `http://127.0.0.1:${EVERMIND_CDP_PORT}`;
+        // Also set the attach flag so browser_use_runner actually uses it
+        // when the user explicitly enabled CDP.
+        process.env.EVERMIND_BROWSER_ATTACH_CDP = '1';
+        console.log(`[Electron] CDP enabled on port ${EVERMIND_CDP_PORT} (EVERMIND_ENABLE_CDP=1).`);
+    } catch (e) {
+        console.warn('[Electron] failed to enable remote debugging:', e);
+    }
+} else {
+    // Make sure no stale CDP env slips through from a previous launch.
+    delete process.env.EVERMIND_BROWSER_CDP_URL;
+    delete process.env.EVERMIND_BROWSER_ATTACH_CDP;
+}
 const crypto = require('crypto');
 const path = require('path');
 const http = require('http');
@@ -821,24 +849,19 @@ function startBackend(pythonCmd) {
             '/tmp',
         ].join(','),
         SHELL_TIMEOUT: '30',
-        EVERMIND_ORCH_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '360',
-        EVERMIND_BUILDER_FIRST_WRITE_TIMEOUT_SEC: '150',
-        EVERMIND_BUILDER_3D_FIRST_WRITE_SEC: '300',
-        EVERMIND_BUILDER_MULTI_PAGE_FIRST_WRITE_SEC: '180',
-        EVERMIND_BUILDER_RETRY_FIRST_WRITE_SEC: '180',
-        EVERMIND_BUILDER_REPAIR_WRITE_TIMEOUT_SEC: '150',
-        EVERMIND_BUILDER_STREAM_STALL_SEC: '300',
-        EVERMIND_BUILDER_MULTI_PAGE_STREAM_STALL_SEC: '180',
-        EVERMIND_BUILDER_RETRY_STREAM_STALL_SEC: '150',
+        // v6.1.2: REMOVED the V4.9.5 "SPEED mode" env cocktail. Those values
+        // (150-420s) hard-capped builder timeouts and made Kimi's 10-min
+        // streaming get chopped mid-file, looping fallbacks for 30+ minutes.
+        // Python code's defaults (600s base + deep-mode floor 1800s) are the
+        // right numbers for 2026 deep-reasoning models. Fast users can still
+        // set the env explicitly from the shell if they really need speed-mode.
+        // Kept only the non-timeout knobs that have nothing to do with the bug.
         EVERMIND_BUILDER_FORCE_TEXT_STREAK: '5',
         EVERMIND_BUILDER_GAME_FORCE_TEXT_STREAK: '6',
         EVERMIND_BUILDER_MULTI_PAGE_FORCE_TEXT_STREAK: '3',
         EVERMIND_BUILDER_RETRY_FORCE_TEXT_STREAK: '2',
         EVERMIND_BUILDER_GAME_RETRY_FORCE_TEXT_STREAK: '4',
         EVERMIND_BUILDER_MAX_TOOL_ITERS: '12',
-        EVERMIND_BUILDER_POST_WRITE_IDLE_TIMEOUT_SEC: '120',
-        EVERMIND_BUILDER_DIRECT_TEXT_NO_OUTPUT_TIMEOUT_SEC: '240',
-        EVERMIND_BUILDER_DIRECT_TEXT_MAX_STREAM_TIMEOUT_SEC: '420',
         EVERMIND_PROGRESS_HEARTBEAT_SEC: '10',
         // Ensure Python can find user-installed packages
         PYTHONPATH: BACKEND_DIR,
@@ -905,10 +928,16 @@ function startFrontend() {
         return;
     }
 
+    // v7.4: Bind frontend to loopback only. Was '0.0.0.0' which exposed the
+    // local Next.js server to anyone on the same wifi — they could open the
+    // UI, trigger run_goal, read workspace files, hit git/publish endpoints.
+    // The frontend is for the desktop user only; outside-host access is a
+    // straight-up RCE/data-exfil channel.
     const env = {
         ...process.env,
         PORT: String(FRONTEND_PORT),
-        HOSTNAME: '0.0.0.0',
+        HOSTNAME: '127.0.0.1',
+        HOST: '127.0.0.1',
         NODE_ENV: hasStandalone ? 'production' : 'development',
         NEXT_PUBLIC_API_URL: `http://127.0.0.1:${BACKEND_PORT}`,
         NEXT_PUBLIC_WS_URL: `ws://127.0.0.1:${BACKEND_PORT}/ws`,
@@ -1000,8 +1029,12 @@ function createMainWindow() {
     });
 
     // §2.1: Pass instance type to frontend so UI can display DEV/PACKAGED badge
+    // v7.2 (maintainer 2026-04-26): land on the Launchpad (`/`) instead of jumping
+    // straight into `/editor`, so users see the recent-tasks list + Open
+    // Workspace / Browse Templates / Clone Repository CTAs first. The
+    // launchpad routes them to /editor when they pick a workspace/template.
     const envTag = IS_DEV ? 'dev' : 'packaged';
-    mainWindow.loadURL(`http://127.0.0.1:${FRONTEND_PORT}/editor?env=${envTag}`);
+    mainWindow.loadURL(`http://127.0.0.1:${FRONTEND_PORT}/?env=${envTag}`);
 
     mainWindow.once('ready-to-show', () => {
         if (splashWindow && !splashWindow.isDestroyed()) {
@@ -1041,9 +1074,52 @@ function createMainWindow() {
         }
     });
 
-    // Open external links in browser
+    // v6.0: keep Evermind preview URLs inside the app instead of bouncing out
+    // to the system Chrome. Previously every deployer/tester "open preview"
+    // call hit Electron's default setWindowOpenHandler → shell.openExternal,
+    // which broke the in-app experience (AI cursor overlay disappears, user
+    // loses context). Now we detect Evermind-local URLs (127.0.0.1:8765 and
+    // file:// paths under /tmp/evermind_output) and let Electron open them
+    // in a new in-app window; true external URLs still go to the system
+    // browser.
+    // v6.1.2: keep ALL URLs (including external github.com / docs sites) inside
+    // an Evermind-owned BrowserWindow instead of popping up the system default
+    // browser. Previous behaviour shelled out every external URL to the OS
+    // browser ("Google Test" window user saw), which was the root cause of:
+    //   (a) analyst's github.com fetch launching system Chrome
+    //   (b) tester/reviewer preview URL flashing then a fresh Chromium popping
+    // Only truly dangerous protocols (mailto:, tel:, chrome://) still leak to
+    // the OS — these aren't pages we want inside Evermind anyway.
     mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-        if (url.startsWith('http')) shell.openExternal(url);
+        try {
+            const u = String(url || '');
+            const parsed = new URL(u);
+            const safeInApp = (
+                parsed.protocol === 'http:'
+                || parsed.protocol === 'https:'
+                || parsed.protocol === 'file:'
+            );
+            if (safeInApp) {
+                return {
+                    action: 'allow',
+                    overrideBrowserWindowOptions: {
+                        width: 1280,
+                        height: 820,
+                        x: 760,
+                        y: 80,
+                        title: 'Evermind — AI Browser',
+                        webPreferences: {
+                            contextIsolation: true,
+                            sandbox: true,
+                        },
+                    },
+                };
+            }
+            // mailto:/tel:/chrome:// etc. — hand off to OS
+            if (u.startsWith('http')) shell.openExternal(u);
+        } catch (_e) {
+            if (String(url || '').startsWith('http')) shell.openExternal(url);
+        }
         return { action: 'deny' };
     });
 

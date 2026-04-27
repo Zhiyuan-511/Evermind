@@ -96,8 +96,8 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
         style.id = STYLE_ID;
         style.textContent = `
             @keyframes executingPulse {
-                0%, 100% { box-shadow: 0 0 12px rgba(79, 143, 255, 0.15); }
-                50% { box-shadow: 0 0 20px rgba(79, 143, 255, 0.25); }
+                0%, 100% { box-shadow: 0 0 12px rgba(91, 140, 255, 0.15); }
+                50% { box-shadow: 0 0 20px rgba(91, 140, 255, 0.25); }
             }
         `;
         document.head.appendChild(style);
@@ -316,11 +316,11 @@ export default function TaskBoardModal({ open, onClose, lang, sessionId, runRepo
                                                     style={{
                                                         padding: '10px 12px',
                                                         borderRadius: 10,
-                                                        background: isExecuting ? 'rgba(79, 143, 255, 0.04)' : 'var(--surface)',
+                                                        background: isExecuting ? 'rgba(91, 140, 255, 0.04)' : 'var(--surface)',
                                                         border: isSelected
                                                             ? '1.5px solid rgba(168, 85, 247, 0.5)'
                                                             : isExecuting
-                                                                ? '1px solid rgba(79, 143, 255, 0.35)'
+                                                                ? '1px solid rgba(91, 140, 255, 0.35)'
                                                                 : '1px solid var(--glass-border)',
                                                         cursor: 'pointer',
                                                         transition: 'all 0.15s',

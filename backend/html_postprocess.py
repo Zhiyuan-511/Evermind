@@ -1380,6 +1380,327 @@ def _postprocess_inline_script_blocks(html: str) -> str:
     return _INLINE_SCRIPT_BLOCK_RE.sub(_replace, html)
 
 
+_SCRIPT_BLOCK_RE = re.compile(r"<script\b([^>]*)>([\s\S]*?)</script>", re.IGNORECASE)
+_SCRIPT_SRC_ATTR_RE = re.compile(r"""\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
+_IIFE_HEAD_RE = re.compile(
+    r"\A\s*[;!+~-]?\s*\(\s*(?:async\s+)?(?:function\s*\w*\s*\([^)]*\)|\([^)]*\)\s*=>|\w+\s*=>)\s*\{",
+    re.IGNORECASE,
+)
+_IIFE_TAIL_RE = re.compile(r"\}\s*\)\s*\(\s*\)\s*;?\s*\Z")
+_HANDLER_ATTR_RE = re.compile(
+    r"""\bon[a-z]+\s*=\s*(?P<q>["'])(?P<expr>[^"']*)(?P=q)""",
+    re.IGNORECASE,
+)
+_HANDLER_IDENT_RE = re.compile(r"\b([A-Za-z_$][\w$]*)\s*\(")
+_FN_DECL_RE = re.compile(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(")
+# Common browser globals — do NOT treat these as custom handlers.
+_RESERVED_HANDLER_IDENTS = {
+    "alert", "confirm", "prompt", "setTimeout", "setInterval", "requestAnimationFrame",
+    "console", "window", "document", "event", "this", "return", "true", "false",
+    "null", "undefined", "parseInt", "parseFloat", "String", "Number", "Boolean",
+    "Array", "Object", "Date", "Math", "JSON", "Promise", "new", "typeof",
+    "if", "else", "for", "while", "function", "void",
+}
+_LIBRARY_FINGERPRINTS = (
+    ("three", re.compile(r"(?:^|/)three(?:\.min)?\.js\b|/three(?:@[^/]+)?/build/", re.IGNORECASE)),
+    ("howler", re.compile(r"(?:^|/)howler(?:\.core)?(?:\.min)?\.js\b", re.IGNORECASE)),
+    ("phaser", re.compile(r"(?:^|/)phaser(?:-[\w.]+)?(?:\.min)?\.js\b", re.IGNORECASE)),
+    ("pixi", re.compile(r"(?:^|/)pixi(?:\.min)?\.js\b", re.IGNORECASE)),
+    ("matter", re.compile(r"(?:^|/)matter(?:\.min)?\.js\b", re.IGNORECASE)),
+    ("gsap", re.compile(r"(?:^|/)gsap(?:-[\w.]+)?(?:\.min)?\.js\b", re.IGNORECASE)),
+    ("chart", re.compile(r"(?:^|/)chart(?:\.umd)?(?:\.min)?\.js\b", re.IGNORECASE)),
+    ("d3", re.compile(r"(?:^|/)d3(?:\.v\d+)?(?:\.min)?\.js\b", re.IGNORECASE)),
+    ("tone", re.compile(r"(?:^|/)Tone(?:\.min)?\.js\b", re.IGNORECASE)),
+)
+
+
+def _dedup_library_scripts(html: str) -> str:
+    """v6.1.13 (maintainer 2026-04-20): merger sometimes concatenates script tags
+    for the same library from both builders (local + CDN). Browser loads
+    both, warns `WARNING: Multiple instances of Three.js being imported`,
+    and game state corrupts. Keep the FIRST occurrence per library (prefer
+    local `./_evermind_runtime/` path if one exists, otherwise first seen).
+    Applies to every task type — not games-only — since websites can also
+    double-load d3/chart/gsap.
+    """
+    text = str(html or "")
+    if not text:
+        return html
+
+    matches = list(_SCRIPT_BLOCK_RE.finditer(text))
+    if not matches:
+        return text
+
+    # lib -> index of keeper match
+    keep_by_lib: dict[str, int] = {}
+    drop_indices: set[int] = set()
+    for idx, m in enumerate(matches):
+        attrs = m.group(1) or ""
+        body = m.group(2) or ""
+        src_match = _SCRIPT_SRC_ATTR_RE.search(attrs)
+        if not src_match or body.strip():
+            continue
+        src = src_match.group(1).strip()
+        for lib, pat in _LIBRARY_FINGERPRINTS:
+            if not pat.search(src):
+                continue
+            if lib not in keep_by_lib:
+                keep_by_lib[lib] = idx
+            else:
+                prev = keep_by_lib[lib]
+                prev_src = _SCRIPT_SRC_ATTR_RE.search(matches[prev].group(1) or "")
+                prev_is_local = bool(prev_src and prev_src.group(1).startswith(("./_evermind_runtime/", "/_evermind_runtime/", "_evermind_runtime/")))
+                cur_is_local = src.startswith(("./_evermind_runtime/", "/_evermind_runtime/", "_evermind_runtime/"))
+                if cur_is_local and not prev_is_local:
+                    drop_indices.add(prev)
+                    keep_by_lib[lib] = idx
+                else:
+                    drop_indices.add(idx)
+            break
+
+    if not drop_indices:
+        return text
+
+    pieces: list[str] = []
+    last = 0
+    dropped = 0
+    for idx, m in enumerate(matches):
+        if idx in drop_indices:
+            pieces.append(text[last:m.start()])
+            trailing_nl = m.end()
+            if trailing_nl < len(text) and text[trailing_nl] == "\n":
+                trailing_nl += 1
+            last = trailing_nl
+            dropped += 1
+        else:
+            pieces.append(text[last:m.end()])
+            last = m.end()
+    pieces.append(text[last:])
+    result = "".join(pieces)
+    logger.info(
+        "Post-processed HTML: removed %s duplicate <script src> tag(s) for library dedup",
+        dropped,
+    )
+    return result
+
+
+_IMG_TAG_RE = re.compile(r"<img\b([^>]*)>", re.IGNORECASE)
+_IMG_SRC_ATTR_RE = re.compile(r"""\bsrc\s*=\s*(?P<q>["'])(?P<src>[^"']*)(?P=q)""", re.IGNORECASE)
+_IMG_ONERROR_ATTR_RE = re.compile(r"""\bonerror\s*=\s*(["'])[^"']*\1""", re.IGNORECASE)
+_IMG_STYLE_ATTR_RE = re.compile(r"""\bstyle\s*=\s*(?P<q>["'])(?P<val>[^"']*)(?P=q)""", re.IGNORECASE)
+
+
+def _inject_image_fallback_guards(html: str) -> str:
+    """v6.1.14g (maintainer 2026-04-20): reviewer keeps rejecting over broken
+    images (naturalWidth===0, empty src, no fallback). Builder freely invents
+    Unsplash URLs and most 404 on first load. Postprocess HARDENS every
+    `<img>` tag:
+
+    1. Empty `src=""` → replace with an SVG data-URI neutral placeholder so
+       the browser NEVER resolves empty src to the page URL.
+    2. Missing `onerror` → inject a handler that hides the img + reveals a
+       gradient fallback on its parent (via CSS class toggle).
+    3. Inject a global CSS block that shows a tasteful gradient placeholder
+       on any `<img>` whose parent has `.img-loaded-fail` class.
+
+    Applies to ALL task_types because every output may have images. Pure
+    deterministic fix — no AI call.
+    """
+    text = str(html or "")
+    if not text or "<img" not in text.lower():
+        return html
+
+    # 1. Inject the fallback CSS block once (idempotent)
+    fallback_css = (
+        "\n<style data-evermind-img-fallback=\"1\">\n"
+        "  img[data-evermind-fallback-target]:is([src=''], [src$='/']) { opacity: 0; }\n"
+        "  .img-loaded-fail {\n"
+        "    background: linear-gradient(135deg, rgba(180,175,255,0.18), rgba(200,195,215,0.28));\n"
+        "    position: relative;\n"
+        "  }\n"
+        "  .img-loaded-fail > img { opacity: 0 !important; }\n"
+        "  .img-loaded-fail::after {\n"
+        "    content: '';\n"
+        "    position: absolute; inset: 0;\n"
+        "    background-image:\n"
+        "      radial-gradient(circle at 25% 35%, rgba(255,255,255,0.35) 2px, transparent 3px),\n"
+        "      radial-gradient(circle at 75% 65%, rgba(255,255,255,0.20) 1px, transparent 2px),\n"
+        "      linear-gradient(135deg, rgba(180,175,255,0.10) 0%, rgba(200,195,215,0.18) 100%);\n"
+        "    background-size: 24px 24px, 18px 18px, 100% 100%;\n"
+        "    pointer-events: none;\n"
+        "  }\n"
+        "</style>\n"
+    )
+    if 'data-evermind-img-fallback=\"1\"' not in text:
+        if "</head>" in text:
+            text = text.replace("</head>", fallback_css + "</head>", 1)
+        else:
+            text = fallback_css + text
+
+    # 2. Walk every <img> tag
+    edits: list[tuple[int, int, str]] = []
+    fixed_src = 0
+    injected_onerror = 0
+    for match in _IMG_TAG_RE.finditer(text):
+        attrs = match.group(1) or ""
+        start, end = match.span()
+
+        if "data-evermind-fallback-target" in attrs:
+            continue  # already processed
+
+        new_attrs = attrs
+
+        # 2a. Fix empty src
+        src_match = _IMG_SRC_ATTR_RE.search(new_attrs)
+        if src_match:
+            src_val = src_match.group("src").strip()
+            if not src_val or src_val in ("#", "/"):
+                # replace empty src with 1x1 transparent SVG data URI
+                placeholder = (
+                    "data:image/svg+xml;utf8,"
+                    "%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%201%201%22%3E%3C/svg%3E"
+                )
+                new_attrs = (
+                    new_attrs[: src_match.start("src")]
+                    + placeholder
+                    + new_attrs[src_match.end("src"):]
+                )
+                fixed_src += 1
+        else:
+            # no src attr at all — add placeholder to prevent browser weirdness
+            placeholder = (
+                "data:image/svg+xml;utf8,"
+                "%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20viewBox%3D%220%200%201%201%22%3E%3C/svg%3E"
+            )
+            new_attrs = new_attrs + f' src="{placeholder}"'
+            fixed_src += 1
+
+        # 2b. Inject onerror if missing
+        if not _IMG_ONERROR_ATTR_RE.search(new_attrs):
+            # Mark parent with .img-loaded-fail class so CSS fallback shows;
+            # also hide the img itself.
+            onerror_handler = (
+                "this.parentElement&&this.parentElement.classList.add('img-loaded-fail');"
+                "this.style.display='none';"
+            )
+            new_attrs = new_attrs + f" onerror=\"{onerror_handler}\""
+            injected_onerror += 1
+
+        # 2c. Mark as processed
+        new_attrs = new_attrs + ' data-evermind-fallback-target="1"'
+
+        if new_attrs != attrs:
+            edits.append((start, end, f"<img{new_attrs}>"))
+
+    if not edits:
+        return text
+
+    out: list[str] = []
+    cursor = 0
+    for start, end, replacement in edits:
+        out.append(text[cursor:start])
+        out.append(replacement)
+        cursor = end
+    out.append(text[cursor:])
+    result = "".join(out)
+
+    if fixed_src or injected_onerror:
+        logger.info(
+            "Post-processed HTML: image fallback guards — fixed_empty_src=%s, injected_onerror=%s",
+            fixed_src, injected_onerror,
+        )
+    return result
+
+
+def _inject_iife_handler_exports(html: str) -> str:
+    """v6.1.13 (maintainer 2026-04-20): REAL INCIDENT — merger shipped a 3D
+    shooter where `onclick="startGame()"` threw `ReferenceError: startGame
+    is not defined` because the 47 KB game logic sat inside `(function() {
+    ... })()` but the button called through inline HTML attribute into
+    global scope. Auto-fix: inside every inline IIFE that declares a
+    function whose name matches any HTML handler attribute, insert
+    `window.NAME = NAME;` right before the IIFE closer so inline handlers
+    can reach it.
+    """
+    text = str(html or "")
+    if not text:
+        return html
+
+    # 1) collect handler identifiers referenced in HTML attributes
+    handler_ids: set[str] = set()
+    for attr_match in _HANDLER_ATTR_RE.finditer(text):
+        expr = attr_match.group("expr") or ""
+        for ident_match in _HANDLER_IDENT_RE.finditer(expr):
+            name = ident_match.group(1)
+            if name and name not in _RESERVED_HANDLER_IDENTS:
+                handler_ids.add(name)
+    if not handler_ids:
+        return text
+
+    # 2) walk inline script blocks; for each IIFE, export handler fns
+    edits: list[tuple[int, int, str]] = []  # (start, end, replacement)
+    injected = 0
+    for match in _SCRIPT_BLOCK_RE.finditer(text):
+        attrs = match.group(1) or ""
+        body = match.group(2) or ""
+        if _SCRIPT_SRC_ATTR_RE.search(attrs):
+            continue  # external script, skip
+        if not body.strip():
+            continue
+        if not _IIFE_HEAD_RE.search(body):
+            continue
+        if not _IIFE_TAIL_RE.search(body):
+            continue
+        # Find function declarations inside the IIFE
+        declared = {m.group(1) for m in _FN_DECL_RE.finditer(body)}
+        needed = declared & handler_ids
+        if not needed:
+            continue
+        # Skip identifiers already explicitly exported
+        def _already_exported(name: str) -> bool:
+            return bool(
+                re.search(
+                    rf"\b(?:window|globalThis|self)\s*\.\s*{re.escape(name)}\s*=",
+                    body,
+                )
+            )
+        needed = {n for n in needed if not _already_exported(n)}
+        if not needed:
+            continue
+        # Inject export lines just before the IIFE closer
+        tail_match = _IIFE_TAIL_RE.search(body)
+        if not tail_match:
+            continue
+        insert_at = tail_match.start()
+        exports = "\n/* evermind-postprocess: scope bridge */\n" + "".join(
+            f"try {{ window.{n} = {n}; }} catch(_) {{}}\n" for n in sorted(needed)
+        )
+        new_body = body[:insert_at] + exports + body[insert_at:]
+        block_start = match.start()
+        block_end = match.end()
+        new_block = f"<script{attrs}>{new_body}</script>"
+        edits.append((block_start, block_end, new_block))
+        injected += len(needed)
+
+    if not edits:
+        return text
+
+    edits.sort()
+    out: list[str] = []
+    cursor = 0
+    for start, end, replacement in edits:
+        out.append(text[cursor:start])
+        out.append(replacement)
+        cursor = end
+    out.append(text[cursor:])
+    result = "".join(out)
+    logger.info(
+        "Post-processed HTML: injected %s window.* scope-bridge export(s) for inline IIFE handler(s)",
+        injected,
+    )
+    return result
+
+
 def _has_global_function_definition(html: str, fn_name: str) -> bool:
     escaped = re.escape(str(fn_name or "").strip())
     if not escaped:
@@ -1550,9 +1871,103 @@ def postprocess_javascript(js: str) -> str:
     for identifier in ("nav", "overlay"):
         js = _guard_optional_js_hook_lines(js, identifier)
 
+    # v6.4.18 (maintainer 2026-04-22): auto-balance parens/braces before handing
+    # to preview_validation. Observed 2026-04-22 17:33: gpt-5.4/kimi both
+    # emitted `forEach(...) => { }` with an orphan statement outside the
+    # closure, leaving `)` > `(` by one or `}` > `{` by one. Node --check
+    # flagged "missing ) after argument list" → 10-min builder retry. We
+    # now silently trim/append 1-3 bracket delta so the site is at least
+    # syntactically loadable; reviewer can still catch semantic issues.
+    js = _auto_balance_js_brackets(js)
+
     if js != original:
         logger.info("Post-processed JavaScript: applied safety normalizations")
     return js
+
+
+def _auto_balance_js_brackets(js: str) -> str:
+    """v6.4.18 — conservative auto-balance for JavaScript bracket mismatches.
+
+    Strategy: strip strings / comments / regex literals so bracket counting
+    is accurate on real code. If the imbalance is ≤3 characters, append or
+    trim the missing/extra bracket at the end of the source. Larger deltas
+    are left alone — they indicate a deeper structural bug that should not
+    be masked by mechanical balancing.
+    """
+    if not js or not js.strip():
+        return js
+
+    # Mask strings, template literals, line comments, block comments, and
+    # regex literals with spaces so we count only real brackets.
+    _masked_pattern = re.compile(
+        r"/\*.*?\*/"                     # /* block comment */
+        r"|//[^\n]*"                     # // line comment
+        r"|'(?:\\.|[^'\\])*'"            # 'single quoted'
+        r'|"(?:\\.|[^"\\])*"'            # "double quoted"
+        r"|`(?:\\.|[^`\\])*`"            # `template literal`
+        r"|/(?:\\.|[^/\\\n])+/[gimsuy]*",  # /regex/flags (naive; safe-ish for us)
+        re.DOTALL,
+    )
+    masked = _masked_pattern.sub(lambda m: " " * len(m.group(0)), js)
+
+    open_p = masked.count("(")
+    close_p = masked.count(")")
+    open_b = masked.count("{")
+    close_b = masked.count("}")
+    open_sq = masked.count("[")
+    close_sq = masked.count("]")
+
+    fixed = js
+
+    # Parens
+    if close_p > open_p:
+        delta = close_p - open_p
+        if delta <= 3:
+            for _ in range(delta):
+                idx = fixed.rfind(")")
+                if idx < 0:
+                    break
+                fixed = fixed[:idx] + fixed[idx + 1:]
+            logger.info("Post-processed JavaScript: trimmed %d orphan ')' chars", delta)
+    elif open_p > close_p:
+        delta = open_p - close_p
+        if delta <= 3:
+            fixed = fixed + (")" * delta)
+            logger.info("Post-processed JavaScript: appended %d missing ')' chars", delta)
+
+    # Braces
+    if close_b > open_b:
+        delta = close_b - open_b
+        if delta <= 3:
+            for _ in range(delta):
+                idx = fixed.rfind("}")
+                if idx < 0:
+                    break
+                fixed = fixed[:idx] + fixed[idx + 1:]
+            logger.info("Post-processed JavaScript: trimmed %d orphan '}' chars", delta)
+    elif open_b > close_b:
+        delta = open_b - close_b
+        if delta <= 3:
+            fixed = fixed + ("}" * delta)
+            logger.info("Post-processed JavaScript: appended %d missing '}' chars", delta)
+
+    # Square brackets
+    if close_sq > open_sq:
+        delta = close_sq - open_sq
+        if delta <= 3:
+            for _ in range(delta):
+                idx = fixed.rfind("]")
+                if idx < 0:
+                    break
+                fixed = fixed[:idx] + fixed[idx + 1:]
+            logger.info("Post-processed JavaScript: trimmed %d orphan ']' chars", delta)
+    elif open_sq > close_sq:
+        delta = open_sq - close_sq
+        if delta <= 3:
+            fixed = fixed + ("]" * delta)
+            logger.info("Post-processed JavaScript: appended %d missing ']' chars", delta)
+
+    return fixed
 
 
 def postprocess_generated_text(text: str, filename: str = "", task_type: str = "website") -> str:
@@ -1874,6 +2289,16 @@ def postprocess_html(html: str, task_type: str = "website") -> str:
     html = _add_class_aliases(html, "page-transition-overlay", ["page-transition"])
     html = _add_class_aliases(html, "mobile-menu-toggle", ["nav-toggle"])
     html = _postprocess_inline_script_blocks(html)
+    # v6.1.13 (maintainer 2026-04-20): universal post-merge safety — applies to
+    # every task type. Duplicate library scripts and IIFE-sealed handler
+    # functions break games, webapps, slides, dashboards alike.
+    html = _dedup_library_scripts(html)
+    html = _inject_iife_handler_exports(html)
+    # v6.1.14g (maintainer 2026-04-20): hardened image fallback — reviewer was
+    # rejecting repeatedly because builder invented Unsplash URLs that 404.
+    # Every <img> now gets an onerror handler + empty-src guard + CSS
+    # gradient placeholder on parent. Purely deterministic — no AI call.
+    html = _inject_image_fallback_guards(html)
     if task_type == "game":
         html = _inject_missing_game_menu_handler_shims(html)
     # 8. Fix unconstrained SVG: add width/height to inline SVGs that only have viewBox

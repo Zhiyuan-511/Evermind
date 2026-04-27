@@ -1,3 +1,10 @@
+---
+name: godogen-tps-control-sanity-lock
+description: Camera/input contract for 3D third-person and shooter games
+activation_node_types: builder, reviewer, tester, analyst, debugger
+activation_triggers: 3d, three.js, shooter, fps, tps, third-person, first-person, camera, wasd, pointer lock, yaw, pitch, 射击, 第三人称, 第一人称, 镜头, 视角
+---
+
 GODOGEN TPS CONTROL SANITY LOCK
 
 Use this when a browser game includes third-person / camera-relative movement, drag-look, or shooter controls.

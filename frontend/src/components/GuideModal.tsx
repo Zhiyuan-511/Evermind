@@ -4,6 +4,7 @@ interface GuideModalProps {
     open: boolean;
     onClose: () => void;
     lang: 'en' | 'zh';
+    onShowWelcomeWizard?: () => void;
 }
 
 const SHORTCUTS = [
@@ -82,7 +83,7 @@ const RECOMMENDED_PRESETS = [
     },
 ] as const;
 
-export default function GuideModal({ open, onClose, lang }: GuideModalProps) {
+export default function GuideModal({ open, onClose, lang, onShowWelcomeWizard }: GuideModalProps) {
     if (!open) return null;
 
     const t = (en: string, zh: string) => lang === 'zh' ? zh : en;
@@ -95,6 +96,22 @@ export default function GuideModal({ open, onClose, lang }: GuideModalProps) {
                     <button className="modal-close" onClick={onClose}>✕</button>
                 </div>
                 <div className="modal-body guide-body">
+                    {onShowWelcomeWizard && (
+                        <div style={{ marginBottom: 16 }}>
+                            <button
+                                onClick={() => { onShowWelcomeWizard(); onClose(); }}
+                                style={{
+                                    padding: '8px 16px', borderRadius: 8,
+                                    border: '1px solid rgba(168, 85, 247, 0.4)',
+                                    background: 'linear-gradient(135deg, rgba(168,85,247,0.15), rgba(88,140,255,0.1))',
+                                    color: '#d4a8ff', fontSize: 12, fontWeight: 600,
+                                    cursor: 'pointer',
+                                }}
+                            >
+                                ⚡ {t('Show Welcome Wizard (pick a quick-start template)', '打开欢迎向导（挑选快速模板）')}
+                            </button>
+                        </div>
+                    )}
                     {/* Getting Started */}
                     <div className="guide-section">
                         <h4>{t('Getting Started', '开始使用')}</h4>

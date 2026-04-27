@@ -55,6 +55,33 @@ BUILT_IN_TEMPLATES: Dict[str, Dict] = {
             {"key": "debugger", "label": "Debugger",  "depends_on": ["tester"]},
         ],
     },
+    "ultra": {
+        "id": "ultra",
+        "label": "Ultra (顶级玩家，3-4h~1day)",
+        "description": (
+            "Product-grade long-task mode: 4 builder 并行 + 多轮 review "
+            "(max 5 reject) + 多文件项目脚手架 + 图片/资源 + 打包部署。"
+            "时长预期 3-4 小时到一天。只在 cli_mode.enabled + cli_mode.ultra_mode 同时为 True 时启用。"
+        ),
+        "nodes": [
+            {"key": "planner",  "label": "Planner",   "depends_on": []},
+            {"key": "analyst",  "label": "Analyst",   "depends_on": ["planner"]},
+            {"key": "uidesign", "label": "UI Designer", "depends_on": ["analyst"]},
+            {"key": "scribe",   "label": "Scribe (spec 文档)", "depends_on": ["analyst"]},
+            # 4 builder 并行：frontend / backend-ish / assets / tests-or-docs
+            {"key": "builder1", "label": "Builder 1 (主页 / Landing)",    "depends_on": ["uidesign", "scribe"]},
+            {"key": "builder2", "label": "Builder 2 (分页 / sub-routes)", "depends_on": ["uidesign", "scribe"]},
+            {"key": "builder3", "label": "Builder 3 (共享组件/样式)",     "depends_on": ["uidesign", "scribe"]},
+            {"key": "builder4", "label": "Builder 4 (交互/资源/脚本)",    "depends_on": ["uidesign", "scribe"]},
+            {"key": "merger",   "label": "Merger (4-way)", "depends_on": ["builder1", "builder2", "builder3", "builder4"]},
+            {"key": "polisher", "label": "Polisher",  "depends_on": ["merger"]},
+            {"key": "reviewer", "label": "Reviewer",  "depends_on": ["polisher"]},
+            {"key": "patcher",  "label": "Patcher",   "depends_on": ["reviewer"]},
+            {"key": "deployer", "label": "Deployer",  "depends_on": ["reviewer", "patcher"]},
+            {"key": "tester",   "label": "Tester",    "depends_on": ["reviewer", "deployer"]},
+            {"key": "debugger", "label": "Debugger",  "depends_on": ["tester"]},
+        ],
+    },
     "optimize": {
         "id": "optimize",
         "label": "Optimize (4 nodes)",
@@ -94,9 +121,13 @@ _DIFFICULTY_ALIAS: Dict[str, str] = {
     "simple": "simple",
     "standard": "standard",
     "pro": "pro",
+    "ultra": "ultra",        # v7.1 (maintainer 2026-04-24) 顶级玩家长任务模式
     "fast": "simple",
     "balanced": "standard",
     "advanced": "pro",
+    "product": "ultra",      # 用户可能说"product mode"
+    "ultra_mode": "ultra",
+    "long_task": "ultra",
 }
 
 _PRO_VISUAL_COMPLEXITY_RE = re.compile(
@@ -111,7 +142,17 @@ _PRO_CONTENT_COMPLEXITY_RE = re.compile(
 )
 _PRO_ASSET_HEAVY_RE = re.compile(
     r"(插画|illustration|hero image|lookbook|封面|海报|poster|concept art|concept sheet|turnaround|storyboard|"
-    r"素材包|asset pack|概念资产包|概念包|概念图包|角色设定|怪物设定|武器设定|场景设定|render)",
+    r"素材包|asset pack|概念资产包|概念包|概念图包|角色设定|怪物设定|武器设定|场景设定|render|"
+    # v7.3.6 (maintainer 2026-04-26): include "建模" / "modeling" / "精灵图" /
+    # commercial-grade game cues so 2D PvZ-style games that explicitly
+    # request crafted enemy / plant / character art trigger the imagegen +
+    # spritesheet + assetimport pipeline. Previously these went on the bare
+    # "no-asset" 2D path and the builder had to draw every sprite via raw
+    # CSS/canvas, losing visual fidelity.
+    r"角色建模|怪物建模|monster\s*model|character\s*model|enemy\s*model|"
+    r"sprite\s*sheet|精灵图|游戏素材|game\s*art|character\s*art|game\s*asset|"
+    r"商业级游戏|commercial-?grade\s*game|premium\s*game|aaa\s*game|"
+    r"建模精致|精致建模|精美建模|精致美术|精美美术)",
     re.IGNORECASE,
 )
 _OPTIMIZE_SMALL_PATCH_RE = re.compile(
@@ -259,8 +300,13 @@ def pro_template_profile(goal: str = "") -> Dict[str, Any]:
             "include_asset_pipeline": True,
             "include_polisher": False,
             "parallel_builders": True,
-            "builder_count": 3,
-            "reason": "asset_heavy_game_parallel_integrator",
+            # v7.1i (maintainer 2026-04-26): was 3 (forced game>=3 branch in
+            # _parallel_builder_task_descriptions which split builder1=core
+            # / builder2=support module → kimi-k2.6 wouldn't obey "no index.html"
+            # → retry storm 12+min). NE creation only makes builder1+builder2
+            # anyway, so use 2 for consistency.
+            "builder_count": 2,
+            "reason": "asset_heavy_game_parallel",
         }
 
     if asset_heavy:
@@ -283,9 +329,12 @@ def pro_template_profile(goal: str = "") -> Dict[str, Any]:
             "include_asset_pipeline": False,
             "include_polisher": False,
             "parallel_builders": True,
-            "builder_count": 3,
+            # v7.1i (maintainer 2026-04-26): same fix as asset_heavy_game above —
+            # was 3, NE only creates 2, kimi unable to obey support-only
+            # constraint, retry storm. Standard pro game uses 2 builders.
+            "builder_count": 2,
             "scribe_blocks_builders": True,
-            "reason": "game_parallel_integrator",
+            "reason": "game_parallel",
         }
 
     # Games and other architecture_complex types inherently benefit from a
@@ -354,7 +403,13 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
     task_type = task_classifier.classify(str(goal or "")).task_type if str(goal or "").strip() else "website"
     parallel_builders = bool(profile.get("parallel_builders", True))
     builder_count = max(1, int(profile.get("builder_count", 2) or 2))
-    sequential_game_builders = task_type != "website" and builder_count <= 2
+    # v7.1i (maintainer 2026-04-26): WAS `task_type != "website" and builder_count <= 2`
+    # which forced game/tool/etc 2-builder pro plans into SERIAL mode (builder2
+    # depends_on builder1). This contradicted the "real parallelism" design
+    # where builder1 writes index.html + builder2 writes game_features.js
+    # concurrently and merger SKIP-LLM auto-wires them.
+    # Now: only force serial if user explicitly opts out of parallel_builders.
+    sequential_game_builders = (not parallel_builders) and task_type != "website" and builder_count <= 2
     if profile["include_asset_pipeline"]:
         if parallel_builders and builder_count >= 3 and task_type != "website":
             nodes = [
@@ -575,6 +630,33 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         ])
 
     nodes = _enforce_dual_builder_merger(nodes)
+    # v6.3 (maintainer 2026-04-21): every pro branch gets a conditional patcher
+    # node that sits after reviewer. It stays dormant on reviewer APPROVE
+    # (orchestrator._execute_subtask_inner short-circuits it via the
+    # `_reviewer_requeues==0` gate) and only fires on reviewer REJECT with
+    # ≤6 localizable issues (orchestrator._patcher_can_handle_reviewer_issues).
+    # This previously lived only in orchestrator SubTask construction, so the
+    # canvas UI that reads `nodes` here never rendered it — user saw the
+    # pipeline run without a visible patcher even though the executor was
+    # ready for one. Adding it here keeps UI preview + actual execution in
+    # sync without altering downstream dependencies.
+    _has_reviewer = any(n.get("key") == "reviewer" for n in nodes)
+    _has_patcher = any(n.get("key") == "patcher" for n in nodes)
+    if _has_reviewer and not _has_patcher:
+        # v6.4 (maintainer 2026-04-21): patcher is a canvas-parallel sibling of
+        # reviewer (both depend on the last build/polish node) so the UI
+        # shows them side-by-side. Runtime execution order is still
+        # reviewer → patcher (enforced in orchestrator SubTask construction:
+        # patcher.depends_on=[reviewer_id]). This "visual parallel, runtime
+        # serial" split matches the user's mental model — patcher is a
+        # conditional repair branch, not a post-reviewer downstream.
+        _reviewer_node = next((n for n in nodes if n.get("key") == "reviewer"), {})
+        _patcher_deps = list(_reviewer_node.get("depends_on") or ["reviewer"])
+        nodes.append({
+            "key": "patcher",
+            "label": "补丁师",
+            "depends_on": _patcher_deps,
+        })
 
     _logger.info(
         "_build_pro_template: node_count=%d reason=%s node_keys=[%s]",
@@ -585,17 +667,17 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
 
     nodes = _prepend_planner_node(nodes)
 
-    label = "Pro (9-12 nodes)" if not goal else f"Pro ({len(nodes)} nodes)"
+    label = "Pro (10-13 nodes)" if not goal else f"Pro ({len(nodes)} nodes)"
     description = (
-        "Deep mode: planner → analyst → optional design/content/asset prep → one to three builders → optional polisher → reviewer + deployer → tester → debugger"
+        "Deep mode: planner → analyst → optional design/content/asset prep → one to three builders → optional polisher → reviewer + deployer → tester → debugger → patcher (conditional)"
     )
     return {
         "id": "pro",
         "label": label,
         "description": description,
         "nodes": nodes,
-        "node_count_min": 9,
-        "node_count_max": 12,
+        "node_count_min": 10,
+        "node_count_max": 13,
         "profile": profile,
     }
 
@@ -782,6 +864,63 @@ def _build_optimize_template(goal: str = "") -> Dict[str, Any]:
     }
 
 
+def _build_ultra_template_for_goal(goal: str) -> Dict:
+    """v7.1i (maintainer 2026-04-25): adapt the 4-builder labels to task type.
+    Hardcoded "主页 / 分页 / 共享组件 / 交互资源" labels confused the LLM
+    when goal was a 3D shooter game (or any non-website project) — Builder 1
+    saw "主页 / Landing" and the prompt header said "3D shooting game"
+    in the same call. Now we pick lane labels by goal classification.
+    """
+    base = BUILT_IN_TEMPLATES.get("ultra")
+    if not base:
+        return base or {}
+    profile = task_classifier.classify(goal or "")
+    task_type = profile.task_type
+    # Lane labels per task type. Each is a (label_zh, label_en) tuple style
+    # baked into one string. The LLM-facing "owns this lane" prompt comes
+    # from orchestrator._builder_focus_map(); these labels are mainly for
+    # UI display and prompt header context.
+    LANE_LABELS = {
+        "game": [
+            "Builder 1 (引擎/渲染/相机)",
+            "Builder 2 (玩家控制/输入)",
+            "Builder 3 (敌人 AI/武器/物理)",
+            "Builder 4 (HUD/关卡/资源)",
+        ],
+        "tool": [
+            "Builder 1 (核心交互逻辑)",
+            "Builder 2 (UI/页面)",
+            "Builder 3 (数据/状态/持久化)",
+            "Builder 4 (集成/打磨)",
+        ],
+        "creative": [
+            "Builder 1 (主体作品)",
+            "Builder 2 (变体/章节)",
+            "Builder 3 (装饰/动效)",
+            "Builder 4 (集成/打磨)",
+        ],
+        # default = website (existing labels)
+        "website": [
+            "Builder 1 (主页 / Landing)",
+            "Builder 2 (分页 / sub-routes)",
+            "Builder 3 (共享组件/样式)",
+            "Builder 4 (交互/资源/脚本)",
+        ],
+    }
+    labels = LANE_LABELS.get(task_type) or LANE_LABELS["website"]
+    # Deep-copy nodes and replace builder1-4 labels.
+    new_nodes: List[Dict[str, Any]] = []
+    for n in base["nodes"]:
+        nn = dict(n)
+        key = nn.get("key", "")
+        if key in ("builder1", "builder2", "builder3", "builder4"):
+            idx = int(key[-1]) - 1
+            if 0 <= idx < len(labels):
+                nn["label"] = labels[idx]
+        new_nodes.append(nn)
+    return {**base, "nodes": new_nodes}
+
+
 def get_template(template_id: str, goal: str = "") -> Optional[Dict]:
     """Look up a template by ID or difficulty alias."""
     normalized = _DIFFICULTY_ALIAS.get(template_id, template_id)
@@ -789,6 +928,8 @@ def get_template(template_id: str, goal: str = "") -> Optional[Dict]:
         return _build_pro_template(goal)
     if normalized == "optimize":
         return _build_optimize_template(goal)
+    if normalized == "ultra":
+        return _build_ultra_template_for_goal(goal)
     return BUILT_IN_TEMPLATES.get(normalized)
 
 

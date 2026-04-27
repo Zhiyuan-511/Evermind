@@ -522,3 +522,224 @@ def build_repo_context(node_type: str, prompt_source: str, config: Optional[Dict
         "entrypoints": list(snapshot.get("entrypoints", [])),
         "languages": list(snapshot.get("languages", [])),
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# v6.5 Aider-style repo map: tree-sitter + NetworkX personalized PageRank
+# Falls back to regex-only extraction if tree_sitter_languages isn't available.
+# Ref: https://aider.chat/2023/10/22/repomap.html
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    from tree_sitter_languages import get_language, get_parser  # type: ignore
+    _HAS_TREE_SITTER = True
+except Exception:
+    _HAS_TREE_SITTER = False
+
+try:
+    import networkx as _nx  # type: ignore
+    _HAS_NETWORKX = True
+except Exception:
+    _HAS_NETWORKX = False
+
+_TS_LANG_BY_SUFFIX = {
+    ".py": "python", ".ts": "typescript", ".tsx": "tsx",
+    ".js": "javascript", ".jsx": "javascript", ".go": "go",
+    ".rs": "rust", ".java": "java", ".rb": "ruby", ".php": "php",
+}
+
+_DEF_QUERIES = {
+    "python": "(function_definition name:(identifier)@name) (class_definition name:(identifier)@name)",
+    "javascript": "(function_declaration name:(identifier)@name) (class_declaration name:(identifier)@name) (method_definition name:(property_identifier)@name)",
+    "typescript": "(function_declaration name:(identifier)@name) (class_declaration name:(type_identifier)@name) (method_signature name:(property_identifier)@name) (interface_declaration name:(type_identifier)@name)",
+    "tsx": "(function_declaration name:(identifier)@name) (class_declaration name:(type_identifier)@name) (method_definition name:(property_identifier)@name)",
+    "go": "(function_declaration name:(identifier)@name) (method_declaration name:(field_identifier)@name) (type_spec name:(type_identifier)@name)",
+    "rust": "(function_item name:(identifier)@name) (struct_item name:(type_identifier)@name) (impl_item type:(type_identifier)@name)",
+    "java": "(method_declaration name:(identifier)@name) (class_declaration name:(identifier)@name)",
+}
+
+_IDENT_RE = re.compile(r"\b([A-Z_][A-Za-z0-9_]{2,}|[a-z_][A-Za-z0-9_]{3,})\b")
+_DEF_REGEX = {
+    ".py": re.compile(r"^\s*(?:def|class)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M),
+    ".js": re.compile(r"^(?:export\s+)?(?:async\s+)?(?:function|class)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M),
+    ".ts": re.compile(r"^(?:export\s+)?(?:async\s+)?(?:function|class|interface|type)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M),
+    ".go": re.compile(r"^func\s+(?:\([^)]+\)\s+)?([A-Za-z_][A-Za-z0-9_]*)", re.M),
+    ".rs": re.compile(r"^\s*(?:pub\s+)?(?:fn|struct|enum|trait)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M),
+}
+for _alias in (".jsx",):
+    _DEF_REGEX[_alias] = _DEF_REGEX[".js"]
+for _alias in (".tsx",):
+    _DEF_REGEX[_alias] = _DEF_REGEX[".ts"]
+
+
+def _extract_defs_refs(path: Path, text: str) -> Tuple[List[str], List[str]]:
+    """Return (definitions, references) for a source file."""
+    suffix = path.suffix.lower()
+    defs: List[str] = []
+    if _HAS_TREE_SITTER and suffix in _TS_LANG_BY_SUFFIX:
+        lang_name = _TS_LANG_BY_SUFFIX[suffix]
+        try:
+            parser = get_parser(lang_name)
+            tree = parser.parse(text.encode("utf8", errors="ignore"))
+            query_src = _DEF_QUERIES.get(lang_name, "")
+            if query_src:
+                query = get_language(lang_name).query(query_src)
+                for node, _cap in query.captures(tree.root_node):
+                    try:
+                        defs.append(node.text.decode("utf8", errors="ignore"))
+                    except Exception:
+                        pass
+        except Exception:
+            defs = []
+    if not defs:
+        rx = _DEF_REGEX.get(suffix)
+        if rx is not None:
+            defs = rx.findall(text)
+    # references: every identifier-like token in the file, minus its own defs.
+    all_idents = _IDENT_RE.findall(text)
+    def_set = set(defs)
+    refs = [ident for ident in all_idents if ident not in def_set]
+    return defs, refs
+
+
+def rank_repo_symbols(
+    repo_root: Path | str,
+    chat_files: Optional[Iterable[str]] = None,
+    mentioned_idents: Optional[Iterable[str]] = None,
+    token_budget: int = 1024,
+    max_files: int = 400,
+) -> List[Dict[str, object]]:
+    """
+    Aider-style personalized PageRank over a DiGraph of files→referenced-defs.
+
+    Returns a list of {"file": relpath, "name": ident, "score": float, "line": 0}
+    entries, truncated to roughly `token_budget` tokens (≈4 chars each).
+    """
+    root = Path(repo_root)
+    if not root.is_dir():
+        return []
+    chat_set = {str(p) for p in (chat_files or [])}
+    mention_set = {str(i) for i in (mentioned_idents or [])}
+
+    files_seen = 0
+    file_defs: Dict[str, List[str]] = {}
+    file_refs: Dict[str, List[str]] = {}
+    def_to_files: Dict[str, List[str]] = {}
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in IGNORED_DIRS]
+        for fname in filenames:
+            suffix = Path(fname).suffix.lower()
+            if suffix not in LANGUAGE_BY_SUFFIX:
+                continue
+            full = Path(dirpath) / fname
+            try:
+                if full.stat().st_size > 512 * 1024:
+                    continue
+                text = full.read_text(encoding="utf8", errors="ignore")
+            except Exception:
+                continue
+            rel = _safe_rel(full, root)
+            defs, refs = _extract_defs_refs(full, text)
+            if not defs and not refs:
+                continue
+            file_defs[rel] = defs
+            file_refs[rel] = refs
+            for d in defs:
+                def_to_files.setdefault(d, []).append(rel)
+            files_seen += 1
+            if files_seen >= max_files:
+                break
+        if files_seen >= max_files:
+            break
+
+    if not file_defs:
+        return []
+
+    if not _HAS_NETWORKX:
+        # Fallback: naive score = (# incoming refs) * mention boost.
+        scored: List[Tuple[str, str, float]] = []
+        for ident, defining_files in def_to_files.items():
+            incoming = sum(
+                refs.count(ident) for refs in file_refs.values()
+            )
+            boost = 10.0 if ident in mention_set else 1.0
+            for df in defining_files:
+                chat_boost = 50.0 if df in chat_set else 1.0
+                scored.append((df, ident, float(incoming) * boost * chat_boost))
+        scored.sort(key=lambda t: t[2], reverse=True)
+        out: List[Dict[str, object]] = []
+        used = 0
+        for df, ident, sc in scored:
+            entry = {"file": df, "name": ident, "score": round(sc, 3), "line": 0}
+            cost = len(df) + len(ident) + 16
+            if used + cost > token_budget * 4:
+                break
+            out.append(entry)
+            used += cost
+        return out
+
+    graph = _nx.DiGraph()
+    for rel in file_defs:
+        graph.add_node(rel)
+    for src_file, refs in file_refs.items():
+        ref_counts: Dict[str, int] = {}
+        for r in refs:
+            ref_counts[r] = ref_counts.get(r, 0) + 1
+        for ident, count in ref_counts.items():
+            for tgt_file in def_to_files.get(ident, []):
+                if tgt_file == src_file:
+                    continue
+                w = float(count) * (10.0 if ident in mention_set else 1.0)
+                if graph.has_edge(src_file, tgt_file):
+                    graph[src_file][tgt_file]["weight"] += w
+                else:
+                    graph.add_edge(src_file, tgt_file, weight=w, idents=ident)
+
+    personalization: Dict[str, float] = {}
+    for node in graph.nodes:
+        personalization[node] = 50.0 if node in chat_set else 1.0
+    try:
+        ranks = _nx.pagerank(graph, alpha=0.85, personalization=personalization, weight="weight")
+    except Exception:
+        ranks = {n: 1.0 for n in graph.nodes}
+
+    # Distribute file rank across that file's defs, boosting mentioned idents.
+    results: List[Dict[str, object]] = []
+    for rel, defs in file_defs.items():
+        base = float(ranks.get(rel, 0.0))
+        if not defs or base <= 0:
+            continue
+        share = base / max(len(defs), 1)
+        for d in defs:
+            boost = 10.0 if d in mention_set else 1.0
+            results.append({"file": rel, "name": d, "score": round(share * boost, 6), "line": 0})
+
+    results.sort(key=lambda e: float(e["score"]), reverse=True)
+    out: List[Dict[str, object]] = []
+    used = 0
+    for entry in results:
+        cost = len(str(entry["file"])) + len(str(entry["name"])) + 16
+        if used + cost > token_budget * 4:
+            break
+        out.append(entry)
+        used += cost
+    return out
+
+
+def render_ranked_map(
+    repo_root: Path | str,
+    chat_files: Optional[Iterable[str]] = None,
+    mentioned_idents: Optional[Iterable[str]] = None,
+    token_budget: int = 1024,
+) -> str:
+    """Human-readable block for injection into the chat system prompt."""
+    entries = rank_repo_symbols(repo_root, chat_files, mentioned_idents, token_budget)
+    if not entries:
+        return ""
+    lines = ["## Repo Map (top symbols, PageRank)"]
+    by_file: Dict[str, List[str]] = {}
+    for e in entries:
+        by_file.setdefault(str(e["file"]), []).append(str(e["name"]))
+    for fpath, names in list(by_file.items())[:60]:
+        lines.append(f"- `{fpath}`: {', '.join(names[:6])}")
+    return "\n".join(lines)

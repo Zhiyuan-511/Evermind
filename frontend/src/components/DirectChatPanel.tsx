@@ -1,6 +1,8 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import ReasoningBlock from './ReasoningBlock';
+import ToolCallBlock, { type ToolCallTrace } from './ToolCallBlock';
 
 interface FileDiff {
     path: string;
@@ -25,17 +27,38 @@ interface DirectChatMessage {
     streaming?: boolean;
     filesModified?: string[];
     fileDiffs?: FileDiff[];
+    // v6.4.29 (maintainer 2026-04-22) — collapsible thinking bubble.
+    // `reasoning` accumulates reasoning_content stream deltas; `reasoningActive`
+    // toggles between "thinking live" and "done — collapsed". When the first
+    // main content token arrives, reasoningActive goes false and the bubble
+    // auto-collapses (user can re-expand via click).
+    reasoning?: string;
+    reasoningActive?: boolean;
+    reasoningStartedAt?: number;
+    reasoningEndedAt?: number;
+    // v6.4.32: foldable tool-call trace. Each entry is keyed by id and
+    // updated in-place when the result arrives.
+    toolCalls?: ToolCallTrace[];
 }
 
-const MODEL_OPTIONS = [
+// v5.8: model options are derived from the user's actual settings at runtime
+// instead of being hardcoded. A hardcoded list showed 7 models even when the
+// user only had one provider's key configured, leading to "pick a model
+// that 403s" UX. We now pull unique model ids from node_model_preferences
+// + default_model via /api/settings and fall back to the active default only.
+const FALLBACK_MODEL_OPTIONS = [
     { id: '', label: 'Auto' },
-    { id: 'gpt-5.4', label: 'GPT-5.4' },
-    { id: 'gpt-5.4-mini', label: 'GPT-5.4 Mini' },
-    { id: 'claude-4-sonnet', label: 'Claude 4 Sonnet' },
-    { id: 'kimi-coding', label: 'Kimi Coding' },
-    { id: 'deepseek-v3', label: 'DeepSeek V3' },
-    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
+    { id: 'kimi-k2.6-code-preview', label: 'Kimi K2.6 Code (Preview)' },
 ];
+
+type ModelOption = { id: string; label: string };
+
+// Humanize a model id for the dropdown label (strip provider prefix, title-case).
+function labelForModel(id: string): string {
+    if (!id) return 'Auto';
+    const clean = id.replace(/^openai\//, '').replace(/-/g, ' ');
+    return clean.replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 const CHAT_STORAGE_KEY = 'evermind-direct-chat-v1';
 const MAX_PERSISTED_MESSAGES = 200;
@@ -74,7 +97,49 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
     const [messages, setMessages] = useState<DirectChatMessage[]>(() => loadPersistedMessages(sessionId || ''));
     const [input, setInput] = useState('');
     const [model, setModel] = useState('');
+    const [modelOptions, setModelOptions] = useState<ModelOption[]>(FALLBACK_MODEL_OPTIONS);
     const [streaming, setStreaming] = useState(false);
+
+    // v5.8: derive the dropdown from live /api/settings. Only show models that
+    // are actually in the user's node_model_preferences (plus the default),
+    // so "pick a model that 403s" is no longer possible.
+    // v5.8.6: pull available models from /api/models (has_key filter) so the
+    // chat agent dropdown reflects real availability, not just what the user
+    // happened to put in per-node preferences. This matches AgentNode and
+    // SettingsModal behavior: every model shown has a configured key.
+    useEffect(() => {
+        let cancelled = false;
+        const refresh = async () => {
+            try {
+                // v5.8.6 FIX: absolute URL — Electron renderer's base is the
+                // Next.js dev server (localhost:3xxx), NOT the backend. A
+                // relative '/api/models' 404'd, making the dropdown silently
+                // fall back to the 2-item FALLBACK list.
+                const base = (typeof window !== 'undefined' && (window as unknown as { __evermindApiBase?: string }).__evermindApiBase)
+                    || 'http://127.0.0.1:8765';
+                const r = await fetch(`${base}/api/models`, { cache: 'no-store' });
+                if (!r.ok) return;
+                const d = await r.json();
+                if (cancelled) return;
+                const models = Array.isArray(d?.models) ? d.models : [];
+                const ids: string[] = models
+                    .filter((m: { has_key?: boolean }) => m.has_key === true)
+                    .map((m: { id: string }) => m.id);
+                const opts: ModelOption[] = [{ id: '', label: 'Auto' }];
+                ids.sort().forEach((id) => opts.push({ id, label: labelForModel(id) }));
+                if (opts.length > 1) setModelOptions(opts);
+            } catch {
+                // fetch failed; stick with fallback defaults
+            }
+        };
+        refresh();
+        // v5.8.6: listen for settings-save broadcasts → live-refresh dropdown
+        window.addEventListener('evermind-models-changed', refresh);
+        return () => {
+            cancelled = true;
+            window.removeEventListener('evermind-models-changed', refresh);
+        };
+    }, []);
     // Stable conversation ID per session — survives remount
     const [convId] = useState(() => sessionId ? `conv_${sessionId}` : `conv_${Date.now()}`);
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -112,6 +177,72 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                         }
                         return prev;
                     });
+                } else if (data.type === 'chat_reasoning_delta' && data.conversation_id === convId) {
+                    // v6.4.29: accumulate reasoning into the streaming assistant
+                    // message. Bubble stays visible + live until reasoning_done.
+                    setMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        if (last?.streaming) {
+                            return [...prev.slice(0, -1), {
+                                ...last,
+                                reasoning: (last.reasoning || '') + (data.text || ''),
+                                reasoningActive: true,
+                                reasoningStartedAt: last.reasoningStartedAt || Date.now(),
+                            }];
+                        }
+                        return prev;
+                    });
+                } else if (data.type === 'chat_reasoning_done' && data.conversation_id === convId) {
+                    // Main content is about to start → stop the spinner,
+                    // auto-collapse the reasoning bubble.
+                    setMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        if (last?.streaming) {
+                            return [...prev.slice(0, -1), {
+                                ...last,
+                                reasoningActive: false,
+                                reasoningEndedAt: Date.now(),
+                            }];
+                        }
+                        return prev;
+                    });
+                } else if (data.type === 'chat_tool_call_start' && data.conversation_id === convId) {
+                    // v6.4.32: foldable tool-call badge instead of dumping
+                    // args/result into chat content.
+                    setMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        if (last?.streaming) {
+                            const calls = Array.isArray(last.toolCalls) ? last.toolCalls : [];
+                            const newCall: ToolCallTrace = {
+                                id: String(data.id || `tc_${Date.now()}`),
+                                name: String(data.name || ''),
+                                argsPreview: data.args_preview ? String(data.args_preview) : undefined,
+                                args: data.args ? String(data.args) : undefined,
+                                pending: true,
+                            };
+                            return [...prev.slice(0, -1), {
+                                ...last,
+                                toolCalls: [...calls, newCall],
+                            }];
+                        }
+                        return prev;
+                    });
+                } else if (data.type === 'chat_tool_call_result' && data.conversation_id === convId) {
+                    setMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        if (last?.streaming) {
+                            const calls = Array.isArray(last.toolCalls) ? last.toolCalls : [];
+                            const updated = calls.map(c => c.id === data.id ? {
+                                ...c,
+                                pending: false,
+                                success: typeof data.success === 'boolean' ? data.success : c.success,
+                                preview: data.preview ? String(data.preview) : c.preview,
+                                resultTruncated: data.result_truncated ? String(data.result_truncated) : c.resultTruncated,
+                            } : c);
+                            return [...prev.slice(0, -1), { ...last, toolCalls: updated }];
+                        }
+                        return prev;
+                    });
                 } else if (data.type === 'chat_complete' && data.conversation_id === convId) {
                     const filesModified: string[] = Array.isArray(data.files_modified) ? data.files_modified : [];
                     const fileDiffs: FileDiff[] = Array.isArray(data.file_diffs) ? data.file_diffs : [];
@@ -134,6 +265,23 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                     if (fileDiffs.length > 0 && onFileDiffs) {
                         onFileDiffs(fileDiffs);
                     }
+                } else if (data.type === 'chat_heartbeat' && data.conversation_id === convId) {
+                    // v6.4.34: backend still alive, just busy. UI can show
+                    // a "思考中… XXs" indicator. For now we just mark the
+                    // last assistant message so ReasoningBlock's active
+                    // state keeps the spinner visible.
+                    setMessages(prev => {
+                        const last = prev[prev.length - 1];
+                        if (last?.streaming && !last.reasoning) {
+                            return [...prev.slice(0, -1), {
+                                ...last,
+                                reasoningActive: true,
+                                reasoningStartedAt: last.reasoningStartedAt || Date.now(),
+                                reasoning: last.reasoning || '（长任务进行中…）',
+                            }];
+                        }
+                        return prev;
+                    });
                 } else if (data.type === 'chat_error' && data.conversation_id === convId) {
                     setMessages(prev => {
                         const last = prev[prev.length - 1];
@@ -158,14 +306,72 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
     }, [wsRef, convId]);
 
     const sendMessage = useCallback(() => {
-        const text = input.trim();
-        if (!text || streaming || !connected) return;
+        const rawText = input.trim();
+        if (!rawText || streaming || !connected) return;
+
+        // v6.4.30: slash commands — expand to full instructions
+        // so the AI gets an unambiguous directive regardless of its
+        // system prompt length. Pattern from Cursor / Claude Code.
+        const expandSlashCommand = (raw: string): string => {
+            const lower = raw.toLowerCase().trim();
+            if (lower.startsWith('/read ')) {
+                const path = raw.slice(6).trim();
+                return `Read \`${path}\` using file_ops and summarize what's in it. Include any TODOs/stubs/bugs you spot.`;
+            }
+            if (lower.startsWith('/edit ')) {
+                const rest = raw.slice(6).trim();
+                return `Make the following change in the Active Project: ${rest}. First file_ops read the target file, then file_ops edit with a precise old_string→new_string.`;
+            }
+            if (lower.startsWith('/fix')) {
+                const rest = raw.slice(4).trim();
+                const desc = rest.startsWith(' ') ? rest.slice(1) : rest;
+                return desc
+                    ? `Fix this issue in the Active Project: ${desc}. Discover the relevant file first (file_ops read the primary artifact), locate the defect, then file_ops edit to repair it surgically. Do NOT ask me for the file path.`
+                    : `Audit the Active Project for obvious bugs. Start by file_ops read on the primary artifact, enumerate the top 3-5 issues you'd fix, then wait for my confirmation before editing.`;
+            }
+            if (lower.startsWith('/screenshot') || lower.startsWith('/preview')) {
+                return `Open http://127.0.0.1:8765/preview/ via the browser tool, navigate + screenshot it, and tell me what's on screen. Note any JS errors from browser diagnostics.`;
+            }
+            if (lower.startsWith('/diff')) {
+                const file = raw.slice(5).trim() || '';
+                return file
+                    ? `Show me a diff of the latest changes to ${file} (compare with git if available, else use file_ops read + explain recent modifications).`
+                    : `Summarize what files were changed in this session and show a condensed diff.`;
+            }
+            if (lower.startsWith('/find ')) {
+                const q = raw.slice(6).trim();
+                return `Use file_ops search to find occurrences of "${q}" in the Active Project. Report file:line for each match.`;
+            }
+            if (lower === '/help' || lower === '/?') {
+                // Handled locally, short-circuit
+                return '__LOCAL_HELP__';
+            }
+            return raw;
+        };
+        let text = expandSlashCommand(rawText);
+        if (text === '__LOCAL_HELP__') {
+            setMessages(prev => [...prev, { role: 'user', content: rawText, ts: Date.now() }]);
+            setMessages(prev => [...prev, {
+                role: 'system',
+                content: `Available slash commands:
+/fix [描述]        — audit or fix the current project (auto-discovers source)
+/read <path>       — read and summarize a file
+/edit <描述>       — make a precise edit (auto-reads the file first)
+/screenshot        — navigate to preview and screenshot
+/find <query>      — search text across the project
+/diff [path]       — show recent changes
+/help              — this message`,
+                ts: Date.now(),
+            }]);
+            setInput('');
+            return;
+        }
 
         const ws = wsRef.current;
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-        // Add user message
-        setMessages(prev => [...prev, { role: 'user', content: text, ts: Date.now() }]);
+        // Add user message (raw text — we keep the slash command visible)
+        setMessages(prev => [...prev, { role: 'user', content: rawText, ts: Date.now() }]);
 
         // Add streaming placeholder
         streamBufferRef.current = '';
@@ -203,6 +409,25 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
         if (ws?.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'chat_stop' }));
         }
+        // v6.4.36 (maintainer 2026-04-23): flip the last assistant message to
+        // NOT streaming locally so subsequent chat_token events (which
+        // may still arrive before backend acks the stop) are ignored by
+        // the WS handler (it checks last?.streaming before appending).
+        // Without this, UI keeps scrolling even after user clicks stop.
+        setMessages(prev => {
+            const last = prev[prev.length - 1];
+            if (last?.streaming) {
+                return [...prev.slice(0, -1), {
+                    ...last,
+                    streaming: false,
+                    reasoningActive: false,
+                    reasoningEndedAt: Date.now(),
+                    content: (last.content || '') + '\n\n[已停止]',
+                }];
+            }
+            return prev;
+        });
+        streamBufferRef.current = '';
         setStreaming(false);
     }, [wsRef]);
 
@@ -234,7 +459,7 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                         borderRadius: 6, fontSize: 11, color: 'var(--text2, #aaa)', padding: '4px 8px', outline: 'none',
                     }}
                 >
-                    {MODEL_OPTIONS.map(m => (
+                    {modelOptions.map(m => (
                         <option key={m.id} value={m.id}>{m.label}</option>
                     ))}
                 </select>
@@ -257,7 +482,7 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                         <div style={{
                             maxWidth: '88%', borderRadius: 10, padding: '8px 12px', fontSize: 12, lineHeight: 1.5,
                             ...(msg.role === 'user' ? {
-                                background: 'rgba(79,143,255,0.15)', border: '1px solid rgba(79,143,255,0.2)', color: '#c4d9ff',
+                                background: 'rgba(91,140,255,0.15)', border: '1px solid rgba(91,140,255,0.2)', color: '#c4d9ff',
                             } : msg.role === 'system' ? {
                                 background: 'rgba(248,81,73,0.12)', border: '1px solid rgba(248,81,73,0.2)', color: '#ffa8a8',
                             } : {
@@ -267,6 +492,80 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                             {msg.role === 'assistant' && msg.model && (
                                 <div style={{ fontSize: 10, color: 'var(--text3)', marginBottom: 4, fontWeight: 500 }}>{msg.model}</div>
                             )}
+                            {/* v6.4.29: collapsible thinking bubble above main content */}
+                            {msg.role === 'assistant' && (msg.reasoning || msg.reasoningActive) && (
+                                <ReasoningBlock
+                                    text={msg.reasoning || ''}
+                                    active={!!msg.reasoningActive}
+                                    startedAt={msg.reasoningStartedAt}
+                                    endedAt={msg.reasoningEndedAt}
+                                />
+                            )}
+                            {/* v6.4.32: foldable tool-call badges */}
+                            {msg.role === 'assistant' && Array.isArray(msg.toolCalls) && msg.toolCalls.length > 0 && (
+                                <div style={{ marginBottom: 6 }}>
+                                    {msg.toolCalls.map(tc => (
+                                        <ToolCallBlock key={tc.id} call={tc} />
+                                    ))}
+                                </div>
+                            )}
+                            {/* v6.4.55 UX: live "正在编写/读取/访问" status bar
+                                while a tool call is still pending. Looks at
+                                the latest pending tool call and derives a
+                                natural-language label from its action. */}
+                            {msg.role === 'assistant' && msg.streaming && Array.isArray(msg.toolCalls) && (() => {
+                                const pendingTc = [...msg.toolCalls].reverse().find(t => t.pending);
+                                if (!pendingTc) return null;
+                                let parsedAction = '';
+                                let parsedPath = '';
+                                try {
+                                    const a = pendingTc.args || pendingTc.argsPreview || '';
+                                    const p = a ? JSON.parse(a) : {};
+                                    parsedAction = String(p.action || '').toLowerCase();
+                                    parsedPath = String(p.path || p.url || p.selector || '');
+                                } catch { /* ignore */ }
+                                const fileName = parsedPath ? parsedPath.split('/').slice(-1)[0] : '';
+                                const labels: Record<string, string> = {
+                                    write: `正在编写 ${fileName || '文件'}…`,
+                                    edit: `正在修改 ${fileName || '文件'}…`,
+                                    read: `正在读取 ${fileName || '文件'}…`,
+                                    list: '正在列目录…',
+                                    search: `正在搜索 ${parsedPath ? `「${parsedPath}」` : ''}…`,
+                                    delete: `正在删除 ${fileName || '文件'}…`,
+                                    navigate: `正在访问 ${parsedPath || '网页'}…`,
+                                    observe: '正在观察页面…',
+                                    click: `正在点击 ${parsedPath || '元素'}…`,
+                                    screenshot: '正在截图…',
+                                    press: '正在按键…',
+                                    fill: '正在填写表单…',
+                                };
+                                const label = labels[parsedAction] || `正在执行 ${pendingTc.name}${parsedAction ? '.' + parsedAction : ''}…`;
+                                const isWrite = parsedAction === 'write' || parsedAction === 'edit';
+                                return (
+                                    <div style={{
+                                        margin: '4px 0 6px 0',
+                                        padding: '4px 10px',
+                                        fontSize: 11,
+                                        color: isWrite ? '#2ea043' : 'var(--color-muted, #8a8a93)',
+                                        background: isWrite ? 'rgba(46,160,67,0.08)' : 'rgba(168,85,247,0.04)',
+                                        border: isWrite ? '1px solid rgba(46,160,67,0.3)' : '1px solid rgba(168,85,247,0.15)',
+                                        borderRadius: 12,
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: 6,
+                                        fontWeight: 500,
+                                    }}>
+                                        <span style={{
+                                            display: 'inline-block',
+                                            width: 8, height: 8,
+                                            borderRadius: '50%',
+                                            background: isWrite ? '#2ea043' : '#a855f7',
+                                            animation: 'toolcall-spin 1.2s linear infinite',
+                                        }} />
+                                        {label}
+                                    </div>
+                                );
+                            })()}
                             <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
                                 {msg.content || (msg.streaming ? '...' : '')}
                                 {msg.streaming && <span className="animate-pulse" style={{ marginLeft: 2 }}>▊</span>}
@@ -331,7 +630,7 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                         </button>
                     ) : (
                         <button onClick={sendMessage} disabled={!connected || !input.trim()} style={{
-                            background: !connected || !input.trim() ? 'rgba(79,143,255,0.3)' : 'rgba(79,143,255,0.8)',
+                            background: !connected || !input.trim() ? 'rgba(91,140,255,0.3)' : 'rgba(91,140,255,0.8)',
                             color: '#fff', fontSize: 11, fontWeight: 600,
                             padding: '4px 12px', borderRadius: 6, border: 'none',
                             cursor: !connected || !input.trim() ? 'default' : 'pointer', flexShrink: 0,

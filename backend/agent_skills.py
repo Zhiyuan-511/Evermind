@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -85,11 +86,7 @@ SKILL_MAP = {
         "*": ["commercial-ui-polish", "design-system-consistency"],
         "website": [
             "commercial-ui-polish",
-            "motion-choreography-system",
-            "svg-illustration-system",
-            "cinematic-visual-narrative",
-            "evermind-atlas-surface-system",
-            "evermind-editorial-layout-composer",
+            "design-system-consistency",
         ],
         "dashboard": ["dashboard-signal-clarity", "data-storytelling-panels", "design-system-consistency"],
         "presentation": ["slides-story-arc", "motion-choreography-system"],
@@ -315,9 +312,23 @@ GOAL_SKILL_RULES = [
         },
     },
     {
+        # v6.1.5 (Opus A R3): broaden activation to catch ANY 3D game with
+        # camera/input needs — not just TPS shooters. Prior narrower regex
+        # missed flight sims, MMO isometric, first-person puzzle, etc. Now
+        # fires when EITHER axis matches: camera-related OR input-related.
         "pattern": re.compile(
-            r"(?=.*(?:第三人称|third.?person|\btps\b|camera.?relative|镜头|视角|yaw|pitch|拖动|drag|mouse|pointer))"
-            r"(?=.*(?:射击|shooter|枪|weapon|控制|controls?|输入|input|wasd))",
+            r"(?:"
+            # Path A: 3D + any camera/input concept
+            r"(?=.*\b(?:3d|three\.?js|webgl|第三人称|third.?person|"
+            r"first.?person|\bfps\b|\btps\b|camera.?relative|镜头|视角|"
+            r"isometric|等距|top.?down|俯视))"
+            r"(?=.*(?:camera|yaw|pitch|mouse|pointer|drag|拖动|wasd|input|"
+            r"keyboard|gamepad|controls?|控制|输入|fire|shoot|射击|aim|瞄准))"
+            r"|"
+            # Path B: explicit shooter/combat keywords
+            r"(?=.*(?:射击|shooter|\bfps\b|\btps\b|枪|weapon|武器|gunplay))"
+            r"(?=.*(?:controls?|wasd|input|控制|输入|keyboard|mouse|手柄))"
+            r")",
             re.IGNORECASE,
         ),
         "skills": {
@@ -605,9 +616,13 @@ def _read_text_file(path: Path) -> str:
 
 def _parse_frontmatter(text: str) -> Tuple[Dict[str, str], str]:
     raw = str(text or "")
-    if not raw.startswith("---\n"):
+    # Opus R4 fix: accept CRLF-authored skills (Windows contributors).
+    if not (raw.startswith("---\n") or raw.startswith("---\r\n")):
         return {}, raw
+    # Try both separator variants
     parts = raw.split("\n---\n", 1)
+    if len(parts) != 2:
+        parts = raw.split("\r\n---\r\n", 1)
     if len(parts) != 2:
         return {}, raw
     meta_block, body = parts
@@ -766,6 +781,64 @@ def _resolve_goal_keyword_skills(node_type: str, goal: str) -> List[str]:
     return selected
 
 
+def _resolve_frontmatter_skills(node_type: str, goal: str) -> List[str]:
+    """v6.1.6 (Antigravity-style): scan SKILL.md frontmatter for
+    ``activation_triggers`` / ``activation_keywords`` / ``activation_node_types``.
+
+    Builtin and community skills both eligible. Frontmatter example:
+
+        ---
+        name: my-skill
+        activation_node_types: builder, debugger
+        activation_triggers: fps, pointer lock, three.js
+        ---
+
+    Returns skills whose triggers substring-match the goal text for the given
+    node type. Lets skill authors declare "when to load me" without touching
+    the hardcoded GOAL_SKILL_RULES list.
+    """
+    node_key = str(node_type or "").strip().lower()
+    goal_text = str(goal or "").strip().lower()
+    selected: List[str] = []
+    if not node_key or not goal_text:
+        return selected
+
+    def _visit(directory: Path) -> None:
+        if not directory.exists():
+            return
+        for skill_dir in directory.iterdir():
+            if not skill_dir.is_dir():
+                continue
+            body = _read_text_file(skill_dir / "SKILL.md")
+            if not body:
+                continue
+            meta, _ = _parse_frontmatter(body)
+            if not meta:
+                continue
+            # Check node_types allowlist (comma-separated)
+            raw_nodes = str(meta.get("activation_node_types") or "").strip()
+            if raw_nodes and raw_nodes != "*":
+                allowed = {t.strip().lower() for t in raw_nodes.split(",") if t.strip()}
+                if node_key not in allowed:
+                    continue
+            # Check trigger keywords — any match fires
+            raw_triggers = " ".join(
+                str(meta.get(k) or "")
+                for k in ("activation_triggers", "activation_keywords", "triggers", "keywords")
+            )
+            if not raw_triggers.strip():
+                continue
+            tokens = [t.strip().lower() for t in re.split(r"[,;]", raw_triggers) if t.strip()]
+            if any(tok and tok in goal_text for tok in tokens):
+                name = skill_dir.name
+                if name and name not in selected:
+                    selected.append(name)
+
+    _visit(SKILLS_DIR)
+    _visit(USER_SKILLS_DIR)
+    return selected
+
+
 def _resolve_community_skills(node_type: str, goal: str) -> List[str]:
     node_key = str(node_type or "").strip().lower()
     goal_text = str(goal or "").strip().lower()
@@ -826,10 +899,16 @@ def resolve_skill_names_for_goal(node_type: str, goal: str) -> List[str]:
     for name in (
         _resolve_skill_names(node_key, task_type)
         + _resolve_goal_keyword_skills(node_key, goal_text)
+        + _resolve_frontmatter_skills(node_key, goal_text)  # v6.1.6
         + _resolve_community_skills(node_key, goal_text)
     ):
         if name and name not in selected and name not in excluded:
             selected.append(name)
+    if node_key == "uidesign" and task_type == "website":
+        core_uidesign_skills = {"commercial-ui-polish", "design-system-consistency"}
+        selected = [name for name in selected if name in core_uidesign_skills]
+        if not selected:
+            selected = ["commercial-ui-polish", "design-system-consistency"]
     return selected
 
 
@@ -875,7 +954,25 @@ def build_skill_context(node_type: str, goal: str, *, budget_chars: int = 9000) 
     = highest priority) and stops when the budget is exhausted.  Default 9000
     chars (~2250 tokens) keeps core + domain-specific skills while trimming
     the long tail (e.g. godogen-visual-target-lock, godogen-3d-asset-replacement).
+
+    v5.8.6 per-node budget override: planner/analyst are text-production
+    orchestration nodes and don't need multiple behavioural skills — they
+    get a tight budget so Kimi prefill shrinks ~40-60s per call. Builder /
+    reviewer keep the full 9000 because they actually execute tools and
+    need the skill directives.
     """
+    # Per-node budget override (v5.8.6).
+    normalized = str(node_type or "").strip().lower()
+    _NODE_BUDGET = {
+        "planner":   2500,   # ~625 tokens — keep 1 core skill
+        "analyst":   4500,   # ~1125 tokens — analyst needs research skills
+        "router":    1500,   # router is trivial routing, no skills needed
+        "scribe":    3000,
+        "uidesign":  3000,
+        "deployer":  2500,
+    }
+    effective_budget = _NODE_BUDGET.get(normalized, budget_chars)
+
     parts: List[str] = []
     total = 0
     for name in resolve_skill_names_for_goal(node_type, goal):
@@ -883,7 +980,7 @@ def build_skill_context(node_type: str, goal: str, *, budget_chars: int = 9000) 
         if not body:
             continue
         entry = f"[Skill: {name}]\n{body}"
-        if total + len(entry) > budget_chars and parts:
+        if total + len(entry) > effective_budget and parts:
             # Already have at least one skill; stop to stay within budget.
             break
         parts.append(entry)
@@ -929,7 +1026,20 @@ def _download_github_directory(owner: str, repo: str, ref: str, repo_path: str, 
         item_type = str(item.get("type") or "").strip()
         if not name or name.startswith("."):
             continue
+        # v7.3.9 audit-fix CRITICAL — never trust the GitHub API's `name`
+        # field verbatim. A malicious/compromised mirror could return
+        # `name = "../../../tmp/evil.py"` (path traversal) or contain a
+        # forward slash that escapes `dest_dir`. Reject anything that
+        # contains slashes, parent-dir tokens, or NUL bytes.
+        if "/" in name or "\\" in name or ".." in name or "\x00" in name or name.startswith("/"):
+            continue
         target = dest_dir / name
+        # Defence in depth: resolved path must stay within dest_dir.
+        try:
+            if not str(target.resolve()).startswith(str(dest_dir.resolve()) + os.sep):
+                continue
+        except Exception:
+            continue
         if item_type == "dir":
             target.mkdir(parents=True, exist_ok=True)
             child_path = str(item.get("path") or "").strip()
@@ -949,6 +1059,23 @@ def _download_github_directory(owner: str, repo: str, ref: str, repo_path: str, 
             raise ValueError("Skill folder exceeds the safe community install size limit.")
         download_url = str(item.get("download_url") or "").strip()
         if not download_url:
+            continue
+        # v7.3.9 audit-fix CRITICAL — pin download host to GitHub's content
+        # CDN. The Contents API normally returns
+        # https://raw.githubusercontent.com/<owner>/<repo>/... but a
+        # malicious mirror could serve a redirect to evil.com. Verify the
+        # URL stays inside the GitHub host whitelist.
+        try:
+            _du = urlparse(download_url)
+            _allowed_dl_hosts = {
+                "raw.githubusercontent.com",
+                "github.com",
+                "objects.githubusercontent.com",
+                "codeload.github.com",
+            }
+            if _du.scheme not in {"http", "https"} or _du.netloc not in _allowed_dl_hosts:
+                continue
+        except Exception:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(_http_get_bytes(download_url))

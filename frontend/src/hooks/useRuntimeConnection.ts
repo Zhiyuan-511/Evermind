@@ -239,7 +239,7 @@ function emitWorkspaceUpdated(detail: WorkspaceUpdatedDetail): void {
 export interface UseRuntimeConnectionOptions {
     wsUrl: string;
     lang: 'en' | 'zh';
-    difficulty: 'simple' | 'standard' | 'pro';
+    difficulty: 'simple' | 'standard' | 'pro' | 'ultra' | 'custom';
     goalRuntime?: 'local' | 'openclaw';
     sessionId?: string;
     messages: ChatMessage[];
@@ -545,9 +545,54 @@ export function useRuntimeConnection({
             const taskData = payload.task as Record<string, unknown> | undefined;
             const runData = payload.run as Record<string, unknown> | undefined;
             const nodeExecutions = (payload.nodeExecutions || []) as Array<Record<string, unknown>>;
+            // v5.8.6 session-pollution hardening: the previous fix only cleaned
+            // canvas nodes inside handleSendGoal, but a run can also start via
+            // replay / external dispatch that bypasses that path. If run_goal_ack
+            // arrives with a new runId, reset every canvas node that carries exec
+            // linkage — otherwise the STATUS_RANK "never downgrade" rule below
+            // keeps the previous run's `failed` / `passed` badges on the board.
+            const prevRunId = canonicalRunIdRef.current || '';
+            const runIdChanged = Boolean(runId) && runId !== prevRunId;
+            if (runIdChanged) {
+                setNodes((currentNodes) => currentNodes.map((node) => {
+                    const hasExecLinkage = Boolean(
+                        String(node.data?.subtaskId || '').trim()
+                        || String(node.data?.nodeExecutionId || '').trim()
+                        || String(node.data?.rawNodeKey || '').trim(),
+                    );
+                    if (!hasExecLinkage) return node;
+                    return {
+                        ...node,
+                        data: {
+                            ...node.data,
+                            status: 'idle',
+                            progress: 0,
+                            phase: '',
+                            currentAction: '',
+                            current_action: '',
+                            lastOutput: '',
+                            outputSummary: '',
+                            tokensUsed: 0,
+                            cost: 0,
+                            startedAt: 0,
+                            endedAt: 0,
+                            codeLines: 0,
+                            totalLines: 0,
+                            codeKb: 0,
+                            codeLanguages: [],
+                            subtaskId: undefined,
+                            nodeExecutionId: undefined,
+                            rawNodeKey: undefined,
+                        },
+                    };
+                }));
+                // Drop stale subtask → canvas-node mappings so new NEs don't
+                // alias onto the visually-reset nodes.
+                subtaskNodeMap.current = {};
+            }
             if (taskId) canonicalTaskIdRef.current = taskId;
             if (runId) canonicalRunIdRef.current = runId;
-            addConsoleLog(`[run_goal_ack] taskId=${taskId} runId=${runId} NEs=${nodeExecutions.length}`);
+            addConsoleLog(`[run_goal_ack] taskId=${taskId} runId=${runId} NEs=${nodeExecutions.length}${runIdChanged ? ' [canvas reset]' : ''}`);
             emitConnectorEvent(
                 'task_created',
                 tr('已创建规范任务', 'Canonical task created'),
@@ -577,10 +622,10 @@ export function useRuntimeConnection({
             // local custom runs (dispatched by OpenClaw) to show an empty canvas.
             const effectiveRuntime = String(payload.effectiveRuntime || payload.requestedRuntime || '');
             if (nodeExecutions.length > 0) {
-                // V4.3.1 FIX: Check if plan_created already created canvas nodes.
-                // If so, map NE IDs to existing nodes instead of rebuilding the
-                // entire canvas — rebuilding would reset "running" nodes back to
-                // "queued", causing the 排队中 display bug.
+                // V4.3.1 FIX: If plan_created already created canvas nodes,
+                // map NE IDs to existing nodes instead of rebuilding the entire
+                // canvas — rebuilding would reset "running" nodes back to
+                // "queued", causing the stuck-in-queue display bug.
                 const existingSubtaskNodes = Object.keys(subtaskNodeMap.current).length > 0;
                 const hasExistingCanvasNodes = nodes.some((node) =>
                     String(node.data?.subtaskId || '').trim()
@@ -863,6 +908,9 @@ export function useRuntimeConnection({
                 const prevTokens = isRetried ? Number(existingData.tokensUsed || 0) : 0;
                 const prevPrompt = isRetried ? Number(existingData.promptTokens || 0) : 0;
                 const prevCompletion = isRetried ? Number(existingData.completionTokens || 0) : 0;
+                // v5.8.6: accumulate cached_tokens so the UI indicator reflects
+                // prompt-cache savings across retries / tool-loop iterations.
+                const prevCached = isRetried ? Number(existingData.cachedTokens || 0) : 0;
                 const prevCost = isRetried ? Number(existingData.cost || 0) : 0;
                 // v5.0.1: Include code metrics from subtask_complete for sync
                 const scCodeLines = Number(msg.code_lines || 0);
@@ -886,6 +934,7 @@ export function useRuntimeConnection({
                     tokensUsed: prevTokens + Number(msg.tokens_used || 0),
                     promptTokens: prevPrompt + Number(msg.prompt_tokens || 0),
                     completionTokens: prevCompletion + Number(msg.completion_tokens || 0),
+                    cachedTokens: prevCached + Number(msg.cached_tokens || 0),
                     cost: prevCost + Number(msg.cost || 0),
                     ...codeMetricsPatch,
                 });
@@ -1213,6 +1262,14 @@ export function useRuntimeConnection({
                             codeKb,
                             codeLanguages: languages,
                         });
+                    } else if (!canvasNodeId && codeLines > 0) {
+                        // v5.8.6: diagnostic — if code_lines arrived but we have no
+                        // canvas node for this subtask, log it. This catches the
+                        // "Builder 2 shows one line" symptom where backend emits
+                        // progress for subtask id=7 but the map only knows id=6.
+                        addConsoleLog(
+                            `[code_lines orphan] sid=${sid} code_lines=${codeLines} — no canvas node mapped for this subtask; writer=${writer}`
+                        );
                     }
                 }
                 addConsoleLog(`[progress] #${sid} stage=${stage} writer=${writer || 'builder'} path=${writtenPath}${codeLines > 0 ? ` code_lines=${codeLines} code_kb=${codeKb}` : ''}`);
@@ -1659,8 +1716,14 @@ export function useRuntimeConnection({
                         // Live duration update: calculate from startedAt so the timer never freezes
                         const nodeStartedAt = Number(existingData.startedAt) || runStartedAtRef.current;
                         const liveDuration = Math.max(0, Math.round((Date.now() - nodeStartedAt) / 1000));
+                        // v5.8.6: monotonic progress guard. Backend HWM + skip_progress
+                        // flag already prevents regressions on its side, but also clamp
+                        // on the client in case an out-of-order or late heartbeat slips
+                        // a lower value through. Never let the progress bar move backward.
+                        const currentProgress = Number(existingData.progress || 0);
+                        const nextProgress = Math.max(currentProgress, progressPct);
                         updateNodeData(canvasNodeId, {
-                            progress: progressPct,
+                            progress: nextProgress,
                             status: 'running',
                             outputSummary: humanActivity,
                             durationSeconds: liveDuration,
@@ -2515,12 +2578,57 @@ export function useRuntimeConnection({
         setConnectorConnectedAt(null);
     }, [connected]);
 
+    // v5.8.6: push UI language to backend on every WS connect + lang change so
+    // node reports always match the user's current selection. Prior behaviour
+    // required an explicit "Save to Backend" click, which left ai_bridge.config
+    // stale and produced reports in the wrong language.
+    useEffect(() => {
+        if (!connected) return;
+        try {
+            const ws = wsRef?.current;
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'update_config',
+                    config: { ui_language: lang },
+                }));
+            }
+        } catch { /* non-fatal */ }
+    }, [connected, lang, wsRef]);
+
     // ── Send goal ──
     const handleSendGoal = useCallback((goal: string, attachments: ChatAttachment[] = []) => {
         const normalizedGoal = goal.trim();
         const effectiveGoal = normalizedGoal || defaultGoalFromAttachments(lang);
         addMessage('user', effectiveGoal, 'You', '👤', undefined, undefined, attachments);
         if (connected) {
+            // v5.8.4 session-pollution fix: capture any user-authored canvas plan
+            // BEFORE we clear, then drop every node carrying a prior run's
+            // subtask/NE/rawNodeKey so stale red/failed states don't leak into
+            // the new run. Purely user-added custom nodes (no execution linkage)
+            // are preserved. Match the DeepLink reset semantics.
+            const userCanvasPlanSnapshot = buildRunGoalPlan(nodes, edges);
+            // v5.8.6: Custom mode guard. User explicitly picked 'custom' but
+            // canvas has no valid custom plan → abort and tell them why.
+            if (difficulty === 'custom' && (!userCanvasPlanSnapshot || userCanvasPlanSnapshot.nodes.length < 2)) {
+                addMessage(
+                    'system',
+                    lang === 'zh'
+                        ? '⚠ 自定义模式需要画布上至少 2 个节点。请拖入节点、连好边,或切换到「极速/平衡/深度」模式,再发送任务。'
+                        : '⚠ Custom mode needs ≥2 connected nodes on the canvas. Drag nodes and wire them, or switch to Blitz/Balanced/Deep before sending.',
+                    'Evermind',
+                    '⚠️',
+                    'var(--orange)',
+                );
+                return;
+            }
+            setNodes((currentNodes) => currentNodes.filter((node) => {
+                const hasExecLinkage = Boolean(
+                    String(node.data?.subtaskId || '').trim()
+                    || String(node.data?.nodeExecutionId || '').trim()
+                    || String(node.data?.rawNodeKey || '').trim(),
+                );
+                return !hasExecLinkage;
+            }));
             resetRunState();
             const recentHistory = messages
                 .filter((m) => isHistoryConversationMessage(m) && (m.content.trim() || m.completionData))
@@ -2537,7 +2645,7 @@ export function useRuntimeConnection({
                 });
             recentHistory.push({ role: 'user', content: buildMessageContentForHistory(effectiveGoal, attachments) });
             const effectiveGoalRuntime = goalRuntime === 'openclaw' ? 'openclaw' : 'local';
-            const userCanvasPlan = buildRunGoalPlan(nodes, edges);
+            const userCanvasPlan = userCanvasPlanSnapshot;
             if (effectiveGoalRuntime === 'openclaw') {
                 addMessage(
                     'system',
@@ -2550,13 +2658,18 @@ export function useRuntimeConnection({
                 );
             }
             if (userCanvasPlan) {
+                const isExplicitCustom = difficulty === 'custom';
                 addMessage(
                     'system',
                     lang === 'zh'
-                        ? `检测到你当前画布上的 ${userCanvasPlan.nodes.length} 个自定义节点，本轮会优先按你的节点编排执行。`
-                        : `Detected ${userCanvasPlan.nodes.length} custom canvas nodes. This run will follow your canvas workflow first.`,
+                        ? (isExplicitCustom
+                            ? `✓ 自定义模式:严格按画布上的 ${userCanvasPlan.nodes.length} 个节点拓扑执行。Planner 会为每个节点生成交接单。`
+                            : `检测到你当前画布上的 ${userCanvasPlan.nodes.length} 个自定义节点，本轮会优先按你的节点编排执行。`)
+                        : (isExplicitCustom
+                            ? `✓ Custom mode: strictly executing ${userCanvasPlan.nodes.length} canvas nodes as arranged. Planner will generate a handoff per node.`
+                            : `Detected ${userCanvasPlan.nodes.length} custom canvas nodes. This run will follow your canvas workflow first.`),
                     'Evermind',
-                    '🧭',
+                    isExplicitCustom ? '🎯' : '🧭',
                 );
             }
             sendGoal(

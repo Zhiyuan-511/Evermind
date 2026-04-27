@@ -67,6 +67,13 @@ const ANALYST_TAGS: AnalystTagMeta[] = [
     { tag: 'risk_register', titleZh: '风险清单', titleEn: 'Risk Register', type: 'error' },
     { tag: 'builder_1_handoff', titleZh: '构建者 1 任务书', titleEn: 'Builder 1 Handoff', type: 'info' },
     { tag: 'builder_2_handoff', titleZh: '构建者 2 任务书', titleEn: 'Builder 2 Handoff', type: 'info' },
+    // v5.8.6: support up to 8 builders for user-custom DAGs that fan out beyond 2.
+    { tag: 'builder_3_handoff', titleZh: '构建者 3 任务书', titleEn: 'Builder 3 Handoff', type: 'info' },
+    { tag: 'builder_4_handoff', titleZh: '构建者 4 任务书', titleEn: 'Builder 4 Handoff', type: 'info' },
+    { tag: 'builder_5_handoff', titleZh: '构建者 5 任务书', titleEn: 'Builder 5 Handoff', type: 'info' },
+    { tag: 'builder_6_handoff', titleZh: '构建者 6 任务书', titleEn: 'Builder 6 Handoff', type: 'info' },
+    { tag: 'builder_7_handoff', titleZh: '构建者 7 任务书', titleEn: 'Builder 7 Handoff', type: 'info' },
+    { tag: 'builder_8_handoff', titleZh: '构建者 8 任务书', titleEn: 'Builder 8 Handoff', type: 'info' },
     { tag: 'reviewer_handoff', titleZh: '审查员任务书', titleEn: 'Reviewer Handoff', type: 'sys' },
     { tag: 'tester_handoff', titleZh: '测试员任务书', titleEn: 'Tester Handoff', type: 'sys' },
     { tag: 'debugger_handoff', titleZh: '调试员任务书', titleEn: 'Debugger Handoff', type: 'sys' },
@@ -347,7 +354,14 @@ function summarizeAnalystHandoff(text: string, lang: HumanizeLang): string {
     })).filter((section) => section.value);
 
     const sectionTags = new Set(sections.map((section) => section.tag));
-    const builderCount = ['builder_1_handoff', 'builder_2_handoff'].filter((tag) => sectionTags.has(tag)).length;
+    // v5.8.6: count up to 8 builder handoffs so multi-builder pipelines (user-
+    // arranged DAGs with 3+ builders) display the correct count instead of
+    // being capped at 2.
+    const builderCount = [
+        'builder_1_handoff', 'builder_2_handoff', 'builder_3_handoff',
+        'builder_4_handoff', 'builder_5_handoff', 'builder_6_handoff',
+        'builder_7_handoff', 'builder_8_handoff',
+    ].filter((tag) => sectionTags.has(tag)).length;
     const mentions: string[] = [];
     if (sectionTags.has('reference_sites')) mentions.push(tr(lang, '参考站点研究', 'reference-site research'));
     if (sectionTags.has('design_direction')) mentions.push(tr(lang, '设计方向', 'design direction'));

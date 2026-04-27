@@ -23,6 +23,28 @@ interface ApiKeys {
     claude: string;
     deepseek: string;
     qwen: string;
+    // v5.8.6: MiniMax (incl. m2.7-highspeed relay variants) and Zhipu (GLM-4.x)
+    // are in MODEL_REGISTRY but were missing from Settings UI — user had no way
+    // to paste their key.
+    minimax: string;
+    zhipu: string;
+    doubao: string;
+    yi: string;
+    aigate: string;   // v5.8.6: private-relay.example multi-model relay (sk-ag-*)
+    // v5.8.6: optional secondary keys per provider — enable concurrent-node
+    // load balancing (e.g. imagegen + spritesheet + builder1 + builder2 running
+    // in parallel stop fighting for the same key's rate limit).
+    kimi_2?: string;
+    gemini_2?: string;
+    openai_2?: string;
+    claude_2?: string;
+    deepseek_2?: string;
+    qwen_2?: string;
+    minimax_2?: string;
+    zhipu_2?: string;
+    doubao_2?: string;
+    yi_2?: string;
+    aigate_2?: string;
 }
 
 interface ModelCatalogItem {
@@ -122,6 +144,7 @@ const NODE_MODEL_CONFIG_ROLES = [
     'scribe',
     'builder',
     'polisher',
+    'patcher',
     'reviewer',
     'tester',
     'debugger',
@@ -174,9 +197,13 @@ function maskKey(key: string): string {
 }
 
 // ── Security: sanitize pasted content ──
+// v7.4: was stripping `<>"'&` which broke relay baseUrl query strings
+// (?key=...&token=...) and any apiKey containing those characters. Now we
+// only kill HTML tag bytes and angle brackets — quotes / `&` / `'` are
+// legitimate inside URLs and credentials, and React already escapes them
+// when rendering, so they're not an XSS vector here.
 function sanitizeInput(value: string): string {
-    // Strip any HTML tags, script injections, and trim whitespace
-    return value.replace(/<[^>]*>/g, '').replace(/[<>"'&]/g, '').trim();
+    return value.replace(/<[^>]*>/g, '').replace(/[<>]/g, '').trim();
 }
 
 function sanitizeMultilineInput(value: string): string {
@@ -227,8 +254,20 @@ export default function SettingsModal({
     connected, wsUrl, onWsUrlChange, wsRef,
 }: SettingsModalProps) {
     const [tab, setTab] = useState<TabId>('conn');
-    const [apiKeys, setApiKeys] = useState<ApiKeys>({ kimi: '', gemini: '', openai: '', claude: '', deepseek: '', qwen: '' });
-    const [apiBases, setApiBases] = useState<Record<string, string>>({ openai: '', claude: '', gemini: '', kimi: '', deepseek: '', qwen: '' });
+    const [apiKeys, setApiKeys] = useState<ApiKeys>({
+        kimi: '', gemini: '', openai: '', claude: '', deepseek: '', qwen: '',
+        // v5.8.6: MiniMax / Zhipu (GLM) / Doubao / Yi were missing from UI —
+        // every provider that has entries in MODEL_REGISTRY must be listed so
+        // users can paste keys for any registered model.
+        minimax: '', zhipu: '', doubao: '', yi: '',
+        aigate: '',   // v5.8.6: private-relay.example relay
+    });
+    const [apiBases, setApiBases] = useState<Record<string, string>>({
+        openai: '', claude: '', gemini: '', kimi: '', deepseek: '', qwen: '',
+        // v5.8.6: add new providers
+        minimax: '', zhipu: '', doubao: '', yi: '',
+        aigate: 'https://llm.private-relay.example/v1',  // default to private-relay
+    });
     const [autoL2, setAutoL2] = useState(true);
     const [l4Pass, setL4Pass] = useState('godmode');
     const [allowedDirs, setAllowedDirs] = useState('~/Desktop, ~/Documents');
@@ -244,8 +283,26 @@ export default function SettingsModal({
     const [comfyUiUrl, setComfyUiUrl] = useState('');
     const [comfyWorkflowTemplate, setComfyWorkflowTemplate] = useState('');
     const [imageBackendAvailable, setImageBackendAvailable] = useState(false);
+    // v6.2 (maintainer 2026-04-20): direct image provider (preferred over ComfyUI).
+    const [imgProvider, setImgProvider] = useState<'' | 'doubao-image' | 'seedream' | 'tongyi' | 'flux-fal' | 'openai-compat'>('');
+    const [imgApiKey, setImgApiKey] = useState('');
+    const [imgBaseUrl, setImgBaseUrl] = useState('');
+    const [imgDefaultModel, setImgDefaultModel] = useState('');
+    const [imgDefaultSize, setImgDefaultSize] = useState('1024x1024');
+    const [imgMaxImages, setImgMaxImages] = useState(10);
+    const [imgAutoCrop, setImgAutoCrop] = useState(true);
+    const [imgTestLoading, setImgTestLoading] = useState(false);
+    const [imgTestResult, setImgTestResult] = useState<{ ok: boolean; latency_ms?: number; image_base64?: string; error?: string } | null>(null);
     const [nodeModelPreferences, setNodeModelPreferences] = useState<Record<string, string[]>>({});
     const [thinkingDepth, setThinkingDepth] = useState<'fast' | 'deep'>('deep');
+    // v6.1.3 (maintainer 2026-04-18): dedicated language toggle for node walkthrough reports.
+    // "" = inherit UI language; "zh"/"en" = force that language for reports.
+    const [walkthroughLang, setWalkthroughLang] = useState<'' | 'zh' | 'en'>('');
+    // v6.1.10 (maintainer 2026-04-19): when the user configured TWO API keys for
+    // the primary builder provider (e.g. kimi + kimi_2), let parallel peer
+    // builders share the preferred first model and round-robin the keys
+    // instead of falling back to the second configured model.
+    const [peerBuildersShareModelWhenMultikey, setPeerBuildersShareModelWhenMultikey] = useState<boolean>(true);
     const [modelCatalog, setModelCatalog] = useState<ModelCatalogItem[]>([]);
     const [analystPreferredSites, setAnalystPreferredSites] = useState('');
     const [analystCrawlIntensity, setAnalystCrawlIntensity] = useState<AnalystCrawlIntensity>('medium');
@@ -267,6 +324,7 @@ export default function SettingsModal({
     const [loadedKeys, setLoadedKeys] = useState<Set<string>>(new Set());
     // CLI mode state
     const [cliEnabled, setCliEnabled] = useState(false);
+    const [cliUltraMode, setCliUltraMode] = useState(false);
     const [cliPreferred, setCliPreferred] = useState('');
     const [cliPreferredModel, setCliPreferredModel] = useState('');
     const [cliDetected, setCliDetected] = useState<Record<string, CLIDetectResult>>({});
@@ -325,6 +383,26 @@ export default function SettingsModal({
         }
     }, []);
 
+    // v5.8.6: refetch /api/models when keys change anywhere (Save button,
+    // external dispatch). Scoped only to the modelCatalog so we don't
+    // re-pull the whole settings payload on every event.
+    useEffect(() => {
+        if (!open) return;
+        const handler = async () => {
+            try {
+                const modelsResp = await fetch(`${API_BASE}/api/models`, { cache: 'no-store' });
+                if (!modelsResp.ok) return;
+                const modelsData: { models?: Array<{ id: string; provider: string; has_key?: boolean }> } = await modelsResp.json();
+                const filtered = (modelsData.models || [])
+                    .filter((m) => m.has_key === true)
+                    .map((m) => ({ id: m.id, provider: m.provider }));
+                if (filtered.length > 0) setModelCatalog(filtered);
+            } catch { /* ignore */ }
+        };
+        window.addEventListener('evermind-models-changed', handler);
+        return () => window.removeEventListener('evermind-models-changed', handler);
+    }, [open]);
+
     // Load settings from backend on open — only load has_keys flags, NOT the masked values
     useEffect(() => {
         if (!open) return;
@@ -361,6 +439,19 @@ export default function SettingsModal({
                     const imageCfg = data.image_generation as Record<string, unknown>;
                     if (typeof imageCfg.comfyui_url === 'string') setComfyUiUrl(imageCfg.comfyui_url);
                     if (typeof imageCfg.workflow_template === 'string') setComfyWorkflowTemplate(imageCfg.workflow_template);
+                    // v6.2 direct provider fields
+                    if (typeof imageCfg.provider === 'string') {
+                        const p = String(imageCfg.provider).trim().toLowerCase();
+                        if (['doubao-image', 'seedream', 'tongyi', 'flux-fal', 'openai-compat', ''].includes(p)) {
+                            setImgProvider(p as typeof imgProvider);
+                        }
+                    }
+                    if (typeof imageCfg.api_key === 'string') setImgApiKey(imageCfg.api_key);
+                    if (typeof imageCfg.base_url === 'string') setImgBaseUrl(imageCfg.base_url);
+                    if (typeof imageCfg.default_model === 'string') setImgDefaultModel(imageCfg.default_model);
+                    if (typeof imageCfg.default_size === 'string' && imageCfg.default_size) setImgDefaultSize(imageCfg.default_size);
+                    if (typeof imageCfg.max_images_per_run === 'number') setImgMaxImages(Math.max(1, Math.min(40, imageCfg.max_images_per_run)));
+                    if (typeof imageCfg.auto_crop === 'boolean') setImgAutoCrop(imageCfg.auto_crop);
                 }
                 if (typeof data.image_generation_available === 'boolean') setImageBackendAvailable(data.image_generation_available);
                 if (data.node_model_preferences && typeof data.node_model_preferences === 'object') {
@@ -368,6 +459,15 @@ export default function SettingsModal({
                 }
                 if (data.thinking_depth === 'fast' || data.thinking_depth === 'deep') {
                     setThinkingDepth(data.thinking_depth);
+                }
+                if (typeof data.walkthrough_language === 'string') {
+                    const wl = String(data.walkthrough_language || '').trim().toLowerCase();
+                    if (wl === 'zh' || wl === 'en' || wl === '') {
+                        setWalkthroughLang(wl as '' | 'zh' | 'en');
+                    }
+                }
+                if (typeof data.peer_builders_share_model_when_multikey === 'boolean') {
+                    setPeerBuildersShareModelWhenMultikey(data.peer_builders_share_model_when_multikey);
                 }
                 if (data.analyst && typeof data.analyst === 'object') {
                     const analystCfg = data.analyst as Record<string, unknown>;
@@ -388,19 +488,47 @@ export default function SettingsModal({
                         setAnalystEnableQuerySearch(analystCfg.enable_query_search);
                     }
                 }
-                if (Array.isArray(data.model_catalog)) {
-                    const catalog: ModelCatalogItem[] = data.model_catalog
-                        .map((item: unknown) => ({
-                            id: String((item as Record<string, unknown>).id || '').trim(),
-                            provider: String((item as Record<string, unknown>).provider || '').trim(),
-                        }))
-                        .filter((item: ModelCatalogItem) => item.id.length > 0);
-                    if (catalog.length > 0) setModelCatalog(catalog);
+                // v5.8.6: prefer /api/models (has_key filter) over data.model_catalog
+                // (which is all-registered-models unfiltered). This keeps the
+                // Settings → Per-Node Model Fallback dropdown limited to models
+                // whose provider actually has a key configured.
+                try {
+                    const modelsResp = await fetch(`${API_BASE}/api/models`, { cache: 'no-store' });
+                    if (modelsResp.ok) {
+                        const modelsData: { models?: Array<{ id: string; provider: string; has_key?: boolean }> } = await modelsResp.json();
+                        const filtered = (modelsData.models || [])
+                            .filter((m) => m.has_key === true)
+                            .map((m) => ({ id: m.id, provider: m.provider }));
+                        if (filtered.length > 0) {
+                            setModelCatalog(filtered);
+                        } else if (Array.isArray(data.model_catalog)) {
+                            // Fallback to unfiltered catalog only when no key is configured.
+                            const catalog: ModelCatalogItem[] = data.model_catalog
+                                .map((item: unknown) => ({
+                                    id: String((item as Record<string, unknown>).id || '').trim(),
+                                    provider: String((item as Record<string, unknown>).provider || '').trim(),
+                                }))
+                                .filter((item: ModelCatalogItem) => item.id.length > 0);
+                            if (catalog.length > 0) setModelCatalog(catalog);
+                        }
+                    }
+                } catch {
+                    // If /api/models fails, fall back to the unfiltered list
+                    if (Array.isArray(data.model_catalog)) {
+                        const catalog: ModelCatalogItem[] = data.model_catalog
+                            .map((item: unknown) => ({
+                                id: String((item as Record<string, unknown>).id || '').trim(),
+                                provider: String((item as Record<string, unknown>).provider || '').trim(),
+                            }))
+                            .filter((item: ModelCatalogItem) => item.id.length > 0);
+                        if (catalog.length > 0) setModelCatalog(catalog);
+                    }
                 }
                 // Load CLI mode settings
                 if (data.cli_mode && typeof data.cli_mode === 'object') {
                     const cliCfg = data.cli_mode as Record<string, unknown>;
                     if (typeof cliCfg.enabled === 'boolean') setCliEnabled(cliCfg.enabled);
+                    if (typeof cliCfg.ultra_mode === 'boolean') setCliUltraMode(cliCfg.ultra_mode);
                     if (typeof cliCfg.preferred_cli === 'string') setCliPreferred(cliCfg.preferred_cli);
                     if (typeof cliCfg.preferred_model === 'string') setCliPreferredModel(cliCfg.preferred_model);
                     if (cliCfg.detected_clis && typeof cliCfg.detected_clis === 'object') {
@@ -577,11 +705,26 @@ export default function SettingsModal({
             ['kimi', 'kimi', 'kimi_api_key'],
             ['deepseek', 'deepseek', 'deepseek_api_key'],
             ['qwen', 'qwen', 'qwen_api_key'],
+            // v5.8.6: new providers
+            ['minimax', 'minimax', 'minimax_api_key'],
+            ['zhipu', 'zhipu', 'zhipu_api_key'],
+            ['doubao', 'doubao', 'doubao_api_key'],
+            ['yi', 'yi', 'yi_api_key'],
+            ['aigate', 'aigate', 'aigate_api_key'],  // v5.8.6: private-relay.example
         ];
         for (const [uiKey, restKey, wsKey] of mapping) {
-            if (apiKeys[uiKey]) {
-                restKeys[restKey] = apiKeys[uiKey];
-                wsKeys[wsKey] = apiKeys[uiKey];
+            const primary = apiKeys[uiKey];
+            if (primary) {
+                restKeys[restKey] = primary;
+                wsKeys[wsKey] = primary;
+            }
+            // v5.8.6: persist secondary key under the `_2` suffix — backend pool
+            // reads `{provider}_api_key_2` (WS) and `api_keys.{provider}_2` (REST).
+            const secondaryKey = `${uiKey}_2` as keyof ApiKeys;
+            const secondary = apiKeys[secondaryKey];
+            if (secondary) {
+                restKeys[`${restKey}_2`] = secondary as string;
+                wsKeys[`${wsKey}_2`] = secondary as string;
             }
         }
 
@@ -600,6 +743,12 @@ export default function SettingsModal({
                         kimi: apiBases.kimi || '',
                         deepseek: apiBases.deepseek || '',
                         qwen: apiBases.qwen || '',
+                        // v5.8.6: new provider base URLs (relay / direct)
+                        minimax: apiBases.minimax || '',
+                        zhipu: apiBases.zhipu || '',
+                        doubao: apiBases.doubao || '',
+                        yi: apiBases.yi || '',
+                        aigate: apiBases.aigate || 'https://llm.private-relay.example/v1',  // v5.8.6
                     },
                     builder_enable_browser: browserResearch,
                     tester_run_smoke: smokeEnabled,
@@ -609,6 +758,13 @@ export default function SettingsModal({
                     image_generation: {
                         comfyui_url: comfyUiUrl,
                         workflow_template: comfyWorkflowTemplate,
+                        provider: imgProvider,
+                        api_key: imgApiKey,
+                        base_url: imgBaseUrl,
+                        default_model: imgDefaultModel,
+                        default_size: imgDefaultSize,
+                        max_images_per_run: imgMaxImages,
+                        auto_crop: imgAutoCrop,
                     },
                     analyst: {
                         preferred_sites: analystPreferredSites
@@ -621,8 +777,11 @@ export default function SettingsModal({
                     },
                     node_model_preferences: nodeModelPreferences,
                     thinking_depth: thinkingDepth,
+                    walkthrough_language: walkthroughLang,
+                    peer_builders_share_model_when_multikey: peerBuildersShareModelWhenMultikey,
                     cli_mode: {
                         enabled: cliEnabled,
+                        ultra_mode: cliUltraMode,
                         preferred_cli: cliPreferred,
                         preferred_model: cliPreferredModel,
                         detected_clis: cliDetected,
@@ -650,6 +809,13 @@ export default function SettingsModal({
                             image_generation: {
                                 comfyui_url: comfyUiUrl,
                                 workflow_template: comfyWorkflowTemplate,
+                                provider: imgProvider,
+                                api_key: imgApiKey,
+                                base_url: imgBaseUrl,
+                                default_model: imgDefaultModel,
+                                default_size: imgDefaultSize,
+                                max_images_per_run: imgMaxImages,
+                                auto_crop: imgAutoCrop,
                             },
                             analyst: {
                                 preferred_sites: analystPreferredSites
@@ -662,6 +828,7 @@ export default function SettingsModal({
                             },
                             node_model_preferences: nodeModelPreferences,
                             thinking_depth: thinkingDepth,
+                            walkthrough_language: walkthroughLang,
                             cli_mode: {
                                 enabled: cliEnabled,
                                 preferred_cli: cliPreferred,
@@ -683,6 +850,14 @@ export default function SettingsModal({
                     setNodeModelPreferences(normalizeNodeModelPreferences(result.node_model_preferences));
                 }
 
+                // v5.8.6: broadcast "models changed" so all other dropdowns
+                // (AgentNode canvas dropdown, DirectChatPanel chat picker,
+                // Per-Node Model Fallback dropdown) refetch /api/models
+                // immediately without needing a page reload.
+                if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new Event('evermind-models-changed'));
+                }
+
                 setSaveStatus('success');
                 const loaded = new Set<string>();
                 for (const [k, v] of Object.entries(apiKeys)) {
@@ -698,7 +873,7 @@ export default function SettingsModal({
         }
         setSaving(false);
         setTimeout(() => setSaveStatus('idle'), 5000);
-    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate, analystPreferredSites, analystCrawlIntensity, analystUseScrapling, analystEnableQuerySearch, nodeModelPreferences, thinkingDepth, lang]);
+    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate, imgProvider, imgApiKey, imgBaseUrl, imgDefaultModel, imgDefaultSize, imgMaxImages, imgAutoCrop, analystPreferredSites, analystCrawlIntensity, analystUseScrapling, analystEnableQuerySearch, nodeModelPreferences, thinkingDepth, walkthroughLang, peerBuildersShareModelWhenMultikey, lang]);
 
     // Handle key input change with sanitization
     const handleKeyChange = useCallback((key: keyof ApiKeys, value: string) => {
@@ -799,15 +974,35 @@ export default function SettingsModal({
                                         '密钥仅发送到本地后端，绝不会发送给第三方。如使用中转 API，请在每个密钥下方填写中转地址（Base URL）。'
                                     )}
                                 </div>
-                                {(['openai', 'claude', 'gemini', 'kimi', 'deepseek', 'qwen'] as const).map(k => {
+                                {(['openai', 'claude', 'gemini', 'kimi', 'deepseek', 'qwen', 'minimax', 'zhipu', 'doubao', 'yi', 'aigate'] as const).map(k => {
                                     const isEditing = editingKey === k;
                                     const hasValue = !!apiKeys[k];
                                     const isConfigured = loadedKeys.has(k);
                                     const displayValue = isEditing ? apiKeys[k] : (hasValue ? maskKey(apiKeys[k]) : '');
+                                    // v5.8.6: optional secondary key for concurrent-node load balancing
+                                    const secondaryKeyName = `${k}_2` as keyof ApiKeys;
+                                    const editingSecondary = editingKey === (secondaryKeyName as string);
+                                    const hasSecondary = !!apiKeys[secondaryKeyName];
+                                    const secondaryDisplay = editingSecondary
+                                        ? (apiKeys[secondaryKeyName] as string || '')
+                                        : (hasSecondary ? maskKey(apiKeys[secondaryKeyName] as string) : '');
+                                    const displayLabel: Record<string, string> = {
+                                        openai: 'OpenAI',
+                                        claude: 'Claude',
+                                        gemini: 'Gemini',
+                                        kimi: 'Kimi',
+                                        deepseek: 'DeepSeek',
+                                        qwen: 'Qwen (通义千问)',
+                                        minimax: 'MiniMax (M2.x)',
+                                        zhipu: 'Zhipu / GLM',
+                                        doubao: 'Doubao (豆包)',
+                                        yi: 'Yi / 01.AI',
+                                        aigate: 'AiGate (private-relay 中转)',
+                                    };
                                     return (
                                         <div key={k} style={{ marginBottom: 6 }}>
                                             <div className="s-row">
-                                                <label>{k.charAt(0).toUpperCase() + k.slice(1)}</label>
+                                                <label>{displayLabel[k] || (k.charAt(0).toUpperCase() + k.slice(1))}</label>
                                                 <input
                                                     className="s-input"
                                                     type={isEditing ? 'text' : 'password'}
@@ -822,6 +1017,28 @@ export default function SettingsModal({
                                                     <span style={{ fontSize: 8, color: 'var(--green)', fontWeight: 600 }}>
                                                         {hasValue ? '✓ 新' : '✓'}
                                                     </span>
+                                                )}
+                                            </div>
+                                            <div className="s-row" style={{ paddingLeft: 16, opacity: 0.85, marginTop: 2 }}>
+                                                <label style={{ fontSize: 9, color: 'var(--text3)' }}>
+                                                    {t('Backup Key (optional, for concurrent speed)', '备用 Key（可选，加速并发）')}
+                                                </label>
+                                                <input
+                                                    className="s-input"
+                                                    type={editingSecondary ? 'text' : 'password'}
+                                                    value={secondaryDisplay}
+                                                    onChange={e => {
+                                                        const cleaned = sanitizeInput(e.target.value);
+                                                        setApiKeys(prev => ({ ...prev, [secondaryKeyName]: cleaned }));
+                                                    }}
+                                                    onFocus={() => setEditingKey(secondaryKeyName as string)}
+                                                    onBlur={() => setEditingKey(null)}
+                                                    placeholder={t('Leave empty if you only have one key', '只有一个 Key 可留空')}
+                                                    style={{ fontSize: 10 }}
+                                                    {...keyInputProps}
+                                                />
+                                                {hasSecondary && (
+                                                    <span style={{ fontSize: 8, color: 'var(--green)', fontWeight: 600 }}>✓</span>
                                                 )}
                                             </div>
                                             <div className="s-row" style={{ paddingLeft: 16, opacity: 0.85, marginTop: 2 }}>
@@ -849,7 +1066,7 @@ export default function SettingsModal({
 
                                 {/* Available models after save */}
                                 {Object.keys(availableModels).length > 0 && (
-                                    <div className="s-section" style={{ marginTop: 12, padding: '8px 10px', background: 'rgba(79,143,255,0.05)', borderRadius: 8, border: '1px solid rgba(79,143,255,0.15)' }}>
+                                    <div className="s-section" style={{ marginTop: 12, padding: '8px 10px', background: 'rgba(91,140,255,0.05)', borderRadius: 8, border: '1px solid rgba(91,140,255,0.15)' }}>
                                         <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--blue)', marginBottom: 6 }}>
                                             {t('Available Models', '可用模型')}
                                         </div>
@@ -857,6 +1074,7 @@ export default function SettingsModal({
                                             const providerNames: Record<string, string> = {
                                                 openai: 'OpenAI', anthropic: 'Claude', google: 'Gemini',
                                                 deepseek: 'DeepSeek', kimi: 'Kimi', qwen: '通义千问', ollama: 'Ollama',
+                                                minimax: 'MiniMax', zhipu: 'Zhipu/GLM', doubao: 'Doubao', yi: 'Yi/01.AI',
                                             };
                                             return (
                                                 <div key={provider} style={{ marginBottom: 4 }}>
@@ -1197,7 +1415,190 @@ export default function SettingsModal({
                                 </div>
                             </div>
                             <div className="s-section">
-                                <div className="s-section-title">{t('Image Generation Backend', '图像生成后端')}</div>
+                                <div className="s-section-title">{t('Image Generation (direct API) — v6.2', '图像生成（直连 API）— v6.2')}</div>
+                                <div className="s-row">
+                                    <label>{t('Provider', '服务商')}</label>
+                                    <select
+                                        className="s-input"
+                                        value={imgProvider}
+                                        onChange={e => {
+                                            const v = e.target.value as typeof imgProvider;
+                                            setImgProvider(v);
+                                            // Sensible default model per provider
+                                            if (v === 'doubao-image' || v === 'seedream') {
+                                                if (!imgDefaultModel) setImgDefaultModel('doubao-seedream-4-0-250828');
+                                            } else if (v === 'tongyi') {
+                                                if (!imgDefaultModel) setImgDefaultModel('wanx2.1-t2i-turbo');
+                                            } else if (v === 'flux-fal') {
+                                                if (!imgDefaultModel) setImgDefaultModel('fal-ai/flux/schnell');
+                                            } else if (v === 'openai-compat') {
+                                                if (!imgDefaultModel) setImgDefaultModel('dall-e-3');
+                                            }
+                                        }}
+                                    >
+                                        <option value="">{t('— none (disabled) —', '— 未启用 —')}</option>
+                                        <option value="doubao-image">{t('Doubao / Seedream (Volcengine, fastest)', '豆包 / Seedream（火山引擎，推荐最快）')}</option>
+                                        <option value="tongyi">{t('Tongyi WanX (Alibaba DashScope)', '通义万相（阿里 DashScope）')}</option>
+                                        <option value="flux-fal">{t('FLUX schnell (fal.ai, 1.5s)', 'FLUX schnell（fal.ai，1.5 秒）')}</option>
+                                        <option value="openai-compat">{t('OpenAI-compatible (relay / DALL-E-3)', 'OpenAI 兼容（中转站 / DALL-E-3）')}</option>
+                                    </select>
+                                </div>
+                                {imgProvider && (
+                                    <>
+                                        <div className="s-row">
+                                            <label>API Key</label>
+                                            <input
+                                                className="s-input"
+                                                type="password"
+                                                value={imgApiKey}
+                                                onChange={e => setImgApiKey(e.target.value.trim())}
+                                                placeholder={imgProvider === 'doubao-image' || imgProvider === 'seedream' ? 'Volcengine Ark API Key'
+                                                    : imgProvider === 'tongyi' ? 'sk-xxx (DashScope)'
+                                                        : imgProvider === 'flux-fal' ? 'fal.ai Key'
+                                                            : 'sk-xxx'}
+                                            />
+                                        </div>
+                                        {(imgProvider === 'openai-compat' || imgProvider === 'tongyi' || imgProvider === 'doubao-image' || imgProvider === 'seedream') && (
+                                            <div className="s-row">
+                                                <label>Base URL</label>
+                                                <input
+                                                    className="s-input"
+                                                    value={imgBaseUrl}
+                                                    onChange={e => setImgBaseUrl(sanitizeInput(e.target.value))}
+                                                    placeholder={imgProvider === 'openai-compat' ? 'https://your-relay/v1'
+                                                        : imgProvider === 'tongyi' ? 'https://dashscope.aliyuncs.com'
+                                                            : 'https://ark.cn-beijing.volces.com/api/v3'}
+                                                />
+                                            </div>
+                                        )}
+                                        <div className="s-row">
+                                            <label>{t('Model', '模型')}</label>
+                                            <input
+                                                className="s-input"
+                                                value={imgDefaultModel}
+                                                onChange={e => setImgDefaultModel(sanitizeInput(e.target.value))}
+                                                placeholder={imgProvider === 'doubao-image' || imgProvider === 'seedream' ? 'doubao-seedream-4-0-250828'
+                                                    : imgProvider === 'tongyi' ? 'wanx2.1-t2i-turbo'
+                                                        : imgProvider === 'flux-fal' ? 'fal-ai/flux/schnell'
+                                                            : 'dall-e-3'}
+                                            />
+                                        </div>
+                                        <div className="s-row">
+                                            <label>{t('Default Size', '默认尺寸')}</label>
+                                            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                                {[
+                                                    { v: '1024x1024', label: '1:1 sprite' },
+                                                    { v: '1920x1080', label: '16:9 hero' },
+                                                    { v: '1280x720', label: '16:9 PPT' },
+                                                    { v: '1536x1024', label: '3:2 banner' },
+                                                ].map(chip => (
+                                                    <button
+                                                        key={chip.v}
+                                                        type="button"
+                                                        onClick={() => setImgDefaultSize(chip.v)}
+                                                        style={{
+                                                            padding: '4px 10px',
+                                                            borderRadius: 6,
+                                                            border: imgDefaultSize === chip.v ? '1px solid #a855f7' : '1px solid rgba(255,255,255,0.1)',
+                                                            background: imgDefaultSize === chip.v ? 'rgba(168,85,247,0.15)' : 'transparent',
+                                                            color: imgDefaultSize === chip.v ? '#d4a8ff' : 'var(--text2)',
+                                                            fontSize: 11,
+                                                            cursor: 'pointer',
+                                                        }}
+                                                    >
+                                                        {chip.v} · {chip.label}
+                                                    </button>
+                                                ))}
+                                                <input
+                                                    className="s-input"
+                                                    value={imgDefaultSize}
+                                                    onChange={e => setImgDefaultSize(sanitizeInput(e.target.value))}
+                                                    placeholder="custom WxH"
+                                                    style={{ maxWidth: 140 }}
+                                                />
+                                            </div>
+                                        </div>
+                                        <div className="s-row">
+                                            <label>{t('Max Images / Run', '单次上限')}</label>
+                                            <input
+                                                className="s-input"
+                                                type="number"
+                                                min={1}
+                                                max={40}
+                                                value={imgMaxImages}
+                                                onChange={e => setImgMaxImages(Math.max(1, Math.min(40, Number(e.target.value) || 10)))}
+                                                style={{ maxWidth: 100 }}
+                                            />
+                                        </div>
+                                        <div className="s-toggle" style={{ marginTop: 6 }}>
+                                            <label>{t('Auto-crop to 16:9 / 4:3 / 1:1 / 3:4', '自动裁剪为 16:9 / 4:3 / 1:1 / 3:4')}</label>
+                                            <input type="checkbox" checked={imgAutoCrop} onChange={e => setImgAutoCrop(e.target.checked)} />
+                                        </div>
+                                        <div className="s-row" style={{ marginTop: 8 }}>
+                                            <label>{t('Connectivity Test', '连通测试')}</label>
+                                            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                                                <button
+                                                    type="button"
+                                                    className="btn-ghost"
+                                                    disabled={imgTestLoading || !imgProvider || !imgApiKey}
+                                                    onClick={async () => {
+                                                        setImgTestLoading(true);
+                                                        setImgTestResult(null);
+                                                        try {
+                                                            const resp = await fetch(`${API_BASE}/api/settings/image_gen/test`, {
+                                                                method: 'POST',
+                                                                headers: { 'Content-Type': 'application/json' },
+                                                                body: JSON.stringify({
+                                                                    provider: imgProvider,
+                                                                    api_key: imgApiKey,
+                                                                    base_url: imgBaseUrl,
+                                                                    default_model: imgDefaultModel,
+                                                                    default_size: imgDefaultSize,
+                                                                }),
+                                                            });
+                                                            const result = await resp.json();
+                                                            setImgTestResult(result);
+                                                        } catch (e) {
+                                                            setImgTestResult({ ok: false, error: String(e) });
+                                                        } finally {
+                                                            setImgTestLoading(false);
+                                                        }
+                                                    }}
+                                                    style={{ padding: '6px 14px', fontSize: 12 }}
+                                                >
+                                                    {imgTestLoading ? t('Testing…', '测试中…') : t('🧪 Test & Preview', '🧪 测试并预览')}
+                                                </button>
+                                                {imgTestResult && imgTestResult.ok && imgTestResult.image_base64 && (
+                                                    <>
+                                                        <img
+                                                            src={imgTestResult.image_base64}
+                                                            alt="test preview"
+                                                            style={{ width: 64, height: 64, borderRadius: 6, border: '1px solid rgba(255,255,255,0.1)', objectFit: 'cover' }}
+                                                        />
+                                                        <span style={{ color: '#22c55e', fontSize: 11 }}>
+                                                            ✓ {imgTestResult.latency_ms}ms
+                                                        </span>
+                                                    </>
+                                                )}
+                                                {imgTestResult && !imgTestResult.ok && (
+                                                    <span style={{ color: '#ef4444', fontSize: 11 }}>
+                                                        ✗ {imgTestResult.error}
+                                                    </span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </>
+                                )}
+                                <div className="s-hint" style={{ lineHeight: 1.7, marginTop: 10 }}>
+                                    {imgProvider
+                                        ? t('Direct provider active — the imagegen node will call this API. Legacy ComfyUI fields below are ignored.',
+                                            '直连 provider 已启用 — imagegen 节点会调此 API，下方 ComfyUI 字段会被忽略。')
+                                        : t('Select a provider above to enable real image generation. Leave empty to use ComfyUI (if configured) or SVG placeholders.',
+                                            '选择一个 provider 以启用真实图片生成。留空则使用 ComfyUI（若已配置）或 SVG 占位图。')}
+                                </div>
+                            </div>
+                            <div className="s-section">
+                                <div className="s-section-title">{t('ComfyUI (legacy)', 'ComfyUI（旧路径）')}</div>
                                 <div className="s-row">
                                     <label>ComfyUI URL</label>
                                     <input
@@ -1504,6 +1905,30 @@ export default function SettingsModal({
                                 <div className="s-toggle">
                                     <label>{t('Enable CLI Mode', '启用 CLI 模式')}</label>
                                     <input type="checkbox" checked={cliEnabled} onChange={e => setCliEnabled(e.target.checked)} />
+                                </div>
+                                {/* v7.1i (maintainer 2026-04-25): Ultra Mode toggle.
+                                    Was missing in UI — backend supports cli_mode.ultra_mode but
+                                    users couldn't see/toggle it. Ultra mode routes every dispatch
+                                    through 14-NE pro plan (analyst + uidesign + scribe + 4 builder
+                                    parallel + merger + polisher + reviewer + patcher + deployer +
+                                    tester + debugger). Without it CLI mode falls back to standard
+                                    4-NE plan (builder + reviewer + deployer + tester). */}
+                                <div className="s-toggle" style={{ marginTop: 6 }}>
+                                    <label>
+                                        {t('Ultra Mode', 'Ultra 模式')}
+                                        <span style={{ fontSize: 11, opacity: 0.7, marginLeft: 8 }}>
+                                            {t(
+                                                '14-node DAG: 4 parallel builders + analyst + uidesign + scribe + merger + polisher + reviewer + patcher + deployer + tester + debugger',
+                                                '14 节点 DAG：4 并行 builder + analyst + uidesign + scribe + merger + polisher + reviewer + patcher + deployer + tester + debugger',
+                                            )}
+                                        </span>
+                                    </label>
+                                    <input
+                                        type="checkbox"
+                                        checked={cliUltraMode}
+                                        disabled={!cliEnabled}
+                                        onChange={e => setCliUltraMode(e.target.checked)}
+                                    />
                                 </div>
                                 {/* Save button — prominently placed right after toggle */}
                                 <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 10 }}>
@@ -1817,11 +2242,53 @@ export default function SettingsModal({
                             <div className="s-section">
                                 <div className="s-section-title">{t('Language', '语言')}</div>
                                 <div className="s-row">
-                                    <label>{t('Language', '语言')}</label>
+                                    <label>{t('UI Language', '界面语言')}</label>
                                     <select className="s-input" value={lang} onChange={e => onLangChange(e.target.value as 'en' | 'zh')} style={{ width: 'auto' }}>
                                         <option value="zh">中文</option>
                                         <option value="en">English</option>
                                     </select>
+                                </div>
+                                <div className="s-row">
+                                    <label>{t('Walkthrough Language', '节点报告语言')}</label>
+                                    <select
+                                      className="s-input"
+                                      value={walkthroughLang}
+                                      onChange={e => setWalkthroughLang(e.target.value as '' | 'zh' | 'en')}
+                                      style={{ width: 'auto' }}
+                                    >
+                                        <option value="">{t('Follow UI', '跟随界面语言')}</option>
+                                        <option value="zh">{t('Chinese', '中文（纯中文报告）')}</option>
+                                        <option value="en">{t('English', 'English (reports in English)')}</option>
+                                    </select>
+                                </div>
+                                <div className="s-hint" style={{ fontSize: 11, color: '#8891a0', marginTop: 4 }}>
+                                  {t(
+                                    'Node walkthrough reports (the per-node analysis) follow this language. Code identifiers and file paths always stay in English.',
+                                    '节点 walkthrough 报告（每个节点的技术分析）使用该语言输出。代码标识符和文件路径保留英文。'
+                                  )}
+                                </div>
+                            </div>
+                            <div className="s-section">
+                                <div className="s-section-title">{t('Parallel Builder Strategy', '并行 Builder 策略')}</div>
+                                <div className="s-row">
+                                    <label style={{ flex: 1 }}>
+                                      {t('Share primary model across parallel builders when 2 keys are configured',
+                                         '配置了两个 key 时，并行 Builder 共用首选模型')}
+                                    </label>
+                                    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                                      <input
+                                        type="checkbox"
+                                        checked={peerBuildersShareModelWhenMultikey}
+                                        onChange={e => setPeerBuildersShareModelWhenMultikey(e.target.checked)}
+                                      />
+                                      <span>{peerBuildersShareModelWhenMultikey ? t('On', '开') : t('Off', '关')}</span>
+                                    </label>
+                                </div>
+                                <div className="s-hint" style={{ fontSize: 11, color: '#8891a0', marginTop: 4, lineHeight: 1.5 }}>
+                                  {t(
+                                    'When ON and you\'ve filled both primary + secondary API keys for the top builder provider (e.g. kimi_api_key + kimi_api_key_2), parallel peer builders all use your preferred first model — the two keys round-robin to avoid rate limits. When OFF (or only one key is set), peer builder #2 falls through to the second configured model to avoid hitting one key\'s quota.',
+                                    '开启后：若你给首选 Builder 模型填了 primary + secondary 两个 key（比如 kimi_api_key + kimi_api_key_2），并行的多个 Builder 都用你设的第一个模型，两张 key 自动轮流分流，避免单 key 被限速。关闭（或只配 1 个 key）时：第二个 Builder 自动降级到你配的第二个模型，避免把首选 key 撞爆。'
+                                  )}
                                 </div>
                             </div>
                             <div className="s-section">

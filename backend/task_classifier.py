@@ -185,8 +185,25 @@ _GAME_2D_ENGINE_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 _GAME_3D_ENGINE_HINT_RE = re.compile(
-    r"(3d|three\.?js|webgl|webgpu|fps|first[- ]?person|third[- ]?person|racing|driving|flight|space sim|"
-    r"shader|voxel|open world|sandbox|survival|建模|模型|第一人称|第三人称|赛车|飞行|太空|着色器|体素|开放世界|沙盒|生存)",
+    # v7.4.2: was firing on "建模" (modeling) which 2D games also use for
+    # sprite/character art design (PvZ goal "建模精致" → mis-routed to 3D
+    # engine path → Three.js runtime preloaded → builder produced PvZ-3D).
+    # Removed bare 建模/模型 — only count them as 3D when paired with an
+    # actual 3D-context word.
+    r"(\b3d\b|three\.?js|webgl|webgpu|fps|first[- ]?person|third[- ]?person|"
+    r"racing|driving|flight|space sim|shader|voxel|open world|sandbox|survival|"
+    r"3d\s*建模|3d\s*模型|三维\s*建模|3d\s*model|polygonal|低多边形|low[- ]?poly|"
+    r"第一人称|第三人称|赛车|飞行|太空|着色器|体素|开放世界|沙盒|生存)",
+    re.IGNORECASE,
+)
+# v7.4.2: explicit 2D markers — take precedence over 3D hints when present.
+# User saying "2d的植物大战僵尸" or "二维" should always win over auxiliary
+# words like "建模/模型" that previously dragged the goal into 3D mode.
+_GAME_EXPLICIT_2D_RE = re.compile(
+    r"(\b2d\b|2-d|二维|平面|side[- ]?scroll|横版|top[- ]?down|俯视|tile[- ]?map|"
+    r"sprite|精灵图|塔防|tower\s*defense|植物大战僵尸|plants?\s*vs\.?\s*zombies|pvz|"
+    r"消消乐|match[- ]?3|三消|纸牌|card\s*game|deckbuild|象棋|围棋|跳棋|chess|"
+    r"贪吃蛇|snake|tetris|俄罗斯方块|2048|sudoku|数独|扫雷|minesweeper|pong|breakout)",
     re.IGNORECASE,
 )
 _GAME_EXISTING_PROJECT_RE = re.compile(
@@ -505,11 +522,15 @@ def game_runtime_mode(goal: str) -> str:
         return ""
     if _GAME_ENGINE_AVOID_RE.search(text):
         return "none"
-    if _GAME_3D_ENGINE_HINT_RE.search(text):
+    # v7.4.2: explicit 2D markers (the user said "2d", "塔防", "PvZ", etc.)
+    # take precedence over 3D hints. Without this, "2d的植物大战僵尸…建模精致"
+    # gets routed to 3d_engine because "建模" used to match the 3D regex.
+    explicit_2d = bool(_GAME_EXPLICIT_2D_RE.search(text))
+    if _GAME_3D_ENGINE_HINT_RE.search(text) and not explicit_2d:
         return "3d_engine"
     if _GAME_SIMPLE_ENGINELESS_RE.search(text) and not _GAME_2D_ENGINE_HINT_RE.search(text):
         return "none"
-    if _GAME_2D_ENGINE_HINT_RE.search(text):
+    if _GAME_2D_ENGINE_HINT_RE.search(text) or explicit_2d:
         return "2d_engine"
     return "none"
 
@@ -941,9 +962,24 @@ def suggested_multi_page_route_filenames(goal: str) -> List[str]:
 
 _PATTERNS: list[tuple[str, re.Pattern]] = [
     ("game", re.compile(
-        r"(游戏|game|play|pixel|像素|弹球|贪吃蛇|snake|tetris|俄罗斯方块|打飞机|射击|"
-        r"platformer|跑酷|flappy|pong|breakout|chess|棋|card game|纸牌|rpg|冒险|"
-        r"arcade|迷宫|maze|puzzle game|益智游戏|打砖块|消消乐|match-3|tower defense|塔防)",
+        # v7.3.3 audit fix MAJOR-3+4: tighten "boss" / "monster" / "score" /
+        # "player" / "health" so they only fire in clear game context. Plain
+        # "boss site" / "monster.com" / "health score" should NOT classify
+        # as game. Strong game-shape words (游戏/手游/gameplay/塔防/关卡/...)
+        # remain bare. Ambiguous words now require a co-occurring game cue.
+        # v7.3.4 audit MINOR-5: replace `\bgame\b` with a non-letter boundary
+        # so "videogame" / "minigame" / "rpg-game" also match. Pure `\b` in
+        # Python (UNICODE) treats letters as word chars, so it doesn't fire
+        # between two ascii letters.
+        r"(游戏|手游|网游|端游|gameplay|(?:^|[\s_\-])game(?=\W|$)|videogame|minigame|pixel\s*art|像素游戏|弹球|贪吃蛇|snake\s*game|tetris|俄罗斯方块|打飞机|射击游戏|"
+        r"platformer|跑酷|flappy|pong|breakout|chess|棋|card\s*game|纸牌游戏|\brpg\b|"
+        r"arcade|迷宫|maze\s*game|puzzle\s*game|益智游戏|打砖块|消消乐|match-3|tower\s*defense|塔防|"
+        # v7.3.2 expanded — these stay broad (already game-distinct)
+        r"植物大战僵尸|pvz|plant.{0,4}zombie|僵尸|zombie\s*game|boss\s*(?:fight|battle|战|关|stage|hp)|boss战|"
+        r"关卡|level\s*design|level\s*select|玩法|spawn|enemies|血量|"
+        r"角色扮演|动作游戏|策略游戏|休闲游戏|横版|roguelike|metroidvania|\bfps\b\s*game|\btps\b\s*game|moba|"
+        # ambiguous words gated behind "(.*game|游戏)" — won't false-positive
+        r"(?:monster|怪物|player|hp|health|score|积分|leaderboard).{0,40}(?:game|游戏|gameplay|关卡|塔防|fight|spawn))",
         re.IGNORECASE,
     )),
     ("dashboard", re.compile(
@@ -1095,7 +1131,7 @@ PROFILES: Dict[str, TaskProfile] = {
             "GAME DESIGN SYSTEM:\n"
             "{{GAME_RUNTIME_BLOCK}}"
             "A. RENDERING ENGINE SELECTION (determined by the runtime contract above):\n"
-            "   ★ If runtime mode is 3d_engine: You MUST use Three.js. Canvas2D getContext('2d') is FORBIDDEN.\n"
+            "   -If runtime mode is 3d_engine: You MUST use Three.js. Canvas2D getContext('2d') is FORBIDDEN.\n"
             "     Load Three.js locally: <script src='./_evermind_runtime/three/three.min.js'></script>\n"
             "     MANDATORY minimum scaffolding for 3D games:\n"
             "       const scene = new THREE.Scene();\n"
@@ -1108,7 +1144,7 @@ PROFILES: Dict[str, TaskProfile] = {
             "{{GAME_3D_MODELING_BLOCK}}"
             "     Use THREE.DirectionalLight + THREE.AmbientLight for lighting.\n"
             "     NEVER use getContext('2d') or Canvas2D drawing calls when the runtime mode is 3d_engine.\n"
-            "   ★ If runtime mode is none or 2d_engine: Use <canvas> for rendering (2D context) OR pure CSS/DOM.\n"
+            "   -If runtime mode is none or 2d_engine: Use <canvas> for rendering (2D context) OR pure CSS/DOM.\n"
             "B. Implement a proper game loop: requestAnimationFrame with delta time\n"
             "C. State machine: MENU → PLAYING → PAUSED → GAME_OVER\n"
             "D. Keyboard/touch input handling with event listeners on document (NOT canvas)\n"
@@ -1224,7 +1260,7 @@ PROFILES: Dict[str, TaskProfile] = {
             "B. Large, clear input areas with proper labels and placeholders\n"
             "C. Instant feedback — output updates live as user types (no page reload)\n"
             "D. Color: neutral bg (#f5f5f5 or #1a1a2e dark), accent for interactive elements\n"
-            "E. Copy-to-clipboard buttons on outputs (with ✓ feedback animation)\n"
+            "E. Copy-to-clipboard buttons on outputs (with checkmark feedback animation)\n"
             "F. Input validation with clear error states (red border + message)\n"
             "G. Keyboard shortcuts where applicable\n"
             "H. Responsive: works on mobile (min-width:320px)\n"
@@ -1356,12 +1392,60 @@ def classify(goal: str) -> TaskProfile:
     text = (goal or "").strip()
     pattern_map = {task_type: pattern for task_type, pattern in _PATTERNS}
 
+    # v6.0 FIX: builder/orchestrator frequently concatenates user goal with
+    # harness reference blocks containing words like "GAME/INTERACTIVE", or
+    # "runtime loop", or "start screen". Those literal keywords used to win
+    # the game-pattern match and turn a "Hello landing page" into a game
+    # task — the quality gate then rejected valid HTML for "missing gameplay".
+    # Trim everything after the first harness / reference separator and only
+    # look at the first 800 chars of the real user intent.
+    _separators = (
+        "\n=== REFERENCE",
+        "\n=== HARNESS",
+        "\n--- HARNESS",
+        "\nGAME/INTERACTIVE",
+        "\n[BUILDER_",
+        "\n=== BUILDER",
+    )
+    lower_text = text.lower()
+    cut = len(text)
+    for sep in _separators:
+        idx = lower_text.find(sep.lower())
+        if idx >= 0 and idx < cut:
+            cut = idx
+    text = text[:cut][:800].strip() or (goal or "").strip()
+
     # Keep explicit product-shape tasks deterministic. A "website with animation"
     # is still a website and should keep the website delivery contract.
-    for task_type in ("game", "dashboard", "tool", "presentation"):
+    #
+    # v7.2 (maintainer 2026-04-26) FIX — strong website-signal pre-empts presentation.
+    # Observed run_d9d45558eb79: user goal "类似淘宝的购物网站...还有动画演示等等"
+    # was misclassified as presentation/slides because presentation pattern
+    # contains the bare word "演示". The single character "演示" should NOT
+    # outweigh "网站/购物/电商" which are unambiguous website signals.
+    # Apply game/dashboard/tool first (specific shapes), THEN check for
+    # strong website signals before falling through to presentation.
+    for task_type in ("game", "dashboard", "tool"):
         pattern = pattern_map.get(task_type)
         if pattern and pattern.search(text):
             return PROFILES[task_type]
+
+    # v7.2 strong-website pre-empt: explicit product-shape words mean website,
+    # even if the brief mentions presentation/animation as features.
+    _strong_website = re.compile(
+        r"(网站|website|网页|web\s*page|官网|商城|电商|e[\-\s]?commerce|"
+        r"shop(?:ping)?|store|landing|着陆页|portfolio|作品集|"
+        r"博客|blog|首页|homepage|产品页|product\s*page|"
+        r"company\s*site|企业站|brand\s*site|品牌站|"
+        r"餐厅|restaurant|hotel|酒店|home\s*page)",
+        re.IGNORECASE,
+    )
+    if _strong_website.search(text):
+        return PROFILES["website"]
+
+    presentation_pattern = pattern_map.get("presentation")
+    if presentation_pattern and presentation_pattern.search(text):
+        return PROFILES["presentation"]
 
     website_pattern = pattern_map.get("website")
     if website_pattern and website_pattern.search(text):

@@ -379,7 +379,7 @@ NODE_ROLE_TOOLS: Dict[str, List[str]] = {
         "file_read", "file_write", "file_list", "grep_search",
     ],
     "uidesign": [
-        "web_fetch", "web_search", "file_read", "file_list", "glob",
+        "web_fetch", "file_read", "file_list", "glob",
     ],
     "scribe": [
         "file_read", "file_write", "file_list", "grep_search",
@@ -441,6 +441,67 @@ class AgenticLoop:
         "file_read", "file_list", "glob", "grep_search", "multi_file_read",
         "web_search", "web_fetch",
     })
+
+    # v6.1.6 (maintainer 2026-04-19, OpenHands-inspired condensation)
+    # When the loop hits a safety limit (max_iter/max_tool/loop_detected),
+    # compress old tool_result bodies into short summaries before giving up.
+    # If after condensation the model can still produce useful progress,
+    # we keep going — matches OpenHands LLMSummarizingCondenser philosophy
+    # (https://github.com/All-Hands-AI/OpenHands/tree/main/openhands/memory/condenser).
+    _CONDENSATION_MAX_ATTEMPTS = 1  # one rescue per run — not unlimited
+
+    def _try_condensation(self, reason: str) -> bool:
+        """Compress tool_result bodies to buy one more iteration.
+
+        Lightweight (no extra LLM call): keeps the LAST 4 tool_results verbatim;
+        earlier tool_results shrink to a 200-char excerpt + tool name. Returns
+        True if meaningful compression happened, False otherwise.
+        """
+        if getattr(self, "_condensation_attempts", 0) >= self._CONDENSATION_MAX_ATTEMPTS:
+            return False
+        messages = self.context.messages if hasattr(self.context, "messages") else None
+        if not messages or len(messages) < 10:
+            return False
+        # Find tool-result messages (role="tool"). Keep last 4, shrink earlier.
+        tool_indices = [i for i, m in enumerate(messages) if m.get("role") == "tool"]
+        if len(tool_indices) < 6:
+            return False
+        shrink_targets = tool_indices[:-4]
+        bytes_saved = 0
+        for idx in shrink_targets:
+            msg = messages[idx]
+            original = str(msg.get("content") or "")
+            if len(original) <= 240:
+                continue
+            # Keep first 100 + ... + last 100 = 200 chars "receipt"
+            compact = original[:100] + " … [condensed] … " + original[-100:]
+            msg["content"] = compact
+            bytes_saved += len(original) - len(compact)
+        # Also shrink assistant narration if it's long
+        for i, m in enumerate(messages):
+            if m.get("role") == "assistant" and i < len(messages) - 4:
+                c = str(m.get("content") or "")
+                if len(c) > 400:
+                    m["content"] = c[:200] + " … [condensed] … "
+                    bytes_saved += len(c) - len(str(m["content"]))
+        if bytes_saved < 500:
+            return False
+        self._condensation_attempts = getattr(self, "_condensation_attempts", 0) + 1
+        # Opus R1 fix: keep ContextWindow.current_tokens consistent — other
+        # compaction paths (snip/micro/nuclear) maintain this counter, so the
+        # needs_compression heuristic stays accurate after condensation.
+        if hasattr(self.context, "current_tokens"):
+            approx_tokens_saved = bytes_saved // 4
+            self.context.current_tokens = max(
+                0, int(self.context.current_tokens) - approx_tokens_saved
+            )
+        logger.info(
+            "Condensation applied: reason=%s bytes_saved=%d targets=%d node=%s",
+            reason, bytes_saved, len(shrink_targets), self.config.node_key,
+        )
+        # Reset loop signatures so we don't immediately re-trigger loop_detected
+        self._recent_actions = []
+        return True
 
     async def _execute_single_tool(self, tc: "ToolCall") -> None:
         """Execute a single tool call and populate its result/error fields."""
@@ -522,6 +583,17 @@ class AgenticLoop:
             return False
 
         window = self._recent_actions[-self._loop_detection_window:]
+        # v6.1.4 (maintainer 2026-04-19): research showed reviewer repeat-screenshot
+        # pattern didn't trigger prior 6-identical rule. Add: 4 consecutive
+        # identical tool_calls in the window is a stuck signal — matches Cursor's
+        # "Loop at most 3 times then ask" contract.
+        tail4 = window[-4:]
+        if len(tail4) == 4 and len(set(tail4)) == 1 and tail4[0].startswith("tool:"):
+            logger.warning(
+                "Loop detected (4 consecutive identical tool_calls): %s (node=%s)",
+                tail4, self.config.node_key,
+            )
+            return True
         # Exact repetition: all entries in the window are identical (true stuck loop)
         if len(set(window)) == 1:
             logger.warning(
@@ -589,6 +661,9 @@ class AgenticLoop:
 
             # Safety: max iterations
             if self.iteration > self.config.max_iterations:
+                if self._try_condensation("max_iterations"):
+                    self.iteration -= 1  # give the rescued turn a fair shot
+                    continue
                 logger.warning("Agentic loop hit max iterations (%d)", self.config.max_iterations)
                 self._exhaustion_reason = "max_iterations"
                 self.state = LoopState.COMPLETED
@@ -604,6 +679,8 @@ class AgenticLoop:
 
             # Safety: total tool calls
             if self.total_tool_calls > self.config.max_tool_calls:
+                if self._try_condensation("max_tool_calls"):
+                    continue
                 logger.warning("Agentic loop hit max tool calls (%d)", self.config.max_tool_calls)
                 self._exhaustion_reason = "max_tool_calls"
                 self.state = LoopState.COMPLETED
@@ -694,6 +771,9 @@ class AgenticLoop:
                     # v3.0.5 FIX: Include argument hash so read("a.py") ≠ read("b.py")
                     _args_hash = hashlib.md5(str(tc.arguments).encode()).hexdigest()[:8]
                     if self._detect_loop(f"tool:{tc.name}:{_args_hash}"):
+                        if self._try_condensation("loop_detected"):
+                            # Skip this exact repeat but let the next iteration run
+                            return True
                         self._exhaustion_reason = "loop_detected"
                         self.state = LoopState.COMPLETED
                         return False
@@ -713,7 +793,11 @@ class AgenticLoop:
                     all_tool_calls.append(tc)
                     return True
 
-                # Phase 1: Run concurrent-safe tools in parallel
+                # Phase 1: Run concurrent-safe tools in parallel (Claude Code
+                # partitionToolCalls + runConcurrently style). Reads like
+                # file_read / glob / grep_search all execute simultaneously.
+                # v6.1.8 Wave C (maintainer 2026-04-19): observed latency for this
+                # path to confirm the concurrency win is actually happening.
                 if concurrent_batch and self.state not in (LoopState.COMPLETED, LoopState.FAILED):
                     # Pre-check: how many can we still run?
                     budget = self.config.max_tool_calls - self.total_tool_calls
@@ -722,7 +806,17 @@ class AgenticLoop:
                         self.total_tool_calls += len(runnable)
                         for tc in runnable:
                             await self._emit("tool_start", tool=tc.name, args_preview=str(tc.arguments)[:200])
+                        _phase1_t0 = time.time()
                         await asyncio.gather(*(self._execute_single_tool(tc) for tc in runnable))
+                        _phase1_dt = (time.time() - _phase1_t0) * 1000.0
+                        if len(runnable) >= 2:
+                            _seq_est = sum(tc.duration_ms for tc in runnable)
+                            _saved = max(0, _seq_est - _phase1_dt)
+                            logger.info(
+                                "concurrent_tools: ran=%d parallel=%dms sequential_est=%dms saved=%dms node=%s",
+                                len(runnable), int(_phase1_dt), int(_seq_est),
+                                int(_saved), self.config.node_key,
+                            )
                         for tc in runnable:
                             await self._emit("tool_end", tool=tc.name, duration_ms=round(tc.duration_ms),
                                              success=tc.error is None, result_preview=str(tc.result or "")[:200])

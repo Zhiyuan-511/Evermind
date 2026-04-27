@@ -40,7 +40,7 @@ export default function GlobalError({
         alignItems: 'center',
         justifyContent: 'center',
         padding: 24,
-        background: 'radial-gradient(circle at top, rgba(79,143,255,0.14), transparent 42%), #0f1117',
+        background: 'radial-gradient(circle at top, rgba(91,140,255,0.14), transparent 42%), #0f1117',
         color: '#f5f7fb',
       }}
     >
@@ -85,7 +85,7 @@ export default function GlobalError({
               border: 'none',
               borderRadius: 12,
               padding: '11px 16px',
-              background: '#4f8fff',
+              background: '#5B8CFF',
               color: '#fff',
               fontWeight: 700,
               cursor: 'pointer',

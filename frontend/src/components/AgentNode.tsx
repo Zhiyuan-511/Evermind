@@ -76,25 +76,73 @@ function getLatencyColor(ms: number): string {
     return '#ff4f6a';                     // red: slow (>30s)
 }
 
-// Preset model list for per-node selection
-const AVAILABLE_MODELS = [
-    { id: 'gpt-5.4', label: 'GPT-5.4', provider: 'OpenAI' },
-    { id: 'gpt-4o', label: 'GPT-4o', provider: 'OpenAI' },
-    { id: 'gpt-4o-mini', label: 'GPT-4o Mini', provider: 'OpenAI' },
-    { id: 'claude-4-sonnet', label: 'Claude 4 Sonnet', provider: 'Anthropic' },
-    { id: 'claude-3.5-sonnet', label: 'Claude 3.5 Sonnet', provider: 'Anthropic' },
-    { id: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro', provider: 'Google' },
-    { id: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash', provider: 'Google' },
-    { id: 'kimi', label: 'Kimi', provider: 'Moonshot' },
-    { id: 'kimi-k2.5', label: 'Kimi K2.5', provider: 'Moonshot' },
-    { id: 'kimi-coding', label: 'Kimi Coding', provider: 'Moonshot' },
-    { id: 'deepseek-r1', label: 'DeepSeek R1', provider: 'DeepSeek' },
-    { id: 'deepseek-v3', label: 'DeepSeek V3', provider: 'DeepSeek' },
-    { id: 'qwen-max', label: 'Qwen Max', provider: 'Alibaba' },
-    { id: 'qwen-plus', label: 'Qwen Plus', provider: 'Alibaba' },
-    { id: 'doubao-pro', label: '豆包 Pro', provider: 'ByteDance' },
-    { id: 'glm-4', label: 'GLM-4', provider: 'Zhipu' },
-];
+// v5.8.6: dynamic model list — only shows models whose provider has a key
+// configured. Fetched from /api/models (which returns has_key per model) and
+// cached at module level so all AgentNode instances share one fetch.
+const PROVIDER_LABEL: Record<string, string> = {
+    openai: 'OpenAI',
+    anthropic: 'Claude',
+    google: 'Gemini',
+    deepseek: 'DeepSeek',
+    kimi: 'Kimi',
+    qwen: 'Qwen',
+    zhipu: 'Zhipu/GLM',
+    doubao: 'Doubao',
+    yi: 'Yi',
+    minimax: 'MiniMax',
+    aigate: 'AiGate',
+    ollama: 'Ollama',
+};
+interface AvailableModel { id: string; label: string; provider: string }
+// Module-level cache — shared across all AgentNode instances.
+let _modelCatalogCache: AvailableModel[] | null = null;
+let _modelCatalogFetchedAt = 0;
+const _modelCatalogSubscribers = new Set<(list: AvailableModel[]) => void>();
+const MODEL_CATALOG_TTL_MS = 30_000;
+
+async function fetchAvailableModels(): Promise<AvailableModel[]> {
+    // v5.8.6 FIX: removed 30s cache — if a stale Backend response (e.g.
+    // before the /api/models duplicate-route fix) ever set the cache with
+    // all-models (no has_key filter applied), users saw claude/gemini/etc
+    // in the dropdown even after backend started returning has_key=false
+    // for those providers. Always hit /api/models on each fetch; the
+    // endpoint is cheap (~5ms) and the dropdown open is rare.
+    const now = Date.now();
+    try {
+        const base = (typeof window !== 'undefined' && (window as unknown as { __evermindApiBase?: string }).__evermindApiBase)
+            || 'http://127.0.0.1:8765';
+        const resp = await fetch(`${base}/api/models`, { cache: 'no-store' });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data: { models?: Array<{ id: string; provider: string; has_key?: boolean }> } = await resp.json();
+        const models = (data.models || [])
+            .filter((m) => m.has_key === true)
+            .map((m) => ({
+                id: m.id,
+                label: m.id,
+                provider: PROVIDER_LABEL[m.provider] || m.provider,
+            }));
+        _modelCatalogCache = models;
+        _modelCatalogFetchedAt = now;
+        _modelCatalogSubscribers.forEach((cb) => { try { cb(models); } catch { /* swallow */ } });
+        return models;
+    } catch {
+        const fallback: AvailableModel[] = [
+            { id: 'aigate-kimi-k2.5', label: 'aigate-kimi-k2.5', provider: 'AiGate' },
+            { id: 'aigate-qwen3.6-plus', label: 'aigate-qwen3.6-plus', provider: 'AiGate' },
+            { id: 'aigate-deepseek-v3.2', label: 'aigate-deepseek-v3.2', provider: 'AiGate' },
+        ];
+        _modelCatalogCache = fallback;
+        _modelCatalogFetchedAt = now;
+        return fallback;
+    }
+}
+
+// Force a refresh — called by Settings save to repopulate immediately.
+export function invalidateAvailableModels(): void {
+    _modelCatalogCache = null;
+    _modelCatalogFetchedAt = 0;
+    fetchAvailableModels();  // re-prime
+}
 
 function AgentNode({ id, data, selected }: NodeProps) {
     const nodeType = data.nodeType as string || 'builder';
@@ -103,7 +151,44 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const progress = Math.max(0, Math.min(100, (data.progress as number) || 0));
     const model = (data.model as string) || '';
     const assignedModel = (data.assignedModel as string) || '';
-    const displayModel = assignedModel || model || 'gpt-5.4';
+    // v7.1g (maintainer 2026-04-25): friendly label for `cli:<cli>:<model>` strings.
+    // Backend now writes assigned_model = "cli:gemini:gemini-3.1-pro-preview"
+    // (32 chars) for CLI-routed nodes. Raw form overflows the 8px chip and
+    // looks like garbage. Map to short pretty labels:
+    //   cli:gemini:gemini-3.1-pro-preview → "Gemini 3.1 Pro"
+    //   cli:claude:opus  → "Claude Opus"
+    //   cli:codex:gpt-5.4 → "Codex GPT-5.4"
+    //   cli:gemini       → "Gemini CLI"
+    function formatCliLabel(raw: string): string {
+        if (!raw.startsWith('cli:')) return raw;
+        const parts = raw.split(':');
+        const cliName = parts[1] || '';
+        const subModel = (parts[2] || '').toLowerCase();
+        const cliPretty = cliName.charAt(0).toUpperCase() + cliName.slice(1);
+        if (!subModel) return `${cliPretty} CLI`;
+        // Gemini variants
+        if (subModel.includes('gemini-3.1-pro')) return 'Gemini 3.1 Pro';
+        if (subModel.includes('gemini-3.0-flash')) return 'Gemini 3.0 Flash';
+        if (subModel.includes('gemini-2.5-pro')) return 'Gemini 2.5 Pro';
+        if (subModel.includes('gemini-2.5-flash')) return 'Gemini 2.5 Flash';
+        if (subModel.includes('gemini-2.0-flash')) return 'Gemini 2.0 Flash';
+        if (subModel.startsWith('gemini-')) return `Gemini ${subModel.slice(7).split('-').slice(0,2).join(' ').replace(/\b\w/g, c => c.toUpperCase())}`;
+        // Claude variants
+        if (subModel === 'opus') return 'Claude Opus';
+        if (subModel === 'sonnet') return 'Claude Sonnet';
+        if (subModel === 'haiku') return 'Claude Haiku';
+        if (subModel.includes('claude-opus-4')) return 'Claude Opus 4';
+        if (subModel.includes('claude-sonnet-4')) return 'Claude Sonnet 4';
+        if (subModel.includes('claude-haiku-4')) return 'Claude Haiku 4';
+        // Codex / OpenAI variants
+        if (subModel.startsWith('gpt-')) return `Codex ${subModel.toUpperCase()}`;
+        if (subModel.startsWith('o3') || subModel.startsWith('o4')) return `Codex ${subModel}`;
+        // Fallback
+        return `${cliPretty} ${subModel}`;
+    }
+    const rawModel = assignedModel || model || 'gpt-5.4';
+    const displayModel = formatCliLabel(rawModel);
+    const isCliModel = rawModel.startsWith('cli:');
     const lang = (data.lang as string) || 'en';
     const lastOutput = data.lastOutput as string || '';
     const outputSummary = data.outputSummary as string || '';
@@ -112,7 +197,25 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const startedAt = data.startedAt as number || 0;
     const endedAt = data.endedAt as number || 0;
     const durationText = startedAt > 0 ? formatDuration(startedAt, endedAt) : '';
-    const codeLines = data.codeLines as number || 0;
+    // v6.0: fall back to totalLines when codeLines is 0. Non-code nodes
+    // (imagegen/analyst producing markdown/SVG/JSON) previously showed 0
+    // because code_lines only counts HTML/JS/CSS/Python. That made the UI
+    // look frozen at "0 lines" even though the node was writing 203 lines
+    // of useful output. Show whichever is larger so the bar always reflects
+    // real progress.
+    // v6.1: mirror NodeDetailPopup's minified-file fallback so a 49KB one-liner
+    // no longer renders as "1 line". When codeLines<=1 but we clearly have a
+    // fat file (kb>=2), estimate from byte size (~80 chars/line avg).
+    const rawCodeLines = data.codeLines as number || 0;
+    const rawTotalLines = data.totalLines as number || data.total_lines as number || 0;
+    const rawCodeKb = data.codeKb as number || 0;
+    const byteSize = Math.round(rawCodeKb * 1024);
+    const estimatedLines = byteSize >= 2048 ? Math.max(Math.floor(byteSize / 80), 1) : rawCodeLines;
+    const codeLines = rawCodeLines > 1 ? rawCodeLines : Math.max(rawCodeLines, rawTotalLines, estimatedLines);
+    // v5.8.1: surface the backend-broadcast current_action so the UI shows
+    // "Reading index.html" / "Editing src/foo.ts" during tool loops instead
+    // of "1 line" frozen for minutes. Falls back to a generic placeholder.
+    const currentAction = String(data.current_action || '').trim();
     const codeKb = data.codeKb as number || 0;
     const codeLanguages = (data.codeLanguages as string[]) || [];
     const modelLatencyMs = data.modelLatencyMs as number || 0;
@@ -148,6 +251,31 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const [modelOpen, setModelOpen] = useState(false);
     const dropdownRef = useRef<HTMLDivElement>(null);
     const { setNodes } = useReactFlow();
+
+    // v5.8.6: dynamic available-models list — only shows models whose
+    // provider has a key configured (has_key=true from /api/models).
+    const [availableModels, setAvailableModels] = useState<AvailableModel[]>(
+        _modelCatalogCache || []
+    );
+    useEffect(() => {
+        let cancelled = false;
+        const subscriber = (list: AvailableModel[]) => { if (!cancelled) setAvailableModels(list); };
+        _modelCatalogSubscribers.add(subscriber);
+        fetchAvailableModels().then((list) => {
+            if (!cancelled) setAvailableModels(list);
+        });
+        // v5.8.6: listen for settings-save dispatches so dropdowns sync
+        // immediately after the user adds/removes keys (no remount needed).
+        const refresh = () => {
+            fetchAvailableModels().then((list) => { if (!cancelled) setAvailableModels(list); });
+        };
+        window.addEventListener('evermind-models-changed', refresh);
+        return () => {
+            cancelled = true;
+            _modelCatalogSubscribers.delete(subscriber);
+            window.removeEventListener('evermind-models-changed', refresh);
+        };
+    }, []);
 
     const handleModelChange = useCallback((newModel: string) => {
         setNodes(nds => nds.map(n =>
@@ -292,6 +420,15 @@ function AgentNode({ id, data, selected }: NodeProps) {
                         {displayModel}
                         <span style={{ fontSize: 6, opacity: 0.7, marginLeft: 1 }}>▼</span>
                     </span>
+                    {isCliModel && (
+                        <span style={{
+                            padding: '1px 4px', borderRadius: 3, fontSize: 7, fontWeight: 700,
+                            background: 'rgba(34, 197, 94, 0.14)',
+                            color: '#22c55e',
+                            border: '1px solid rgba(34, 197, 94, 0.25)',
+                            letterSpacing: '0.04em',
+                        }} title={lang === 'zh' ? `CLI 路由：${rawModel}` : `CLI route: ${rawModel}`}>CLI</span>
+                    )}
                     <span style={{
                         padding: '1px 5px', borderRadius: 3, fontSize: 8,
                         background: `${c}0c`, color: c + 'bb',
@@ -326,7 +463,15 @@ function AgentNode({ id, data, selected }: NodeProps) {
                             boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
                             padding: '4px 0',
                         }}>
-                            {AVAILABLE_MODELS.map((m) => (
+                            {availableModels.length === 0 && (
+                                <div style={{
+                                    padding: '8px 10px', fontSize: 9,
+                                    color: 'var(--text3)', textAlign: 'center',
+                                }}>
+                                    {lang === 'zh' ? '无可用模型 — 请在设置里配置 API key' : 'No models available — configure API keys in Settings'}
+                                </div>
+                            )}
+                            {availableModels.map((m) => (
                                 <div
                                     key={m.id}
                                     className="model-dropdown-item"
@@ -574,6 +719,32 @@ function AgentNode({ id, data, selected }: NodeProps) {
                                         ({codeLanguages.slice(0, 3).join('+')})
                                     </span>
                                 )}
+                            </span>
+                        )}
+                        {/* v5.8.1: live activity readout.
+                            - Prefer backend-broadcast current_action ("Reading index.html", "Writing game.js")
+                            - Fall back to the generic "exploring" placeholder if no action yet
+                            - Shown for all running nodes, not just code producers, so users always
+                              see the agent is alive instead of a frozen LOC counter. */}
+                        {isRunning && (currentAction || codeLines === 0) && (
+                            <span
+                                title={currentAction || ''}
+                                style={{
+                                    fontSize: 7, color: currentAction ? '#7dd3fc' : '#64748b',
+                                    display: 'inline-flex', alignItems: 'center', gap: 3,
+                                    padding: '1px 4px', borderRadius: 3,
+                                    background: currentAction ? 'rgba(125,211,252,0.08)' : 'rgba(100,116,139,0.08)',
+                                    border: `1px solid ${currentAction ? 'rgba(125,211,252,0.18)' : 'rgba(100,116,139,0.15)'}`,
+                                    fontStyle: currentAction ? 'normal' : 'italic',
+                                    maxWidth: 180,
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap',
+                                }}
+                            >
+                                {currentAction
+                                    ? (currentAction.length > 50 ? currentAction.slice(0, 50) + '…' : currentAction)
+                                    : (lang === 'zh' ? '🔧 探索/规划中...' : '🔧 Exploring…')}
                             </span>
                         )}
 

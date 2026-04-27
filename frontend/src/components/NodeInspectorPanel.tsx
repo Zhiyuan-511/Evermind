@@ -85,6 +85,7 @@ function normalizeNodeRole(value: unknown): string {
     const normalized = withoutNumericSuffix || raw;
     if (normalized.startsWith('builder')) return 'builder';
     if (normalized.startsWith('polisher')) return 'polisher';
+    if (normalized.startsWith('patcher')) return 'patcher';
     if (normalized.startsWith('reviewer')) return 'reviewer';
     if (normalized.startsWith('tester')) return 'tester';
     if (normalized.startsWith('deployer')) return 'deployer';
@@ -556,7 +557,7 @@ export default function NodeInspectorPanel({ nodeExecution: initNe, lang, onClos
                                     <div key={art.id} style={{
                                         borderRadius: 8,
                                         border: `1px solid ${isExpanded ? 'var(--accent)40' : 'var(--glass-border)'}`,
-                                        background: isExpanded ? 'rgba(79, 143, 255, 0.03)' : 'var(--glass)',
+                                        background: isExpanded ? 'rgba(91, 140, 255, 0.03)' : 'var(--glass)',
                                         overflow: 'hidden',
                                         transition: 'all 0.15s',
                                     }}>

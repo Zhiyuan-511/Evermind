@@ -96,10 +96,10 @@ class NodeReport:
     code_snippets: List[Dict[str, str]] = field(default_factory=list)
 
     # Antigravity-quality fields
-    role_description: str = ""          # 1-2 句角色描述
-    fallback_used: str = ""             # 降级方案名（如 "deterministic skeleton"）
-    fallback_reason: str = ""           # 降级原因
-    analysis_narrative: str = ""        # 深度分析叙事（从 raw_output 提取）
+    role_description: str = ""          # 1-2 sentence role description
+    fallback_used: str = ""             # Fallback scheme name (e.g. "deterministic skeleton")
+    fallback_reason: str = ""           # Reason for fallback
+    analysis_narrative: str = ""        # In-depth analysis narrative (extracted from raw_output)
 
 
 class ReportGenerator:
@@ -145,8 +145,26 @@ class ReportGenerator:
         if report.files_created or report.files_modified:
             sections.append(_build_file_changes(report, zh))
 
-        # ── Code Snippets ──
-        if report.code_snippets:
+        # ── Code Snippets (v7.0 maintainer 2026-04-24) ──
+        # Only surface code for nodes that actually WRITE code. For
+        # research/review nodes (analyst, planner, reviewer, tester, scribe,
+        # deployer, uidesign) the walkthrough should be narrative prose —
+        # real code belongs in the dedicated research dossier / handoff
+        # artifact, not the walkthrough. Observed analyst walkthroughs
+        # dumping <cross_node_contract> YAML blocks as "core code", which
+        # confuses the story-telling purpose of the walkthrough.
+        _CODE_WRITER_NODES = {
+            "builder", "merger", "polisher", "patcher", "debugger",
+            "imagegen", "spritesheet", "assetimport",
+        }
+        _nt_norm = str(report.node_type or "").strip().lower()
+        _node_key_norm = str(report.node_key or "").strip().lower()
+        # builder1/builder2/merger etc. all collapse to "builder" family
+        _is_code_writer = any(
+            _nt_norm == k or _node_key_norm.startswith(k) or _nt_norm.startswith(k)
+            for k in _CODE_WRITER_NODES
+        )
+        if report.code_snippets and _is_code_writer:
             sections.append(_build_code_snippets(report, zh))
 
         # ── Key Decisions ──
@@ -1079,8 +1097,8 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if feas_matches:
             parts.append(f"\n{'**可行性评级**' if zh else '**Feasibility Ratings**'}:")
             for feat, rating in feas_matches[:10]:
-                emoji = {"EASY": "🟢", "MODERATE": "🟡", "HARD": "🟠", "INFEASIBLE": "🔴",
-                         "可行": "🟢", "中等": "🟡", "困难": "🟠", "不可行": "🔴"}.get(rating, "⚪")
+                emoji = {"EASY": "[容易]", "MODERATE": "[中等]", "HARD": "[困难]", "INFEASIBLE": "[不可行]",
+                         "可行": "[容易]", "中等": "[中等]", "困难": "[困难]", "不可行": "[不可行]"}.get(rating, "[未评]")
                 parts.append(f"  {emoji} {feat.strip()}: **{rating}**")
 
         # Reference sources — grouped by domain with descriptions
@@ -1314,11 +1332,11 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
 
         # Extract verdict with confidence
         if "approved" in lower or "通过" in lower:
-            parts.append("**结论: 通过** ✓" if zh else "**Verdict: APPROVED** ✓")
+            parts.append("**结论: 通过** [OK]" if zh else "**Verdict: APPROVED** [OK]")
         elif "rejected" in lower or "不通过" in lower:
-            parts.append("**结论: 未通过** ✗" if zh else "**Verdict: REJECTED** ✗")
+            parts.append("**结论: 未通过** [X]" if zh else "**Verdict: REJECTED** [X]")
         elif "conditional" in lower or "有条件" in lower:
-            parts.append("**结论: 有条件通过** ⚠️" if zh else "**Verdict: CONDITIONAL** ⚠️")
+            parts.append("**结论: 有条件通过**" if zh else "**Verdict: CONDITIONAL**")
 
         # Extract scores from JSON output (reviewer outputs strict JSON)
         score_data = {}
@@ -1354,21 +1372,21 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if blocking:
             parts.append(f"\n{'**阻断问题**' if zh else '**Blocking Issues**'} ({len(blocking)}):")
             for b in blocking[:6]:
-                parts.append(f"  ❌ {b[:200]}")
+                parts.append(f"  - 阻塞：{b[:200]}")
 
         # Warnings / suggestions
         warnings = score_data.get("warnings", score_data.get("suggestions", []))
         if warnings:
             parts.append(f"\n{'**改进建议**' if zh else '**Suggestions**'} ({len(warnings)}):")
             for w in warnings[:5]:
-                parts.append(f"  ⚠️ {w[:200]}")
+                parts.append(f"  - 警告：{w[:200]}")
 
         # Strengths
         strengths = score_data.get("strengths", [])
         if strengths:
             parts.append(f"\n{'**优势项**' if zh else '**Strengths**'} ({len(strengths)}):")
             for s in strengths[:6]:
-                parts.append(f"  ✓ {s[:200]}")
+                parts.append(f"  [OK] {s[:200]}")
 
         # If no JSON data, try regex extraction (non-JSON reviewer output)
         if not scores and not blocking and not strengths:
@@ -1399,7 +1417,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
             if strength_sentences:
                 parts.append(f"\n{'**优势项**' if zh else '**Strengths**'}:")
                 for s in strength_sentences:
-                    parts.append(f"  ✓ {s[:200]}")
+                    parts.append(f"  [OK] {s[:200]}")
 
         # Visual evidence
         screenshots = re.findall(r'screenshot|截图|filmstrip|capture', lower)
@@ -1413,8 +1431,8 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         parts = []
 
         # Extract check results with pass rate
-        pass_count = len(re.findall(r'(?:✓|PASS|passed|通过)', raw, re.IGNORECASE))
-        fail_count = len(re.findall(r'(?:✗|FAIL|failed|失败)', raw, re.IGNORECASE))
+        pass_count = len(re.findall(r'(?:[OK]|PASS|passed|通过)', raw, re.IGNORECASE))
+        fail_count = len(re.findall(r'(?:[X]|FAIL|failed|失败)', raw, re.IGNORECASE))
         if pass_count or fail_count:
             total = pass_count + fail_count
             rate = int(pass_count / total * 100) if total > 0 else 0
@@ -1424,17 +1442,17 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         # Evidence types — comprehensive
         evidence = []
         if "screenshot" in lower or "截图" in lower:
-            evidence.append("📸 " + ("截图" if zh else "screenshots"))
+            evidence.append("[截图] " + ("截图" if zh else "screenshots"))
         if "filmstrip" in lower or "胶片" in lower:
-            evidence.append("🎞️ " + ("滚动胶片" if zh else "scroll filmstrip"))
+            evidence.append("[剪辑]️ " + ("滚动胶片" if zh else "scroll filmstrip"))
         if "gameplay" in lower or "游玩" in lower:
-            evidence.append("🎮 " + ("游玩测试" if zh else "gameplay test"))
+            evidence.append("[游玩] " + ("游玩测试" if zh else "gameplay test"))
         if "console" in lower:
-            evidence.append("💻 " + ("控制台日志" if zh else "console logs"))
+            evidence.append("[控制台] " + ("控制台日志" if zh else "console logs"))
         if "network" in lower or "request" in lower:
-            evidence.append("🌐 " + ("网络请求" if zh else "network requests"))
+            evidence.append("[网络] " + ("网络请求" if zh else "network requests"))
         if "responsive" in lower or "mobile" in lower:
-            evidence.append("📱 " + ("响应式验证" if zh else "responsive check"))
+            evidence.append("[移动] " + ("响应式验证" if zh else "responsive check"))
         if evidence:
             parts.append(f"\n{'**验证证据**' if zh else '**Evidence**'}: {', '.join(evidence)}")
 
@@ -1461,7 +1479,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if fail_sentences:
             parts.append(f"\n{'**发现缺陷**' if zh else '**Defects Found**'}:")
             for f in fail_sentences:
-                parts.append(f"  ❌ {f[:200]}")
+                parts.append(f"  - 阻塞：{f[:200]}")
 
         # Performance signals with specifics
         perf_mentions = _extract_key_sentences(raw, [
@@ -1499,7 +1517,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if root_causes:
             parts.append(f"\n{'**根因分析**' if zh else '**Root Cause Analysis**'}:")
             for rc in root_causes:
-                parts.append(f"  🔍 {rc[:250]}")
+                parts.append(f"  - 搜索：{rc[:250]}")
 
         # Fixes applied — with before/after context
         fix_sentences = _extract_key_sentences(raw, [
@@ -1509,7 +1527,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if fix_sentences:
             parts.append(f"\n{'**修复措施**' if zh else '**Fixes Applied**'} ({len(fix_sentences)}):")
             for f in fix_sentences:
-                parts.append(f"  🔧 {f[:250]}")
+                parts.append(f"  - 修复：{f[:250]}")
 
         # Code changes detail
         code_changes = re.findall(r'```(?:diff|js|html|css)?\n(.+?)```', raw, re.DOTALL)
@@ -1527,7 +1545,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if verify:
             parts.append(f"\n{'**验证结果**' if zh else '**Verification**'}:")
             for v in verify:
-                parts.append(f"  ✓ {v[:200]}")
+                parts.append(f"  [OK] {v[:200]}")
 
         # File count with detail
         if created:
@@ -1550,7 +1568,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if opt_sentences:
             parts.append(f"{'**性能优化**' if zh else '**Performance Optimizations**'} ({len(opt_sentences)}):")
             for o in opt_sentences:
-                parts.append(f"  ⚡ {o[:250]}")
+                parts.append(f"  - 性能：{o[:250]}")
 
         # Visual refinements
         visual = _extract_key_sentences(raw, [
@@ -1561,7 +1579,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
         if visual:
             parts.append(f"\n{'**视觉微调**' if zh else '**Visual Refinements**'} ({len(visual)}):")
             for v in visual:
-                parts.append(f"  🎨 {v[:250]}")
+                parts.append(f"  - 视觉：{v[:250]}")
 
         # UX improvements
         ux = _extract_key_sentences(raw, [
@@ -1629,7 +1647,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
             # Show image filenames
             for f in imgs[:8]:
                 fname = f.rsplit('/', 1)[-1] if '/' in f else f
-                parts.append(f"  - 🖼️ `{fname}`")
+                parts.append(f"  - [图片]️ `{fname}`")
         if docs:
             parts.append(f"\n{'**设计文档**' if zh else '**Design Docs**'}: {len(docs)} {'份' if zh else 'files'}")
 
@@ -1666,7 +1684,7 @@ def _build_role_specific_section(role: str, result: Dict[str, Any], *, zh: bool 
             parts.append(f"{'**精灵表**' if zh else '**Spritesheets**'}: {len(sprite_files)} {'张' if zh else 'sheets'}")
             for f in sprite_files[:6]:
                 fname = f.rsplit('/', 1)[-1] if '/' in f else f
-                parts.append(f"  - 🎨 `{fname}`")
+                parts.append(f"  - `{fname}`")
         if map_files:
             parts.append(f"\n{'**映射文件**' if zh else '**Mapping Files**'}: {len(map_files)} {'份' if zh else 'files'}")
         if js_files:
@@ -1726,15 +1744,17 @@ def _format_time(ts: float) -> str:
 
 
 def _tool_icon(tool_name: str) -> str:
+    # v5.8.6: emoji removed. Plain-text tags render consistently in logs,
+    # terminals, and PDF exports without needing emoji font support.
     icons = {
-        "file_read": "📁", "file_write": "✏️", "file_edit": "✏️",
-        "file_ops": "📂", "grep_search": "🔍", "web_search": "🌐",
-        "web_fetch": "📥", "bash": "💻", "browser": "🖥️",
-        "browser_use": "🖥️", "source_crawler": "🕷️",
-        "context_compress": "🗜️", "sub_agent": "🤖",
-        "screenshot": "📸", "computer_use": "🖱️",
+        "file_read": "[read]", "file_write": "[write]", "file_edit": "[edit]",
+        "file_ops": "[fs]", "grep_search": "[grep]", "web_search": "[search]",
+        "web_fetch": "[fetch]", "bash": "[shell]", "browser": "[browser]",
+        "browser_use": "[browser]", "source_crawler": "[crawl]",
+        "context_compress": "[compact]", "sub_agent": "[agent]",
+        "screenshot": "[shot]", "computer_use": "[cu]",
     }
-    return icons.get(tool_name, "⚙️")
+    return icons.get(tool_name, "[tool]")
 
 
 def _describe_tool_call(tr: Dict[str, Any], lang: str = "en") -> str:

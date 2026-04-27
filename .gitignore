@@ -39,14 +39,37 @@ npm-debug.log*
 docker-compose.override.yml
 
 # Electron app binary artifacts (too large for GitHub)
-Evermind.app/Contents/Frameworks/
-Evermind.app/Contents/MacOS/
-Evermind.app/Contents/_CodeSignature/
-Evermind.app/Contents/Resources/app.asar
-Evermind.app/Contents/Resources/icon.icns
-Evermind.app/Contents/Info.plist
-Evermind.app/Contents/PkgInfo
+# The whole .app bundle is a build output — it's rsync'd from backend/ and
+# electron/dist/, so nothing inside it should be tracked. Keep only the source
+# trees under version control.
+Evermind.app/
 
 # Claude config
 .claude/
 CLAUDE.md
+
+# Task/build artifacts
+test_deep_mode.py
+codex_review_round4.md
+HANDOFF_V5_UI.md
+evermind_godmode_final.html
+splash.html
+start.command
+
+# IDE/temp
+*.orig
+*.rej
+
+# Generated python caches inside any subtree
+**/__pycache__/
+**/*.pyc
+
+# Local release artifacts
+release-check/
+*.dmg
+*.dmg.blockmap
+latest-mac.yml
+
+# Electron-builder local output
+electron/dist/
+electron/out/
