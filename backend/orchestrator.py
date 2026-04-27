@@ -5722,7 +5722,12 @@ class Orchestrator:
         # v4.0: Fallback — if file-based count is 0 but full_output contains code,
         # count from full_output. Handles direct_text builders whose output files
         # may not resolve on disk at report time.
-        if total_code_lines == 0 and subtask.agent_type == "builder" and full_output and len(full_output) > 500:
+        # v7.7: was builder-only. Planner/analyst produce plan/dossier text — they
+        # never write `.html`/`.js` files, so total_code_lines stayed 0 and the
+        # canvas badge was hidden. Now all agent types fall back to text-output
+        # counting so users see "📝 N 行 / X KB" reflecting real produce volume
+        # for every node, not just builders.
+        if total_code_lines == 0 and full_output and len(full_output) > 500:
             _output_code_lines = _count_meaningful_lines(full_output)
             if _output_code_lines > 10:
                 total_code_lines = _output_code_lines
@@ -5731,6 +5736,10 @@ class Orchestrator:
                     language_distribution["HTML"] = _output_code_lines
                 elif full_output.lstrip().startswith(("import ", "export ", "function ", "const ", "class ")):
                     language_distribution["JavaScript"] = _output_code_lines
+                elif subtask.agent_type in ("planner", "analyst"):
+                    # Surface plan/dossier text under a meaningful label.
+                    label = "Plan" if subtask.agent_type == "planner" else "Dossier"
+                    language_distribution[label] = _output_code_lines
                 total_code_bytes = max(total_code_bytes, len(full_output.encode("utf-8", errors="replace")))
 
         def _fmt_kb(n: float) -> str:
