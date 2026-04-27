@@ -5288,6 +5288,7 @@ async def get_settings():
             settings.get("node_model_preferences", {})
         ),
         "thinking_depth": str(settings.get("thinking_depth", "deep")).strip().lower(),
+        "reviewer_max_rejections": coerce_int(settings.get("reviewer_max_rejections", 1), 1, minimum=0, maximum=10),
         "model_catalog": model_catalog,
         "relay_endpoints": get_relay_manager().list(),
         "relay_count": len(get_relay_manager().list()),
@@ -5334,6 +5335,10 @@ async def save_user_settings(data: Dict = Body(...)):
     if "thinking_depth" in patch:
         raw_depth = str(patch.get("thinking_depth", "deep")).strip().lower()
         patch["thinking_depth"] = raw_depth if raw_depth in ("fast", "deep") else "deep"
+    if "reviewer_max_rejections" in patch:
+        patch["reviewer_max_rejections"] = coerce_int(
+            patch.get("reviewer_max_rejections"), 1, minimum=0, maximum=10,
+        )
     if "analyst" in patch:
         patch["analyst"] = _normalize_analyst_settings(
             patch.get("analyst")
@@ -7069,6 +7074,18 @@ async def websocket_endpoint(ws: WebSocket):
                     config["node_model_preferences"] = _normalize_node_model_preferences(
                         new_config.get("node_model_preferences")
                     )
+                if "reviewer_max_rejections" in new_config:
+                    rmr = coerce_int(
+                        new_config.get("reviewer_max_rejections"), 1, minimum=0, maximum=10,
+                    )
+                    config["reviewer_max_rejections"] = rmr
+                    if ai_bridge and hasattr(ai_bridge, "config") and isinstance(ai_bridge.config, dict):
+                        ai_bridge.config["reviewer_max_rejections"] = rmr
+                    try:
+                        os.environ["EVERMIND_REVIEWER_MAX_REJECTIONS"] = str(rmr)
+                    except Exception:
+                        pass
+                    logger.info("reviewer_max_rejections updated to %d via update_config", rmr)
                 if "thinking_depth" in new_config:
                     raw_depth = str(new_config.get("thinking_depth", "deep")).strip().lower()
                     if raw_depth in ("fast", "deep"):

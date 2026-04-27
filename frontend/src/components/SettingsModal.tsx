@@ -295,6 +295,10 @@ export default function SettingsModal({
     const [imgTestResult, setImgTestResult] = useState<{ ok: boolean; latency_ms?: number; image_base64?: string; error?: string } | null>(null);
     const [nodeModelPreferences, setNodeModelPreferences] = useState<Record<string, string[]>>({});
     const [thinkingDepth, setThinkingDepth] = useState<'fast' | 'deep'>('deep');
+    // v7.7 (maintainer 2026-04-27): user-controlled reviewer reject budget. 1 = single-loop
+    // closure (v6.7 default, fastest); higher = stricter quality gate at cost of
+    // longer runs. Capped at 5 in normal mode (Ultra mode goes to 10 separately).
+    const [reviewerMaxRejections, setReviewerMaxRejections] = useState<number>(1);
     // v6.1.3 (maintainer 2026-04-18): dedicated language toggle for node walkthrough reports.
     // "" = inherit UI language; "zh"/"en" = force that language for reports.
     const [walkthroughLang, setWalkthroughLang] = useState<'' | 'zh' | 'en'>('');
@@ -459,6 +463,9 @@ export default function SettingsModal({
                 }
                 if (data.thinking_depth === 'fast' || data.thinking_depth === 'deep') {
                     setThinkingDepth(data.thinking_depth);
+                }
+                if (typeof data.reviewer_max_rejections === 'number' && data.reviewer_max_rejections >= 0) {
+                    setReviewerMaxRejections(Math.min(10, Math.max(0, Math.floor(data.reviewer_max_rejections))));
                 }
                 if (typeof data.walkthrough_language === 'string') {
                     const wl = String(data.walkthrough_language || '').trim().toLowerCase();
@@ -777,6 +784,7 @@ export default function SettingsModal({
                     },
                     node_model_preferences: nodeModelPreferences,
                     thinking_depth: thinkingDepth,
+                    reviewer_max_rejections: reviewerMaxRejections,
                     walkthrough_language: walkthroughLang,
                     peer_builders_share_model_when_multikey: peerBuildersShareModelWhenMultikey,
                     cli_mode: {
@@ -828,6 +836,7 @@ export default function SettingsModal({
                             },
                             node_model_preferences: nodeModelPreferences,
                             thinking_depth: thinkingDepth,
+                            reviewer_max_rejections: reviewerMaxRejections,
                             walkthrough_language: walkthroughLang,
                             cli_mode: {
                                 enabled: cliEnabled,
@@ -873,7 +882,7 @@ export default function SettingsModal({
         }
         setSaving(false);
         setTimeout(() => setSaveStatus('idle'), 5000);
-    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate, imgProvider, imgApiKey, imgBaseUrl, imgDefaultModel, imgDefaultSize, imgMaxImages, imgAutoCrop, analystPreferredSites, analystCrawlIntensity, analystUseScrapling, analystEnableQuerySearch, nodeModelPreferences, thinkingDepth, walkthroughLang, peerBuildersShareModelWhenMultikey, lang]);
+    }, [apiKeys, apiBases, wsRef, browserResearch, smokeEnabled, browserHeadful, forceVisibleReview, maxRetries, comfyUiUrl, comfyWorkflowTemplate, imgProvider, imgApiKey, imgBaseUrl, imgDefaultModel, imgDefaultSize, imgMaxImages, imgAutoCrop, analystPreferredSites, analystCrawlIntensity, analystUseScrapling, analystEnableQuerySearch, nodeModelPreferences, thinkingDepth, reviewerMaxRejections, walkthroughLang, peerBuildersShareModelWhenMultikey, lang]);
 
     // Handle key input change with sanitization
     const handleKeyChange = useCallback((key: keyof ApiKeys, value: string) => {
@@ -1703,6 +1712,31 @@ export default function SettingsModal({
                                     >
                                         <option value="deep">{t('Deep — Full power, relaxed timeouts', 'Deep — 完整推理，宽松超时')}</option>
                                         <option value="fast">{t('Fast — Quick reasoning, tight timeouts', 'Fast — 快速推理，紧凑超时')}</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div className="s-section">
+                                <div className="s-section-title" style={{ fontSize: '12px' }}>
+                                    {'\u{1F50D}'} {t('Reviewer Reject Budget', '审查员退回上限')}
+                                </div>
+                                <div className="s-hint" style={{ lineHeight: 1.7 }}>
+                                    {t(
+                                        'Maximum times the reviewer can REJECT and trigger a patcher repair round. After the budget is exhausted, downstream nodes (tester/debugger/deployer) take over and act as the safety net. 1 = fastest single-loop closure; higher = stricter quality gate at the cost of run time.',
+                                        '审查员最多可以 REJECT 触发补丁修复的次数。预算用完后由下游 tester/debugger/deployer 兜底。1 = 最快的单轮闭环；越大质量越严但运行时间越长。'
+                                    )}
+                                </div>
+                                <div className="s-row" style={{ marginTop: 8 }}>
+                                    <label style={{ fontWeight: 600 }}>{t('Max Rejections', '最大退回次数')}</label>
+                                    <select
+                                        className="s-input"
+                                        value={reviewerMaxRejections}
+                                        onChange={(e) => setReviewerMaxRejections(Number(e.target.value))}
+                                        style={{ fontWeight: 600 }}
+                                    >
+                                        <option value={1}>1 — {t('Single loop (fastest, default)', '单轮闭环（最快，默认）')}</option>
+                                        <option value={2}>2 — {t('Allow one extra rebuild round', '允许一次额外修复')}</option>
+                                        <option value={3}>3 — {t('Standard quality gate', '标准质量门')}</option>
+                                        <option value={5}>5 — {t('Strict (Ultra-style)', '严格模式（Ultra 风格）')}</option>
                                     </select>
                                 </div>
                             </div>
