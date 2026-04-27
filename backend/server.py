@@ -10842,9 +10842,18 @@ async def websocket_endpoint(ws: WebSocket):
                                     "preview": _preview,
                                     "result_truncated": tool_output[:2000],
                                 }))
+                                # v7.7 (maintainer 2026-04-27): some relays (kimi
+                                # /coding/v1) occasionally return tool_call
+                                # objects with empty `id`. Reuse the same
+                                # `_tc_id` synthesised earlier (line ~10234)
+                                # so the tool-result frame and the LLM
+                                # follow-up message agree on the id.
+                                # Without this, kimi 400s next iteration
+                                # ("tool_call_id is not found"), killing the
+                                # whole chat session.
                                 llm_messages.append({
                                     "role": "tool",
-                                    "tool_call_id": tc["id"],
+                                    "tool_call_id": _tc_id,
                                     "content": tool_output,
                                 })
                             # v6.4.48-C: after all tool calls in this iter,
