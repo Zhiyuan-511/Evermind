@@ -685,11 +685,19 @@ function EditorPageInner() {
         } else if (panel === 'settings') {
             setSettingsOpen(true);
         }
+        // v7.5: also honour `?task=<id>` so launchpad → Recent → editor
+        // actually opens that task's run/canvas (was: param ignored, editor
+        // showed an empty canvas regardless of which Recent item was clicked).
+        const taskParam = (params.get('task') || '').trim();
+        if (taskParam) {
+            try { selectTask(taskParam); } catch { /* selectTask hydrates async */ }
+        }
         // Strip the param from the URL so refreshing the page doesn't
         // re-open the modal indefinitely.
-        if (panel) {
+        if (panel || taskParam) {
             const url = new URL(window.location.href);
             url.searchParams.delete('panel');
+            url.searchParams.delete('task');
             window.history.replaceState({}, '', url.toString());
         }
     }, []);
