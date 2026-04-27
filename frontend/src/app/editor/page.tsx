@@ -507,8 +507,13 @@ function EditorPageInner() {
     const urlTaskOverrideRef = useRef<string | null>(null);
 
     // If the current selection is stale or inactive after reconnect, refocus the most active task.
+    // v7.7: skip when ?fresh=1 — user explicitly clicked "New Task" from launchpad
+    // for a blank canvas. Without this, refocus picked the most-recent done task,
+    // task-switch effect re-applied its title to chat workflowName, and the fresh
+    // session's "会话 N" title got overwritten back to the prior task title.
     useEffect(() => {
         if (!runtimeConnected) return;
+        if (typeof window !== 'undefined' && window.location.search.includes('fresh=1')) return;
         if (urlTaskOverrideRef.current) return; // URL choice locks selection until user navigates again
         if (!preferredTaskForHydration?.id) return;
         if (selectedTask?.id === preferredTaskForHydration.id) return;
@@ -800,10 +805,13 @@ function EditorPageInner() {
         if (freshParam !== '1') return;
         if (lastFreshHandledRef.current === '1') return;
         lastFreshHandledRef.current = '1';
+        try { selectTask(null); } catch { /* ignore */ } // belt-and-suspenders: ensure no task carries over
         try { chat.handleCreateSession(); } catch { /* ignore */ }
         try { workflow.handleClear(); } catch { /* ignore */ }
         try { runtime.setPreviewUrl(null); } catch { /* ignore */ }
-    }, [freshParam, chat, workflow, runtime]);
+        // Reset task-switch ref so any later genuine task selection re-syncs cleanly.
+        lastTaskChatSyncRef.current = '';
+    }, [freshParam, chat, workflow, runtime, selectTask]);
     const lastTaskParamRef = useRef<string>('');
     useEffect(() => {
         if (!taskParam) return;
