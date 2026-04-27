@@ -161,7 +161,18 @@ _LOCAL_THREE_MODULE_IMPORT_RE = re.compile(
     r"import\s+\*\s+as\s+THREE\s+from\s+[\"']\./_evermind_runtime/three/three\.module\.js[\"']",
     re.IGNORECASE,
 )
-_THREE_USAGE_RE = re.compile(r"\b(?:new\s+)?THREE\.", re.IGNORECASE)
+# v7.5: was `\b(?:new\s+)?THREE\.` — matched ANY THREE. reference, including
+# defensive probes like `if (window.THREE) {...}` (the v7.4 perf shim).
+# That mis-triggered Three.js auto-injection into 2D Canvas games (e.g. PvZ),
+# loading 600KB+ of unused library and producing a deprecation warning.
+# Now require call/construction form: `new THREE.X(` or `THREE.X.method(`.
+# Reference-only guards (`window.THREE`, `if (THREE)`, `typeof THREE`) no
+# longer match.
+_THREE_USAGE_RE = re.compile(
+    r"\bnew\s+THREE\.[A-Z]\w*\s*\(|"
+    r"\bTHREE\.[A-Z]\w*\.[a-zA-Z_]\w*\s*\(",
+    re.IGNORECASE,
+)
 _PHASER_USAGE_RE = re.compile(r"\bPhaser\.(?:Game|AUTO|WEBGL|CANVAS)\b", re.IGNORECASE)
 _HOWLER_USAGE_RE = re.compile(r"\b(?:new\s+Howl\s*\(|Howler\.)", re.IGNORECASE)
 _INLINE_SCRIPT_BLOCK_RE = re.compile(
@@ -1770,9 +1781,33 @@ def _inject_missing_game_menu_handler_shims(html: str) -> str:
     return f"{text}\n{shim}"
 
 
+def _auto_fix_common_js_typos(js: str) -> str:
+    """v7.5: kill the most frequent kimi-emitted JS typos that bypass the
+    reviewer/patcher loop and ship as runtime errors. Each pattern has been
+    observed in the wild — `GameEngine.init(;` was the V7.4 PvZ bug that
+    made the game uncontrollable. Keep this list narrow: only mechanical
+    transformations that are unambiguous AND a syntax error otherwise.
+    """
+    if not js:
+        return js
+    out = js
+    # 1. `func(;` → `func();`  (typo: extra ; inside empty arg list)
+    out = re.sub(r"(\b\w+(?:\s*\.\s*\w+)*)\s*\(\s*;", r"\1();", out)
+    # 2. `, , `  (double comma in arg/array list)
+    out = re.sub(r",\s*,(?=\s*[\w'\"\[{(])", ", ", out)
+    # 3. `obj.;` (dangling member access followed immediately by `;`)
+    out = re.sub(r"(\w)\.\s*;", r"\1;", out)
+    # 4. `()() ;` collapsed to `();` for accidentally doubled invocation
+    #    that left a no-op trailing `()` — safe when the second pair is empty
+    out = re.sub(r"\(\)\s*\(\)\s*;", "();", out)
+    return out
+
+
 def postprocess_javascript(js: str) -> str:
     if not js or not js.strip():
         return js
+
+    js = _auto_fix_common_js_typos(js)
 
     original = js
     replacements = [
