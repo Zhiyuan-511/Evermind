@@ -336,12 +336,27 @@ export function useChatHistory(lang: 'en' | 'zh'): UseChatHistoryReturn {
     const handleSelectSession = useCallback((sessionId: string, fallbackTitle?: string) => {
         const session = historySessions.find((s) => s.id === sessionId);
         if (session) {
+            // v7.7: when caller passes a fallbackTitle (e.g. clicking a Recent
+            // task → editor binds session to task.title), prefer the fresh
+            // title — but ONLY when the stored title is empty or the auto-
+            // generated counter ("会话 14"/"Session 14"). Was: stored title
+            // always won → user saw "会话 14" instead of the task's actual
+            // title. Now: respect manually-renamed sessions; otherwise pull
+            // in task title to give meaningful context.
+            const fb = (fallbackTitle || '').trim();
+            const stored = (session.title || '').trim();
+            const storedIsAutoTitle = !stored || isDefaultSessionTitle(stored);
+            const preferredTitle = (fb && storedIsAutoTitle)
+                ? fb.slice(0, 80)
+                : (stored || fb.slice(0, 80) || workflowName);
             setActiveSessionId(session.id);
             setMessages(session.messages || []);
-            setWorkflowName(session.title || workflowName);
-            setHistorySessions((prev) => prev.map((item) => (
-                item.id === session.id ? { ...item, updatedAt: Date.now() } : item
-            )).sort((a, b) => b.updatedAt - a.updatedAt));
+            setWorkflowName(preferredTitle);
+            if (preferredTitle !== stored) {
+                setHistorySessions((prev) => prev.map((item) => (
+                    item.id === session.id ? { ...item, title: preferredTitle, updatedAt: Date.now() } : item
+                )).sort((a, b) => b.updatedAt - a.updatedAt));
+            }
             return;
         }
         // v7.6: session id came from a backend task whose chat history doesn't

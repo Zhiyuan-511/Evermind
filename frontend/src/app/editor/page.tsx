@@ -470,17 +470,32 @@ function EditorPageInner() {
     const runtimePreviewUrl = runtime.previewUrl;
     const setCanvasView = runtime.setCanvasView;
 
-    // §2.4: Auto-fetch tasks when WS connects (hydrate state even if events were missed)
+    // §2.4: Auto-fetch tasks ASAP — once on mount + every WS reconnect so we
+    // pick up missed events. Was gated on `runtimeConnected` only — but if WS
+    // hadn't connected yet (cold start, slow handshake), fetchTasks never
+    // fired and `tasks` stayed empty. URL handler `selectTask(X)` then sets
+    // `selectedTaskId=X` but `selectedTask` (memo of `tasks.find`) returns
+    // null, the entire task→run→canvas chain stays unhydrated, and the
+    // canvas/title both render blank. HTTP fetches don't need WS — fire
+    // unconditionally on mount, then again on each reconnect for resync.
     useEffect(() => {
-        if (runtimeConnected) {
-            void fetchTasks();
-        }
+        void fetchTasks();
     }, [fetchTasks, runtimeConnected]);
 
-    // Refresh runs for the selected task when the WS reconnects so missed transitions hydrate immediately.
+    // v7.7: removed redundant fetchRuns-on-selectedTask effect. `useRunManager`
+    // already auto-fetches whenever its `taskId` prop changes, so this effect
+    // duplicated the call and the two competing AbortControllers cancelled each
+    // other before the response landed — runs[] stayed empty, canvas stayed
+    // blank. Only refetch on WS reconnect (using prevConnectedRef so we don't
+    // fire on initial mount or on selectedTask transitions).
+    const prevRuntimeConnectedRef = useRef<boolean>(false);
     useEffect(() => {
-        if (!runtimeConnected) return;
+        const wasConnected = prevRuntimeConnectedRef.current;
+        const isReconnect = !wasConnected && runtimeConnected;
+        prevRuntimeConnectedRef.current = runtimeConnected;
+        if (!isReconnect) return;
         if (!selectedTask?.id) return;
+        // Reconnected (false→true) — refresh runs in case we missed transitions.
         void fetchRuns();
     }, [fetchRuns, runtimeConnected, selectedTask?.id]);
 
@@ -542,8 +557,11 @@ function EditorPageInner() {
     // selected task. Previous code relied on `selectedRunMatchesTask` AFTER
     // already deciding to swap, but if `selectedRun` was null (initial load)
     // it would happily pick a foreign-task active run.
+    // v7.7: dropped `runtimeConnected` gate — HTTP fetch worked, but this
+    // gate kept selectedRun null until WS handshake completed. On a cold
+    // launchpad-click the user saw "blank canvas" for the entire WS
+    // window because hydration fires off `selectedRun?.id`.
     useEffect(() => {
-        if (!runtimeConnected) return;
         if (!selectedTask?.id) return;
         if (!preferredRunForHydration?.id) return;
         if (preferredRunForHydration.task_id && preferredRunForHydration.task_id !== selectedTask.id) return;
@@ -555,8 +573,10 @@ function EditorPageInner() {
     }, [preferredRunForHydration?.id, preferredRunForHydration?.task_id, runtimeConnected, selectRun, selectedRun, selectedRun?.id, selectedRun?.status, selectedRun?.task_id, selectedTask?.id]);
 
     // Re-pull node executions for the selected run after reconnect so the timeline/canvas catch up immediately.
+    // v7.7: drop WS gate — `selectRun` already auto-fetches on selection
+    // change. This effect catches reconnect/resync. Without the gate it
+    // also covers cold-mount when WS is slow.
     useEffect(() => {
-        if (!runtimeConnected) return;
         if (!selectedRun?.id) return;
         void fetchNodeExecutions(selectedRun.id);
     }, [fetchNodeExecutions, runtimeConnected, selectedRun?.id]);
