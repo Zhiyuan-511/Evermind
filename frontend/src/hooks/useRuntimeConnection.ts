@@ -527,9 +527,35 @@ export function useRuntimeConnection({
             'files_created', 'preview_ready', 'review_verdict',
             'orchestrator_complete', 'orchestrator_error',
             'validation_summary', 'node_execution_started',
+            // v7.7: payload-wrapped events also need task scope filtering
+            // (verified by /tmp/sniff.py — these did NOT get task_id at top
+            // level, so the previous gate let them through and they still
+            // mixed across tasks). The activeTaskId check now reads from
+            // payload.task.id when top-level is absent.
+            'task_created', 'run_created', 'task_updated', 'run_status',
+            'openclaw_node_progress', 'node_execution_progress',
         ]);
         if (RUN_SCOPED_EVENT_TYPES.has(t)) {
-            const evtTaskId = String((msg as Record<string, unknown>).task_id || '').trim();
+            // v7.7: events are inconsistent — Orchestrator.emit injects
+            // task_id at top level, but server.py-direct sends wrap a
+            // `payload` object whose task lives under payload.task.id /
+            // payload.task_id. Check ALL three sources or events leak
+            // through (the residual symptom user reported even after
+            // backend emit injection: task_created / run_created /
+            // openclaw_node_progress still arrived without top-level
+            // task_id and bypassed the gate).
+            const _msg = msg as Record<string, unknown>;
+            const _payload = (_msg.payload as Record<string, unknown> | undefined) || undefined;
+            const _payloadTask = (_payload?.task as Record<string, unknown> | undefined) || undefined;
+            const _payloadRun = (_payload?.run as Record<string, unknown> | undefined) || undefined;
+            const evtTaskId = String(
+                _msg.task_id
+                || _payload?.task_id
+                || _payload?.taskId
+                || _payloadTask?.id
+                || _payloadRun?.task_id
+                || ''
+            ).trim();
             const myTaskId = String(activeTaskId || '').trim();
             if (evtTaskId && myTaskId && evtTaskId !== myTaskId) {
                 // Foreign-task event — drop silently to keep chat/canvas clean.
