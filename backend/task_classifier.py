@@ -116,7 +116,16 @@ _NON_GAME_GENERATED_ASSET_RE = re.compile(
 _GAME_EXPLICIT_ASSET_PIPELINE_RE = re.compile(
     r"(spritesheet|sprite sheet|sprite atlas|tileset|tile set|tilemap|tile map|frame animation|animation frames|"
     r"pixel art assets?|pixel asset pack|game asset pack|精灵图|雪碧图|瓦片集|图块集|帧动画|动画帧|"
-    r"角色素材|敌人素材|boss素材|特效素材|素材包|asset pack)",
+    r"角色素材|敌人素材|boss素材|特效素材|素材包|asset pack|"
+    # v7.7 (maintainer 2026-04-27): user typed "建模精细" / "精细建模" / "精美" — was
+    # missed because earlier regex listed only "建模精致". One character cost
+    # us the entire imagegen+spritesheet+assetimport pipeline; PvZ users expecting
+    # crafted plant/zombie sprites got builder canvas-drawn placeholders.
+    r"建模精细|精细建模|建模精美|精美建模|建模精致|精致建模|精致美术|精美美术|精细美术|"
+    # PvZ-class signals: tower defense / multiple distinct character types
+    r"植物大战僵尸|pvz|plants?\s*vs\.?\s*zombies?|塔防游戏|tower\s*defense\s*game|"
+    r"不同的怪物.*不同的植物|不同的植物.*不同的怪物|多种怪物.*多种植物|多种植物.*多种怪物|"
+    r"角色和敌人|敌人和角色|植物和僵尸|僵尸和植物)",
     re.IGNORECASE,
 )
 

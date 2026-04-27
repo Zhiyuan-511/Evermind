@@ -152,7 +152,13 @@ _PRO_ASSET_HEAVY_RE = re.compile(
     r"角色建模|怪物建模|monster\s*model|character\s*model|enemy\s*model|"
     r"sprite\s*sheet|精灵图|游戏素材|game\s*art|character\s*art|game\s*asset|"
     r"商业级游戏|commercial-?grade\s*game|premium\s*game|aaa\s*game|"
-    r"建模精致|精致建模|精美建模|精致美术|精美美术)",
+    r"建模精致|精致建模|精美建模|精致美术|精美美术|"
+    # v7.7 (maintainer 2026-04-27): user typed "建模精细" / "精细建模" / "精细美术" —
+    # was missed by the earlier "致" variants. PvZ-class signals (different
+    # plant/zombie types, tower defense) also strongly imply asset pipeline.
+    r"建模精细|精细建模|建模精美|精细美术|"
+    r"植物大战僵尸|pvz|plants?\s*vs\.?\s*zombies?|塔防游戏|tower\s*defense\s*game|"
+    r"不同的怪物.*不同的植物|不同的植物.*不同的怪物|多种怪物.*多种植物)",
     re.IGNORECASE,
 )
 _OPTIMIZE_SMALL_PATCH_RE = re.compile(
