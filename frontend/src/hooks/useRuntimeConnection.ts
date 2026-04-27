@@ -509,6 +509,17 @@ export function useRuntimeConnection({
         clearPreviewFallbackTimer();
     }, [clearPreviewFallbackTimer]);
 
+    // v7.7 CRITICAL: read activeTaskId from a ref inside onWSMessage so the
+    // callback always sees the LATEST selected task. Was reading the closure-
+    // captured value (initial empty string), so the cross-task filter was
+    // perpetually inert. With the ref + sync effect below, we get latest
+    // value on every WS event without re-creating useCallback (which would
+    // also re-attach the WebSocket onmessage handler).
+    const activeTaskIdRef = useRef<string>('');
+    useEffect(() => {
+        activeTaskIdRef.current = String(activeTaskId || '');
+    }, [activeTaskId]);
+
     // ── WS Message Handler ──
     const onWSMessage = useCallback((msg: Record<string, unknown>) => {
         const t = msg.type as string;
@@ -556,7 +567,7 @@ export function useRuntimeConnection({
                 || _payloadRun?.task_id
                 || ''
             ).trim();
-            const myTaskId = String(activeTaskId || '').trim();
+            const myTaskId = String(activeTaskIdRef.current || '').trim();
             if (evtTaskId && myTaskId && evtTaskId !== myTaskId) {
                 // Foreign-task event — drop silently to keep chat/canvas clean.
                 return;
