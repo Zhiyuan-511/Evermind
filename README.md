@@ -55,12 +55,85 @@ It ships with:
 
 ```bash
 # macOS Apple Silicon
-curl -LO https://github.com/Zhiyuan-511/Evermind/releases/latest/download/Evermind-arm64.dmg
-open Evermind-arm64.dmg
+curl -LO https://github.com/Zhiyuan-511/Evermind/releases/latest/download/Evermind-3.0.0-arm64.dmg
+open Evermind-3.0.0-arm64.dmg
 # drag Evermind.app to Applications, then right-click → Open on first launch
 ```
 
 Set at least one API key on first launch (Settings → API keys). See [INSTALL.md](INSTALL.md) for a full walk-through.
+
+## How agents work — node reference
+
+Each agent has a single fixed role. Drag any subset onto the canvas and connect
+them with arrows; downstream agents only run after all upstream agents pass.
+
+| Node          | Role | Typical input | Typical output | Best paired with |
+|---------------|------|---------------|----------------|------------------|
+| **planner**   | Decompose the goal into 4-12 numbered subtasks; emit ownership boundaries (`builder_1` owns X, `builder_2` owns Y) | The user goal | JSON blueprint + per-agent briefs | always first |
+| **analyst**   | Research the problem domain; gather 5-30 reference repos / docs; produce per-builder handoff sections | planner blueprint | XML-tagged dossier (~20-40 KB) with `<builder_N_handoff>`, `<reference_sites>`, `<deliverables_contract>` | game / website / dashboard |
+| **imagegen**  | Plan visual assets — when no image backend is configured, produces a `manifest.json` + sprite atlas spec; when configured, generates real PNGs | analyst handoff | `assets/manifest.json` + `sprites.js` + `loader.js` | game / creative |
+| **spritesheet** | Sprite atlas planner (offline / fast-path) | imagegen output | atlas coordinates spec | game (when 2D sprite-heavy) |
+| **assetimport** | Asset pipeline coordinator — Wikimedia / Kenney prefetch | analyst preferred sites | local SVGs / PNGs in `assets/` | game / accessibility-critical sites |
+| **builder×N** | Write the actual code (`/tmp/evermind_output/index.html` for primary; `module_b{N}.js` for peers) | analyst dossier | full HTML / JS / CSS | always — at least 1 |
+| **merger**    | Integrate peer builders' modules into root index.html — uses HARD-SKIP fast-path when peers ship modules instead of duplicate index.html | builder outputs | merged single-page app | when builder count ≥ 2 |
+| **reviewer**  | Run real Chromium against the live preview, take screenshots, audit interaction / responsive / completeness; emit accept / reject verdict | merged HTML | rejection list (or pass) | every shipped task |
+| **patcher**   | Apply targeted SEARCH/REPLACE patches based on reviewer rejections — does NOT rebuild from scratch | reviewer verdict | patched HTML | reject path only |
+| **tester**    | Headless browser smoke test — clicks the primary surface, watches console, fails if console errors > tolerance | deployed HTML | pass / fail + console log | every shipped task |
+| **debugger**  | Surgical fixer for runtime errors tester caught | tester error log | debug-patch | reject + retry path |
+| **deployer**  | List artifacts + emit preview URL (single-file → `/tmp/evermind_output/index.html`) | shipped HTML | preview URL + manifest | always last |
+
+### Pre-built canvases
+
+- **Simple** (`builder → tester → deployer`): smallest viable run, ~4-6 minutes, good for quick experiments
+- **Standard** (`planner → analyst → builder → reviewer → patcher → tester → deployer`): default for most goals, ~12-18 minutes
+- **Pro** (the full DAG above with imagegen / spritesheet / assetimport in parallel): asset-heavy games, polished landing pages, ~25-35 minutes
+- **Ultra** (Pro × 4 + 24h budget + multi-file scaffolding): commercial-grade products
+
+Pick a preset from the **Templates** button on the launchpad, or click **+ New Task** and arrange your own canvas.
+
+### Building a custom DAG (5 steps)
+
+1. **Click `+ New Task`** on the launchpad → Editor opens
+2. **Drag agents** from the left sidebar onto the canvas
+3. **Connect** by dragging from one agent's right edge to another's left edge — only forward edges allowed (no cycles, the planner can't depend on the deployer)
+4. **Click an agent** to edit its task description (overrides the auto-generated one)
+5. **Click `Run`** — every connected node runs in topological order; siblings without edges run in parallel automatically
+
+**Common patterns:**
+
+- *Three parallel builders:* connect `analyst → builder1`, `analyst → builder2`, `analyst → builder3`, then all three → `merger`. They start within 1s of each other and write to non-overlapping module files.
+- *Quality-loop:* connect `reviewer → patcher → reviewer` (yes, a back-edge to itself is allowed once — capped at 1 rejection cycle to prevent infinite loops).
+- *Speculative branch:* the runtime auto-spawns a "peer" speculatively for slow tool-using nodes — you don't have to wire this manually.
+
+## Real-world usage
+
+| Task type | Goal example | Recommended template | Typical duration |
+|-----------|--------------|----------------------|------------------|
+| 2D game (tower defense / arcade / puzzle) | "做一个2d植物大战僵尸，建模精致" | Pro | 25 min |
+| 3D game (FPS / TPS / racing) | "Build a 3D first-person shooter with WASD + mouse look" | Pro / Ultra | 35 min |
+| Single-page website | "Build a SaaS landing page for an AI startup" | Standard | 12 min |
+| Multi-page website | "5-page ASL learning site with 26 letter cards" | Pro | 22 min |
+| Data dashboard | "Sales analytics dashboard with 4 charts + filter sidebar" | Pro | 18 min |
+| Tool / utility | "Unit converter, currency / length / weight, dark mode" | Simple | 5 min |
+| Slides / presentation | "10-slide pitch deck for a fintech product" | Standard | 10 min |
+| Creative / experimental | "Interactive generative-art canvas, mouse follow, particle field" | Standard | 12 min |
+| Long task / commercial product | "End-to-end shop with cart, checkout, admin panel" | Ultra | 4-12 hours |
+
+### Tips for great results
+
+- **Be specific about the technology family.** "2d 塔防" routes to Phaser / Canvas2D; "3d shooter" routes to Three.js. Mixing both ("2d 但建模精致") is now correctly understood (since v7.4.2).
+- **Mention the audience.** "for kids" → simpler colors, larger text. "commercial-grade" → polish + variety.
+- **Pin specific page names.** For multi-page sites, list the exact filenames (`learn.html`, `progress.html`) and they will be honored.
+- **Provide reference URLs.** Drop a GitHub link in the task description; analyst will fetch it as a reference.
+- **For long tasks, switch to Ultra mode.** Standard / Pro have a 1-hour wall-time cap; Ultra extends to 24 hours and uses 4-builder parallelism.
+
+## Troubleshooting
+
+- **"Can't open Evermind because Apple cannot check it for malicious software"** → right-click the app → **Open** → confirm. macOS only asks once.
+- **The launchpad asks for Files-and-Folders permission** → only on first launch under v7.3 or earlier. v7.4+ defaults workspace to `~/.evermind/workspace` (sandboxed).
+- **Run is stuck at planner / analyst for 5+ minutes** → check Settings → API keys; relay endpoint may be unreachable. The trace viewer at the bottom of the editor shows the actual error.
+- **Reviewer keeps rejecting the same issue** → click the agent on the canvas, expand its task description, paste the specific fix the reviewer wants. Patcher will apply it next iteration.
+- **Need to cancel a stuck run** → click the red **stop** button in the toolbar; cancel releases the orchestrator immediately (since v7.4).
 
 ## Architecture
 
