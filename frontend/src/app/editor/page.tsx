@@ -292,7 +292,14 @@ function EditorPageInner() {
         const activeRuns = runs
             .filter((run) => isActiveRunStatus(run.status))
             .sort((a, b) => b.updated_at - a.updated_at);
-        return activeRuns[0] || null;
+        if (activeRuns.length > 0) return activeRuns[0];
+        // v7.7: fall back to most-recent terminal run so clicking a Recent
+        // task whose run is `done`/`failed`/`cancelled` still hydrates the
+        // canvas (read-only). Without this fallback, terminal runs left
+        // selectedRun=null and the hydration `if (!selectedRun?.id) return`
+        // kept the canvas blank — the exact symptom user reported.
+        const allByRecent = [...runs].sort((a, b) => b.updated_at - a.updated_at);
+        return allByRecent[0] || null;
     }, [runs]);
     const activeRun = useMemo(() => {
         const activeOpenClawRuns = runs
@@ -383,6 +390,7 @@ function EditorPageInner() {
     }, []);
     const runtime = useRuntimeConnection({
         wsUrl, lang, difficulty, goalRuntime: effectiveSelectedRuntime, sessionId: chat.activeSessionId,
+        activeTaskId: selectedTask?.id || '', // v7.7: scope WS events to current task
         messages: chat.messages,
         addMessage: chat.addMessage,
         addReport: reports.addReport,

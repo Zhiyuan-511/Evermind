@@ -242,6 +242,11 @@ export interface UseRuntimeConnectionOptions {
     difficulty: 'simple' | 'standard' | 'pro' | 'ultra' | 'custom';
     goalRuntime?: 'local' | 'openclaw';
     sessionId?: string;
+    /** v7.7: when set, run-scoped WS events (subtask_*, plan_created, etc.)
+     *  whose `task_id` differs from this value are dropped before they touch
+     *  chat / canvas state. Without this guard, concurrent runs from another
+     *  task leak into the current UI panel. */
+    activeTaskId?: string;
     messages: ChatMessage[];
     addMessage: (role: 'user' | 'system' | 'agent', content: string, sender?: string, icon?: string, borderColor?: string, completionData?: import('@/lib/types').ChatMessage['completionData'], attachments?: ChatAttachment[]) => void;
     addReport: (report: RunReportRecord) => void;
@@ -304,7 +309,7 @@ export interface UseRuntimeConnectionReturn {
 }
 
 export function useRuntimeConnection({
-    wsUrl, lang, difficulty, goalRuntime = 'local', sessionId = '', messages, addMessage, addReport,
+    wsUrl, lang, difficulty, goalRuntime = 'local', sessionId = '', activeTaskId = '', messages, addMessage, addReport,
     buildPlanNodes, updateNodeData, nodes, edges, setNodes,
     onMergeTask, onMergeRun, onMergeNodeExecution, reconnectRunIds = [], onConnectorEvent,
 }: UseRuntimeConnectionOptions): UseRuntimeConnectionReturn {
@@ -507,6 +512,30 @@ export function useRuntimeConnection({
     // ── WS Message Handler ──
     const onWSMessage = useCallback((msg: Record<string, unknown>) => {
         const t = msg.type as string;
+        // v7.7: drop run-scoped events that belong to a different task than
+        // the one currently displayed in the editor. Without this guard,
+        // concurrent runs (e.g. previous task still streaming while user
+        // navigates to a new task) leak their subtask_*/plan_created/etc.
+        // events into the active chat panel and canvas — user reported
+        // "title is 3D shooter but pipeline shows PvZ events mixed in".
+        // Backend orchestrator.py emit() now injects task_id; this guard is
+        // the second line of defense.
+        const RUN_SCOPED_EVENT_TYPES = new Set([
+            'subtask_start', 'subtask_complete', 'subtask_done',
+            'subtask_progress', 'subtask_retry',
+            'plan_created', 'planning_progress', 'planning_fallback',
+            'files_created', 'preview_ready', 'review_verdict',
+            'orchestrator_complete', 'orchestrator_error',
+            'validation_summary', 'node_execution_started',
+        ]);
+        if (RUN_SCOPED_EVENT_TYPES.has(t)) {
+            const evtTaskId = String((msg as Record<string, unknown>).task_id || '').trim();
+            const myTaskId = String(activeTaskId || '').trim();
+            if (evtTaskId && myTaskId && evtTaskId !== myTaskId) {
+                // Foreign-task event — drop silently to keep chat/canvas clean.
+                return;
+            }
+        }
         const tr = (zh: string, en: string) => (lang === 'zh' ? zh : en);
         const addConsoleLog = (line: string) => {
             addMessage('system', line, 'console', '🪵', 'var(--text3)');

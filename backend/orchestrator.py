@@ -2824,7 +2824,26 @@ class Orchestrator:
 
     async def emit(self, event_type: str, data: Dict):
         if self.on_event:
-            await self.on_event({"type": event_type, **data})
+            # v7.7: inject canonical task_id and run_id so frontend can route
+            # WS events to the correct task/run UI. Was: events arrived without
+            # ownership info, the single shared ws bus mixed events from
+            # concurrent runs into whatever task happened to be active in the
+            # UI ("title is 3D shooter but pipeline shows PvZ + 3D events
+            # interleaved"). Now: every emit carries the orchestrator's
+            # canonical task_id/run_id by default; existing data["task_id"]/
+            # ["run_id"] in the payload still wins (so callers that already
+            # pass these don't get overwritten).
+            ctx = self._canonical_ctx or {}
+            envelope = {"type": event_type, **data}
+            if "task_id" not in envelope:
+                _tid = str(ctx.get("task_id") or "").strip()
+                if _tid:
+                    envelope["task_id"] = _tid
+            if "run_id" not in envelope:
+                _rid = str(ctx.get("run_id") or "").strip()
+                if _rid:
+                    envelope["run_id"] = _rid
+            await self.on_event(envelope)
 
     # ── P0-1: Canonical NE bridge helpers ──────────
     def _ne_id_for_subtask(self, subtask_id: str) -> Optional[str]:
