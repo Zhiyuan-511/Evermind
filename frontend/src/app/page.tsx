@@ -269,9 +269,16 @@ export default function Home() {
                         </p>
                     </div>
 
-                    {/* Primary CTA — go straight into the editor with a blank canvas */}
+                    {/* Primary CTA — go straight into the editor with a blank canvas.
+                        v7.7: include ?fresh=1 so the editor knows to spawn a brand-new
+                        chat session. Without this, opening the editor reuses the previous
+                        active session, and the next sendGoal carries that session_id —
+                        backend then treats the prior task as `previous_session_task` and
+                        injects its plan/summary/issues into the new run, making builders
+                        hallucinate the wrong product (observed: cross-task pollution
+                        between sequential pro-mode runs). */}
                     <Link
-                        href="/editor"
+                        href="/editor?fresh=1"
                         style={{
                             display: 'inline-flex',
                             alignItems: 'center',

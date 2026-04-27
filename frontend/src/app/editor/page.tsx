@@ -778,6 +778,7 @@ function EditorPageInner() {
     const searchParams = useSearchParams();
     const taskParam = (searchParams?.get('task') || '').trim();
     const panelParam = (searchParams?.get('panel') || '').toLowerCase().trim();
+    const freshParam = (searchParams?.get('fresh') || '').trim();
     const lastPanelOpenedRef = useRef<string>('');
     useEffect(() => {
         if (panelParam && lastPanelOpenedRef.current !== panelParam) {
@@ -787,6 +788,22 @@ function EditorPageInner() {
             else if (panelParam === 'settings') setSettingsOpen(true);
         }
     }, [panelParam]);
+    // v7.7: launchpad's "New Task" button passes ?fresh=1 so the editor knows
+    // to spawn a brand-new chat session. Without this, opening editor reused
+    // the previous active session — when user submits a new goal, sendGoal
+    // carries the prior session_id, and backend's session_continuation logic
+    // grabs the prior task as `previous_session_task` and injects its
+    // plan/summary/issues into the new run. Builders then hallucinate the
+    // wrong product (cross-task pollution between sequential pro runs).
+    const lastFreshHandledRef = useRef<string>('');
+    useEffect(() => {
+        if (freshParam !== '1') return;
+        if (lastFreshHandledRef.current === '1') return;
+        lastFreshHandledRef.current = '1';
+        try { chat.handleCreateSession(); } catch { /* ignore */ }
+        try { workflow.handleClear(); } catch { /* ignore */ }
+        try { runtime.setPreviewUrl(null); } catch { /* ignore */ }
+    }, [freshParam, chat, workflow, runtime]);
     const lastTaskParamRef = useRef<string>('');
     useEffect(() => {
         if (!taskParam) return;
