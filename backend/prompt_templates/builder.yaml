@@ -134,49 +134,42 @@ instructions: |
     reads, no shell calls.
   </write_strategy>
 
-  <asset_self_sufficiency> v7.7 — REJECT-ON-VIOLATION
-  Sprite/asset nodes (imagegen / spritesheet / assetimport) frequently run
-  in fast_path when no image-gen API is configured, producing ONLY metadata
-  JSON — sprite NAMES, animation lists, palette plans — NOT real PNG/JPG/
-  GIF/SVG files on disk. Accept this and DELIVER A SELF-CONTAINED HTML.
+  <asset_pipeline_integration> v7.8 — wire up upstream pipeline outputs
+  Sprite/asset nodes (imagegen / spritesheet / assetimport) deterministically
+  write `assets/sprite_config.json` + `assets/sprites.js` (with SPRITE_DEFS,
+  drawSprite(), AnimationController) + `assets/loader.js` (AssetLoader with
+  preloadAll/getAsset) + `assets/manifest.json` to /tmp/evermind_output/.
+  These files are PYTHON-GENERATED with stable schemas — you can rely on
+  the field names exactly as documented in sprite_config.json.
 
-  HARD RULES (every violation = automatic reviewer reject + 3-min retry):
+  HOW to wire (the v6.7 5-connect-green pattern):
+  1. `<script src="assets/sprites.js"></script>` — exposes window.SPRITE_DEFS,
+     window.drawSprite(ctx, name, x, y, frame), window.AnimationController.
+  2. `<script src="assets/loader.js"></script>` — exposes window.AssetLoader
+     with `await preloadAll(onProgress)` and `getAsset(name)`.
+  3. CSS tokens: read `assets/sprite_config.json` field `palette_constraints`
+     for the canonical color list (already in builder context).
+  4. Bootstrap order: load sprites.js → loader.js → main game script →
+     `await preloadAll(onProgress)` → start game loop.
 
-  A. NEVER reference local relative `.js` / `.png` / `.jpg` / `.gif` / `.svg`
-     files (e.g. `assets/sprites.js`, `assets/loader.js`, `sprites/plant.png`).
-     If you didn't write the file yourself in THIS run, it doesn't exist on
-     disk → guaranteed 404 → black-screen game. The ONLY safe external refs
-     are public CDN URLs (cdn.jsdelivr.net, unpkg.com, fonts.googleapis.com,
-     googleapis.com, raw.githubusercontent.com).
+  Field names you can rely on (deterministic from Python fast_path):
+  - SPRITE_DEFS keys: `sun`, `pea_shooter`, `sunflower`, `wallnut`,
+    `cherry_bomb`, `zombie_normal`, `zombie_cone`, `zombie_bucket`, etc.
+    (For non-PvZ goals, family names are derived from goal text.)
+  - drawSprite signature: `drawSprite(ctx, spriteName, x, y, frameIndex=0)`.
+  - AnimationController: state machine for idle→run→attack→hurt→die.
+  - AssetLoader exposes `_cache` Map and async `preloadAll(onProgress)`.
 
-  B. Sprites / icons / illustrations: render INLINE as `<svg>...</svg>`,
-     OR paint at runtime via canvas 2D context (rect/arc/path/fillStyle),
-     OR inline as `data:image/svg+xml;utf8,...` data URIs.
-     Even if a spritesheet plan supplied JSON like
-       `{plant: 'sunflower', frames: [...]}`,
-     turn that JSON into a programmatic SVG / canvas drawing —
-     do NOT emit `<img src="sprites/sunflower.png">` referencing a file
-     that doesn't exist.
-
-  C. Sound: prefer Web Audio API oscillators or short data: URIs. Never
-     `<audio src="audio/zombie_groan.mp3">` unless that file is bundled in
-     the public CDN list above.
-
-  D. Game/app must be playable from a SINGLE `index.html` opened in any
-     browser with no `assets/` `sprites/` `audio/` `data/` directory
-     required. Test mentally: if you `mv index.html /tmp/x.html && open
-     /tmp/x.html`, does it still work? If no, you violated this rule.
-
-  E. If the analyst / spritesheet brief tells you to "use assets/sprites.js",
-     IGNORE that instruction — the analyst is wrong; those files don't
-     exist when fast_path ran. Inline-draw instead, document it in a code
-     comment so reviewer understands the conscious choice.
-
-  Concrete inline-sprite patterns that work:
-  - PvZ-style plant:  `<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="28" fill="#4ade80"/><circle cx="32" cy="32" r="14" fill="#fde047"/></svg>`
-  - 3D ball: `ctx.beginPath(); ctx.arc(x,y,r,0,2*Math.PI); ctx.fill();`
-  - Pixel zombie: 8x8 grid drawn via nested for loop over a string array.
-  </asset_self_sufficiency>
+  GUARDRAILS:
+  - If you reference `assets/foo.js` and that filename is NOT one of
+    sprites.js / loader.js / sprite_config.json / manifest.json, you wrote
+    a path that doesn't exist on disk → guaranteed 404. Stick to the four
+    deterministic filenames above.
+  - For audio/video that's not in the manifest: prefer Web Audio API
+    oscillators or short data: URIs (no audio/*.mp3 unless on a CDN).
+  - For inline-only rendering when fast_path produced nothing useful (very
+    rare): fall back to canvas 2D primitives or inline `<svg>`.
+  </asset_pipeline_integration>
 
   <stop_contract>
   After your final write lands and the file passes self_check, STOP

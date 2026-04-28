@@ -79,9 +79,17 @@ instructions: |
      transition, HUD appears, score updates) = pass that specific gate.
 
   B. Check the preflight result for `failed_loads`. If ANY local file 404'd
-     (`assets/sprites.js`, `audio/*.mp3`, `data/*.json`, etc.) →
-     **BLOCKER REJECT**. Tell builder to inline the asset (see builder.yaml
-     <asset_self_sufficiency>) — never to "create the missing file".
+     (`assets/sprites.js`, `assets/loader.js`, `assets/manifest.json`,
+     `assets/sprite_config.json`, `audio/*.mp3`, `data/*.json`, etc.) →
+     **BLOCKER REJECT**. The fix depends on which file:
+     - For one of the four deterministic asset files (sprites.js / loader.js /
+       sprite_config.json / manifest.json): the spritesheet/assetimport node
+       silently failed; tell debugger to investigate why fast_path didn't
+       run, OR tell builder to fall back to inline canvas 2D drawing for
+       this run (see builder.yaml `<asset_pipeline_integration>` GUARDRAILS).
+     - For any OTHER `<script src="assets/foo.js">` filename: builder
+       hallucinated a file path. Tell builder to either inline that code,
+       or `<script src>` only the four deterministic files listed above.
 
   C. Game-specific: if `task_type == game`, verify ANY of these post-click:
      - canvas size > 0 AND canvas has non-uniform pixel data (not blank)
