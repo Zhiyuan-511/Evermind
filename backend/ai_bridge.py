@@ -11312,10 +11312,11 @@ class AIBridge:
                 {
                     "action": "click",
                     "text": "开始游戏",
-                    "fallback_texts": ["开始", "START", "Start", "Play", "Begin", "进入"],
+                    "fallback_texts": ["开始", "START", "Start", "Play", "Begin", "进入", "进入游戏", "开局", "开战", "GO"],
                     "wait_after_ms": 1500,
                     "screenshot": True,
                     "tolerate_failure": True,
+                    "timeout_ms": 12000,
                 },
             ))
             preflight_steps.append((
