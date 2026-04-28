@@ -449,6 +449,7 @@ function EditorPageInner() {
     const workflowNodes = workflow.nodes;
     const buildPlanNodes = workflow.buildPlanNodes;
     const updateNodeData = workflow.updateNodeData;
+    const setWorkflowNodes = workflow.setNodes;
     const runtimeConnected = runtime.connected;
 
     // ── File viewer handlers ──
@@ -744,6 +745,65 @@ function EditorPageInner() {
         }, 150);
         return () => clearTimeout(timer);
     }, [buildPlanNodes, lang, nodeExecutions, selectedRun, selectedRun?.id, selectedRun?.runtime, selectedRun?.status, updateNodeData, workflowNodes]);
+
+    // v7.7: NE → canvas status reconcile (polling-driven, LIVE-event-independent).
+    // Symptom this fixes: chat panel shows "节点 planner: 已完成" but the canvas
+    // node still renders "排队中" — backend NE.status is correct (HTTP API
+    // verified passed), but the LIVE openclaw_node_status WS event either
+    // arrived before React Flow nodes were built (cross-task chat-posted goal
+    // race) or resolveCanvasNodeId fell back to nodeType matching without
+    // binding nodeExecutionId, leaving the canvas node visually stuck at
+    // 'queued' while the NE was already 'passed'.
+    // This effect runs whenever nodeExecutions changes (poll OR WS merge) and
+    // pushes the latest status into the matching canvas node, healing any
+    // gap between backend truth and React Flow data.
+    useEffect(() => {
+        if (!selectedRun?.id) return;
+        const runId = selectedRun.id;
+        const runNEs = nodeExecutions.filter(ne => ne.run_id === runId);
+        if (runNEs.length === 0) return;
+        setWorkflowNodes((prev) => {
+            let changed = false;
+            const next = prev.map((n) => {
+                if (n.type !== 'agent') return n;
+                const data = (n.data || {}) as Record<string, unknown>;
+                const boundNeId = String(data.nodeExecutionId || '').trim();
+                const nodeTypeLower = String(data.nodeType || '').trim().toLowerCase();
+                const subtaskId = String(data.subtaskId || '').trim();
+                // Match by nodeExecutionId first (most reliable), then subtaskId, then unique nodeType.
+                let ne = runNEs.find(x => String(x.id || '').trim() === boundNeId);
+                if (!ne && subtaskId) ne = runNEs.find(x => String(x.id || '').trim() === subtaskId);
+                if (!ne && nodeTypeLower) {
+                    const sameType = runNEs.filter(x => String(x.node_key || '').trim().toLowerCase() === nodeTypeLower);
+                    if (sameType.length === 1) ne = sameType[0];
+                }
+                if (!ne) return n;
+                const newStatus = String(ne.status || 'queued').toLowerCase();
+                const curStatus = String(data.status || '').toLowerCase();
+                const newNeId = String(ne.id || '').trim();
+                if (curStatus === newStatus && boundNeId === newNeId) return n;
+                changed = true;
+                const startedAtMs = Number(ne.started_at || 0) > 0 ? Number(ne.started_at) * 1000 : (data.startedAt as number | undefined);
+                const endedAtMs = Number(ne.ended_at || 0) > 0 ? Number(ne.ended_at) * 1000 : (data.endedAt as number | undefined);
+                const durationSeconds = (Number(ne.started_at || 0) > 0 && Number(ne.ended_at || 0) > 0)
+                    ? Math.max(0, Number(ne.ended_at) - Number(ne.started_at))
+                    : (data.durationSeconds as number | undefined);
+                return {
+                    ...n,
+                    data: {
+                        ...data,
+                        status: newStatus,
+                        nodeExecutionId: newNeId,
+                        rawNodeKey: String(ne.node_key || data.rawNodeKey || ''),
+                        ...(startedAtMs !== undefined ? { startedAt: startedAtMs } : {}),
+                        ...(endedAtMs !== undefined ? { endedAt: endedAtMs } : {}),
+                        ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+                    },
+                };
+            });
+            return changed ? next : prev;
+        });
+    }, [nodeExecutions, selectedRun?.id, setWorkflowNodes]);
 
     // §3.5b: Auto-switch to preview once a completed run also has a ready preview.
     const previewAutoSwitchStateRef = useRef<{ runId: string; status: string; hadPreview: boolean }>({

@@ -188,6 +188,12 @@ export function useWorkflowState(lang: 'en' | 'zh'): UseWorkflowStateReturn {
                 position: { x: AUTO_NODE_X_START + depth * AUTO_NODE_X_GAP, y: AUTO_NODE_Y_CENTER + yOffset },
                 data: {
                     nodeType: agentType,
+                    // v7.7: rawNodeKey lets resolveCanvasNodeId match by nodeKey
+                    // even when no exact nodeExecutionId binding has happened yet
+                    // (chat-posted goal race). Without this, builder1/builder2/etc.
+                    // multi-instance same-type nodes fail rawKeyMatches uniqueness.
+                    rawNodeKey: agentType,
+                    nodeExecutionId: '',
                     label: `${planLang === 'zh' ? (info.label_zh || info.label_en) : info.label_en} #${st.id}`,
                     status: 'idle', progress: 0, model: 'kimi-k2.5', lastOutput: '',
                     lang: planLang, subtaskId: st.id, taskDescription: st.task,

@@ -11078,6 +11078,47 @@ class AIBridge:
                 action = str(event.get("action") or "").strip()
                 if action and action not in action_names:
                     action_names.append(action)
+            # v7.7 (maintainer 2026-04-28): inject the actual DOM-diff / console-
+            # error / failed-request evidence the reviewer needs to enforce
+            # HARD GATES A and B from reviewer.yaml. Was leaking only action
+            # names + capture_path — reviewer had to guess whether the click
+            # actually changed anything, and approved broken games (PvZ "点
+            # 植物放不上草坪" passed reviewer with zero diff). Now reviewer
+            # can read pre-vs-post state hashes, count of console errors,
+            # count of failed network requests, and recent error messages.
+            pre_hash = ""
+            post_hash = ""
+            state_changed_observed = False
+            console_err_total = 0
+            failed_req_total = 0
+            recent_console_errors: List[str] = []
+            click_actions = ("click", "click_start", "drag_and_drop", "press", "type")
+            click_event = None
+            for event in successful_events:
+                ph = str(event.get("previous_state_hash") or "").strip()
+                cur = str(event.get("state_hash") or "").strip()
+                if ph and not pre_hash:
+                    pre_hash = ph
+                if cur:
+                    post_hash = cur  # last successful hash wins
+                if bool(event.get("state_changed")):
+                    state_changed_observed = True
+                try:
+                    console_err_total += int(event.get("console_error_count") or 0)
+                except Exception:
+                    pass
+                try:
+                    failed_req_total += int(event.get("failed_request_count") or 0)
+                except Exception:
+                    pass
+                rce = event.get("recent_console_errors")
+                if isinstance(rce, list):
+                    for entry in rce:
+                        text = str(entry).strip()
+                        if text and text not in recent_console_errors:
+                            recent_console_errors.append(text)
+                if click_event is None and str(event.get("action") or "").strip() in click_actions:
+                    click_event = event
             lines = [
                 "System note: a deterministic browser QA preflight already ran before your verdict.",
                 f"- task_type: {task_type}",
@@ -11087,6 +11128,34 @@ class AIBridge:
                 lines.append(f"- captured_actions: {', '.join(action_names[:8])}")
             if capture_path:
                 lines.append(f"- capture_path: {capture_path}")
+            if pre_hash or post_hash:
+                lines.append(
+                    f"- state_signatures: pre={pre_hash[:12] or 'n/a'} post={post_hash[:12] or 'n/a'} "
+                    f"changed={'YES' if state_changed_observed else 'NO'}"
+                )
+            if click_event is not None:
+                cph = str(click_event.get("previous_state_hash") or "").strip()
+                cpost = str(click_event.get("state_hash") or "").strip()
+                cchg = bool(click_event.get("state_changed"))
+                lines.append(
+                    f"- click_dom_diff: pre={cph[:12] or 'n/a'} post={cpost[:12] or 'n/a'} "
+                    f"changed={'YES' if cchg else 'NO (HARD GATE A: reject if click did nothing)'}"
+                )
+            lines.append(
+                f"- console_error_total: {console_err_total} | failed_request_total: {failed_req_total}"
+            )
+            if recent_console_errors:
+                joined = " | ".join(s[:160] for s in recent_console_errors[:5])
+                lines.append(f"- recent_console_errors: {joined}")
+            if failed_req_total > 0:
+                lines.append(
+                    "- HARD GATE B note: any local 404 in failed_request_total = BLOCKER REJECT per reviewer.yaml."
+                )
+            if click_event is not None and not bool(click_event.get("state_changed")):
+                lines.append(
+                    "- HARD GATE A note: pre-click DOM signature equals post-click DOM signature — "
+                    "treat the artefact as non-interactive (reject)."
+                )
             lines.append(
                 "Treat this as real visual evidence. Use it in your scoring, and only add extra browser steps where interaction proof is still incomplete."
             )

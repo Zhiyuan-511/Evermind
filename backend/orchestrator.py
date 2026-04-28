@@ -14679,6 +14679,29 @@ class Orchestrator:
                 f"{blocking_failed_request_count} blocking failed network request(s) "
                 f"(tolerance={FAILED_REQUEST_TOLERANCE})."
             )
+        # v7.7 (maintainer 2026-04-28): critical script (.js/.mjs/.cjs) failures
+        # have their own zero-tolerance gate. Symptom this fixes: PvZ-class
+        # games shipped with `assets/sprites.js` 404 + `assets/loader.js`
+        # 404 (only 2 failures, well under FAILED_REQUEST_TOLERANCE=5) →
+        # tester passed → user got an unplayable game (drawSprite undefined).
+        # Image/font/media stay under the 5 tolerance — only .js is fatal.
+        critical_script_tolerance = int(os.getenv("EVERMIND_CRITICAL_SCRIPT_TOLERANCE", "0") or 0)
+        if failed_request_entries:
+            critical_script_failed = []
+            for entry in failed_request_entries:
+                if not _is_blocking_failed_request(entry):
+                    continue
+                url = str(entry.get("url") or "").strip()
+                path = str(urlparse(url).path or "").lower()
+                if path.endswith((".js", ".mjs", ".cjs")):
+                    critical_script_failed.append(url)
+            if len(critical_script_failed) > critical_script_tolerance:
+                preview = ", ".join(critical_script_failed[:3])
+                return (
+                    f"{agent_label} interaction gate failed: {len(critical_script_failed)} "
+                    f"critical script(s) failed to load (tolerance={critical_script_tolerance}). "
+                    f"Examples: {preview}"
+                )
 
         interactive_actions = {"click", "fill", "press", "press_sequence"}
         verification_actions = {"snapshot", "wait_for"}
@@ -25736,24 +25759,33 @@ class Orchestrator:
                                                 pass
                             if not _secondaries_support_only:
                                 break
-                        if _root_complete and _secondaries_support_only and _support_files:
-                            # Run deterministic auto-wire (existing function)
-                            try:
-                                _wired = self._auto_patch_merger_support_wiring(str(_root_idx))
-                            except Exception as _wire_err:
-                                logger.warning("auto-wire failed: %s", _wire_err)
-                                _wired = False
+                        # v7.7 (maintainer 2026-04-28): drop _support_files mandatory gate.
+                        # Symptom: builder2 produced no files OR only files merger
+                        # already ignores (e.g. notes.txt) → _support_files=[] →
+                        # fast path skipped → LLM merger runs 7min on already-good
+                        # primary. Now: NOOP outright when primary is complete and
+                        # secondaries have no conflicting HTML; auto-wire only when
+                        # there ARE support files to inject.
+                        if _root_complete and _secondaries_support_only:
+                            _wired = False
+                            if _support_files:
+                                try:
+                                    _wired = self._auto_patch_merger_support_wiring(str(_root_idx))
+                                except Exception as _wire_err:
+                                    logger.warning("auto-wire failed: %s", _wire_err)
+                                    _wired = False
                             logger.info(
-                                "[v7.1i] Merger SKIP-LLM fast path: copied %d support files (%s), auto-wire=%s. "
+                                "[v7.7] Merger SKIP-LLM fast path: copied %d support files (%s), auto-wire=%s. "
                                 "Bypassing LLM entirely (saves ~5-10min vs kimi merger).",
-                                len(_support_files), ", ".join(_support_files[:5]), _wired,
+                                len(_support_files), ", ".join(_support_files[:5]) if _support_files else "(none)", _wired,
                             )
                             # Mark subtask as success without invoking LLM.
                             subtask.skip_llm_merger_fast_path = True
                             subtask.cached_skip_llm_output = (
-                                f"MERGE_NOOP fast path (v7.1i): primary index.html "
-                                f"({_root_idx.stat().st_size}B) shippable, secondary support "
-                                f"files copied ({len(_support_files)}) and auto-wired. "
+                                f"MERGE_NOOP fast path (v7.7): primary index.html "
+                                f"({_root_idx.stat().st_size}B) shippable; "
+                                f"{len(_support_files)} secondary support file(s) "
+                                f"{'auto-wired' if _support_files else 'absent (NOOP outright)'}. "
                                 f"No LLM call needed."
                             )
                     except Exception as _skip_err:

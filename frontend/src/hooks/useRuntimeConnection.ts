@@ -510,6 +510,11 @@ export function useRuntimeConnection({
         waitingAiLastNotifyRef.current = {};
         waitingAiLastConsoleLogRef.current = {};
         desktopQaSessionRef.current = {};
+        // v7.7: clear subtask→canvas-node id map so subtask_complete events
+        // from a stale prior run can't resolve to deleted canvas nodes after
+        // task switch — was leaking task A's mappings into task B and silent-
+        // failing updateNodeData (canvas frozen at queued).
+        subtaskNodeMap.current = {};
         clearPreviewFallbackTimer();
     }, [clearPreviewFallbackTimer]);
 
@@ -521,7 +526,16 @@ export function useRuntimeConnection({
     // also re-attach the WebSocket onmessage handler).
     const activeTaskIdRef = useRef<string>('');
     useEffect(() => {
-        activeTaskIdRef.current = String(activeTaskId || '');
+        const next = String(activeTaskId || '');
+        // v7.7: when active task changes, drop stale subtask→canvas mappings.
+        // Without this, task A's subtask_id="1" mapping still points to task A's
+        // (now-deleted) canvas node, so task B's subtask_complete updates a
+        // ghost id and silently no-ops — visible as "排队中" stuck on the new
+        // task's planner even after backend marks it passed.
+        if (next !== activeTaskIdRef.current) {
+            subtaskNodeMap.current = {};
+        }
+        activeTaskIdRef.current = next;
     }, [activeTaskId]);
 
     // ── WS Message Handler ──
@@ -549,6 +563,12 @@ export function useRuntimeConnection({
             // payload.task.id when top-level is absent.
             'task_created', 'run_created', 'task_updated', 'run_status',
             'openclaw_node_progress', 'node_execution_progress',
+            // v7.7: openclaw_node_update was unprotected — backend's
+            // _sync_ne_status injects payload.taskId, but events for a stale
+            // run (e.g., previous task still finalising while user navigates
+            // to a new task) leaked through and tried to update canvas nodes
+            // for a different task. Now gated by task scope filter.
+            'openclaw_node_update',
         ]);
         if (RUN_SCOPED_EVENT_TYPES.has(t)) {
             // v7.7: events are inconsistent — Orchestrator.emit injects
