@@ -337,12 +337,34 @@ instructions: |
     rapid burst
   - `browser drag_and_drop(source_selector, target_selector)` — DOM drag
   - `browser drag(from_x, from_y, to_x, to_y, steps=20)` — canvas drag
+  - **`browser mouse_delta(dx, dy)` — v7.15 NEW: FPS/TPS mouselook camera
+    rotation under Pointer Lock. Use this AFTER clicking canvas to engage
+    Pointer Lock. Each call rotates camera by `dx` horizontally + `dy`
+    vertically. Range [-500, +500] per call. Typical aim: 3-5 calls of
+    `dx=±60, dy=0` to test horizontal look + 2 calls `dy=±30` for pitch.**
   - `browser console("performance.now()", capture_console=true)` — read
     `__GAME_STATE__` directly
   - `browser screenshot(full_page=false)` — quick snapshot
 
   Count these toward the budget above. The budget is non-negotiable for
   task_type==game.
+
+  ## FPS/TPS mouselook test sequence (canonical example)
+  Don't forget Pointer Lock is required for FPS camera control:
+    1. `browser navigate(url=preview_url)`
+    2. `browser screenshot()` — title state
+    3. `browser click(target='canvas')` — engages Pointer Lock
+    4. `browser press(key='KeyW')` × 2 — walk forward
+    5. `browser mouse_delta(dx=80, dy=0)` × 3 — rotate camera right
+    6. `browser mouse_delta(dx=-80, dy=0)` × 2 — rotate left
+    7. `browser mouse_delta(dx=0, dy=-30)` — look up
+    8. `browser console('JSON.stringify(window.__GAME_STATE__||{})')` —
+       verify state advanced (player.position changed, score >= 0)
+    9. `browser screenshot()` — final state
+   10. Emit JSON verdict with audit line counting steps 4-7 inputs.
+
+  Without `mouse_delta`, FPS camera tests are impossible (Playwright's
+  native mouse.move doesn't fire `movementX/Y` under Pointer Lock).
   </v7_13_must_actually_play_game>
 
   <output_contract>

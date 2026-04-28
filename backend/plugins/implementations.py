@@ -3373,6 +3373,52 @@ class BrowserPlugin(Plugin):
                     include_snapshot=bool(params.get("include_snapshot", False)),
                 )
 
+            if action == "mouse_delta":
+                # v7.15 (maintainer 2026-04-28) — Pointer Lock mouselook simulation.
+                # Playwright `page.mouse.move(x, y)` does NOT generate non-zero
+                # `movementX/movementY` when Pointer Lock is engaged (the FPS
+                # camera receives 0 deltas, camera doesn't rotate). Per web.dev
+                # Pointer Lock guide + GitHub research, the only reliable
+                # browser-side approach is to construct a MouseEvent and use
+                # Object.defineProperty to override movementX/Y getters before
+                # dispatching. This action lets the reviewer/tester rotate the
+                # FPS/TPS camera in fast cycles without leaving Pointer Lock.
+                try:
+                    dx = float(params.get("dx", params.get("delta_x", 0)) or 0)
+                    dy = float(params.get("dy", params.get("delta_y", 0)) or 0)
+                except (TypeError, ValueError):
+                    return PluginResult(success=False, error="mouse_delta requires numeric dx/dy")
+                # Clamp to sane bounds (FPS sensitivity in browser ≤ 200 / event)
+                dx = max(-500.0, min(500.0, dx))
+                dy = max(-500.0, min(500.0, dy))
+                target_selector = str(params.get("target", "") or "").strip()
+                try:
+                    await page.evaluate(
+                        """
+                        ([dx, dy, sel]) => {
+                          const evt = new MouseEvent('mousemove', {
+                            bubbles: true, cancelable: true, view: window,
+                          });
+                          Object.defineProperty(evt, 'movementX', {value: dx, enumerable: true});
+                          Object.defineProperty(evt, 'movementY', {value: dy, enumerable: true});
+                          const target = sel ? document.querySelector(sel) : document;
+                          (target || document).dispatchEvent(evt);
+                          return { dispatched: true, dx, dy, target: target?.tagName || 'document' };
+                        }
+                        """,
+                        [dx, dy, target_selector],
+                    )
+                except Exception as exc:
+                    return PluginResult(success=False, error=f"mouse_delta dispatch failed: {exc}")
+                await page.wait_for_timeout(int(params.get("wait_ms", 80)))
+                return await self._finalize_browser_result(
+                    page,
+                    action="mouse_delta",
+                    base_data={"dx": dx, "dy": dy, "target": target_selector or "document"},
+                    include_screenshot=bool(params.get("include_screenshot", False)),
+                    include_snapshot=False,
+                )
+
             if action == "wheel":
                 # Scroll wheel at current mouse position. Useful for canvas scroll,
                 # map zoom, and custom scroll containers that don't respond to page wheel.
@@ -3632,7 +3678,7 @@ class BrowserPlugin(Plugin):
         return {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["navigate", "observe", "act", "snapshot", "click", "fill", "extract", "scroll", "record_scroll", "press", "press_sequence", "wait_for", "find", "hover", "select", "upload", "new_tab", "switch_tab", "close_tab", "evaluate", "close_popups", "network_idle", "mouse_click", "mouse_move", "mouse_down", "mouse_up", "drag", "wheel", "key_down", "key_up", "key_hold", "type_text", "macro", "canvas_click", "screenshot_region"]},
+                "action": {"type": "string", "enum": ["navigate", "observe", "act", "snapshot", "click", "fill", "extract", "scroll", "record_scroll", "press", "press_sequence", "wait_for", "find", "hover", "select", "upload", "new_tab", "switch_tab", "close_tab", "evaluate", "close_popups", "network_idle", "mouse_click", "mouse_move", "mouse_delta", "mouse_down", "mouse_up", "drag", "wheel", "key_down", "key_up", "key_hold", "type_text", "macro", "canvas_click", "screenshot_region"]},
                 "url": {"type": "string", "description": "URL to navigate to before performing the action"},
                 "goal": {"type": "string", "description": "High-level intent for observe/extract actions"},
                 "target": {"type": "string", "description": "High-level semantic target for act/observe, e.g. 'Start Game' or 'email input'"},

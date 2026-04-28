@@ -5275,7 +5275,14 @@ class AIBridge:
             # v5.8.4: Analyst was falling through to the 4096-token default, causing
             # finish=length after tool-loop synthesis (16196 chars observed). Bumped
             # to 12288 — matches planner headroom so the synthesizer rarely fires.
-            value = self._read_int_env("EVERMIND_ANALYST_MAX_TOKENS", 12288, 2048, 24576)
+            # v7.15 (maintainer 2026-04-28): bumped 12288→18432. Observed multiple
+            # runs with finish=length truncating 4-5 TIER-1 sections (deliverables_
+            # contract / implementation_blueprint / critical_algorithms /
+            # builder_1_handoff / builder_2_handoff) leaving builder blind. v7.7
+            # added game_balance_spec + test_plan_for_reviewer + task_scope_resolution
+            # ≈ 1.9K extra chars; analyst now needs 50%+ more headroom to land all
+            # MUST-LAND sections before truncation.
+            value = self._read_int_env("EVERMIND_ANALYST_MAX_TOKENS", 18432, 2048, 32768)
         elif normalized_node_type == "router":
             # V4.3: Router only generates a JSON routing table — 2K tokens is
             # more than enough.  4K encouraged verbose reasoning that pushed
