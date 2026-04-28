@@ -188,6 +188,13 @@ class BrowserPlugin(Plugin):
     def _resolve_headless(self, context: Dict[str, Any] | None = None) -> bool:
         if self._force_headless_session:
             return True
+        # v7.11 (maintainer 2026-04-28): default to HEADLESS unconditionally for
+        # better UX. User reported "reviewer 打开外部浏览器之前还是会先打开内部
+        # 浏览器" — the second visible Chromium window was confusing. Reviewer
+        # tools (screenshot/click/dom_snapshot) work identically headless.
+        # Only opt in to headful when EVERMIND_BROWSER_HEADFUL=1 is set
+        # explicitly OR context.browser_headful=True (orchestrator can flip
+        # for specific debugging sessions).
         if isinstance(context, dict) and "browser_headful" in context:
             return not bool(context.get("browser_headful"))
         env_headful = str(os.getenv("EVERMIND_BROWSER_HEADFUL", "0")).strip().lower() in ("1", "true", "yes", "on")

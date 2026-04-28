@@ -30055,6 +30055,33 @@ class Orchestrator:
                                             "will be marked failed so reviewer can keep rejecting.",
                                             "; ".join(_tool_failures)[:200],
                                         )
+                                # v7.11 (maintainer 2026-04-28): block SOFT-PASS when
+                                # reviewer reported unresolved runtime errors. Was:
+                                # patcher saw runtime error like "Cannot read
+                                # properties of null" / "click handler did nothing"
+                                # / "interaction gate failed" → still SOFT-PASSed
+                                # because the structural 10KB+<!doctype>+</html>
+                                # check trivially passed. Now: if reviewer's
+                                # unresolved-issue heuristic matches, force
+                                # patcher to fail so reviewer can keep rejecting
+                                # OR (with v7.10) the multi-round loop activates.
+                                if _root_ok_for_softpass:
+                                    try:
+                                        _reviewer_outputs_for_check: List[str] = []
+                                        for _t in (plan.subtasks or []):
+                                            if _t.agent_type == "reviewer":
+                                                _t_out = str(getattr(_t, "output", "") or "").strip()
+                                                if _t_out:
+                                                    _reviewer_outputs_for_check.append(_t_out)
+                                        if self._reviewer_has_unresolved_runtime_errors(_reviewer_outputs_for_check):
+                                            _root_ok_for_softpass = False
+                                            logger.warning(
+                                                "[v7.11] Patcher SOFT-PASS BLOCKED: reviewer flagged "
+                                                "unresolved runtime errors. Patcher will fail so the "
+                                                "multi-round re-audit loop (v7.10) can engage."
+                                            )
+                                    except Exception as _runtime_err:
+                                        logger.debug("[v7.11] runtime-error check failed: %s", _runtime_err)
                     except Exception:
                         _root_ok_for_softpass = False
                     if _root_ok_for_softpass:
