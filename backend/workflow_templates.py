@@ -466,7 +466,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                     {"key": "builder1", "label": "Builder 1", "depends_on": ["analyst", "assetimport"]},
                     {"key": "builder2", "label": "Builder 2", "depends_on": ["builder1"]},
                     {"key": "reviewer", "label": "Reviewer", "depends_on": ["builder1", "builder2"]},
-                    {"key": "deployer", "label": "Deployer", "depends_on": ["builder1", "builder2"]},
+                    {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
                     {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
                 ]
             else:
@@ -507,7 +507,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
             polish_dep = ["builder"]
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
-            {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
+            {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
             {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     elif profile["include_uidesign"] and profile["include_scribe"] and builder_count >= 3 and task_type != "website":
@@ -530,7 +530,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
             polish_dep = ["merger"]
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
-            {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
+            {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
             {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     elif profile["include_uidesign"] and profile["include_scribe"]:
@@ -565,7 +565,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
             polish_dep = ["builder1", "builder2"]
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
-            {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
+            {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
             {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     elif profile["include_uidesign"]:
@@ -608,7 +608,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                 polish_dep = ["builder"]
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
-            {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
+            {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
             {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     else:
@@ -648,7 +648,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                 polish_dep = ["builder"]
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
-            {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
+            {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
             {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
 
