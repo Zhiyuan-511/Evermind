@@ -303,19 +303,37 @@ function EditorPageInner() {
         return allByRecent[0] || null;
     }, [runs]);
     const activeRun = useMemo(() => {
+        // v7.7 audit-fix: ALL candidates must belong to the currently
+        // selected task. Without this scope check, cross-task pollution
+        // happens immediately on task switch — the previous task's
+        // latestRun bleeds through as activeRun, summary header shows
+        // "13/13 已完成", timer keeps counting from the prior run, and
+        // the new task looks "already done before it started".
+        const myTaskId = selectedTask?.id || '';
+        const matchesTask = (run: { task_id?: string } | null | undefined): boolean => {
+            if (!run) return false;
+            // Fresh session / no task selected → no active run.
+            // Without this, opening a new task immediately surfaced the
+            // PRIOR task's runs as "active" because Provider's runs[]
+            // hasn't cleared yet (state propagation lag).
+            if (!myTaskId) return false;
+            const rt = String(run.task_id || '').trim();
+            return !rt || rt === myTaskId;
+        };
         const activeOpenClawRuns = runs
-            .filter((run) => OPENCLAW_UI_ENABLED && run.runtime === 'openclaw' && isActiveRunStatus(run.status))
+            .filter((run) => OPENCLAW_UI_ENABLED && run.runtime === 'openclaw' && isActiveRunStatus(run.status) && matchesTask(run))
             .sort((a, b) => b.updated_at - a.updated_at);
         if (activeOpenClawRuns.length > 0) return activeOpenClawRuns[0];
 
         const activeRuns = runs
-            .filter((run) => isActiveRunStatus(run.status))
+            .filter((run) => isActiveRunStatus(run.status) && matchesTask(run))
             .sort((a, b) => b.updated_at - a.updated_at);
         if (activeRuns.length > 0) return activeRuns[0];
 
-        if (selectedRun) return selectedRun;
-        return latestRun;
-    }, [latestRun, runs, selectedRun]);
+        if (selectedRun && matchesTask(selectedRun)) return selectedRun;
+        if (latestRun && matchesTask(latestRun)) return latestRun;
+        return null;
+    }, [latestRun, runs, selectedRun, selectedTask?.id]);
     const summaryTask = useMemo(() => {
         if (activeRun?.task_id) {
             const linked = tasks.find((task) => task.id === activeRun.task_id);
