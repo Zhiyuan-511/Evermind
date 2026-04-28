@@ -455,6 +455,45 @@ def _repair_script_tag_balance(html: str) -> str:
     return repaired
 
 
+_INLINE_SCRIPT_RE = re.compile(r"<script(?P<attrs>[^>]*)>(?P<body>.*?)</script>", re.DOTALL | re.IGNORECASE)
+_JS_TYPO_PATTERNS: list[tuple[re.Pattern, str]] = [
+    # function/method invocation typos
+    (re.compile(r"(\w+)\(\s*;\s*\)"), r"\1();"),  # init(; )  → init();
+    (re.compile(r"(\w+)\(\s*;"), r"\1();"),  # init(;   → init();
+    (re.compile(r"\(\s*,"), r"("),  # foo(,bar   → foo(bar
+    (re.compile(r",\s*\)"), r")"),  # foo(bar,)  → foo(bar)
+    (re.compile(r",\s*,"), r","),  # foo(a,,b) → foo(a,b)
+    # member-access typos
+    (re.compile(r"\.\s*;"), r";"),  # obj.;  → obj;
+    (re.compile(r"\.\s*\)"), r")"),  # obj.)  → obj)
+    # statement-end typos
+    (re.compile(r";\s*;\s*;"), r";"),  # ;;; → ;
+    (re.compile(r"\(\s*\)\s*\(\s*\)\s*;"), r"();"),  # ()(); → ();
+    # broken arrow body
+    (re.compile(r"=>\s*\{\s*\}"), r"=>{}"),  # cosmetic fix
+]
+
+
+def _auto_fix_common_js_typos(html: str) -> str:
+    """v7.7 — fix common JS typos kimi/gpt builders emit (init(; / ,, / .;).
+    Applied to every <script>...</script> block (inline only, skips src=...).
+    Quietly leaves syntactically valid scripts untouched."""
+    if "<script" not in html.lower():
+        return html
+    def _fix(m: re.Match) -> str:
+        attrs = m.group("attrs") or ""
+        body = m.group("body") or ""
+        if "src=" in attrs.lower():
+            return m.group(0)  # external script — don't touch
+        original_body = body
+        for pattern, replacement in _JS_TYPO_PATTERNS:
+            body = pattern.sub(replacement, body)
+        if body != original_body:
+            return f"<script{attrs}>{body}</script>"
+        return m.group(0)
+    return _INLINE_SCRIPT_RE.sub(_fix, html)
+
+
 def repair_html_structure(html: str) -> str:
     """Repair common truncated or misordered HTML structure defects."""
     repaired = _trim_to_first_html_document(html)
@@ -571,6 +610,11 @@ def repair_html_structure(html: str) -> str:
         repaired = repaired.rstrip() + "\n</html>"
 
     repaired = _repair_script_tag_balance(repaired)
+    # v7.7 — strip common JS typos (init(;  /  foo(,  /  obj.;  /  ;;)
+    # builders emit before reviewer / tester sees them. Reviewer's deterministic
+    # preflight then sees a runnable script instead of a hard syntax error,
+    # which lets the click_start step exercise the real game logic.
+    repaired = _auto_fix_common_js_typos(repaired)
     return repaired
 
 
