@@ -10473,6 +10473,53 @@ class Orchestrator:
                 queue.append(dependent_id)
         return downstream
 
+    def _reviewer_has_unresolved_runtime_errors(self, reviewer_outputs: List[str]) -> bool:
+        """v7.8 (maintainer 2026-04-28): when reviewer's verdict body still mentions
+        actual JS runtime errors (Cannot read properties of null, ReferenceError,
+        404 on critical asset, etc.), debugger MUST run regardless of any
+        soft-pass sentinel. Was: reviewer REJECTED with `Cannot read properties
+        of null (reading 'zombies')` → patcher SOFT-PASS → tester SOFT-PASS →
+        debugger NOOP → broken game shipped. Now: parse reviewer JSON's
+        `runtime_errors[]` (v7.8 schema) AND substring-scan the prose body
+        for unmistakable runtime-error patterns; either one triggers debugger
+        actual execution."""
+        if not reviewer_outputs:
+            return False
+        runtime_error_patterns = (
+            "cannot read propert",  # Cannot read properties of null/undefined
+            "is not defined",
+            "is not a function",
+            "uncaught typeerror",
+            "uncaught referenceerror",
+            "uncaught syntaxerror",
+            "unexpected token",
+            "unexpected end of input",
+            "404",
+            "failed to load resource",
+            "browser runtime errors detected",
+            "browser smoke test failed",
+            "interaction gate failed",
+            "click handler did nothing",
+        )
+        for text in reviewer_outputs:
+            lower = (text or "").lower()
+            for pat in runtime_error_patterns:
+                if pat in lower:
+                    return True
+            # Also try parsing the JSON verdict block for runtime_errors[]
+            try:
+                import re as _re_runtime
+                m = _re_runtime.search(r"```json\s*(\{.*?\})\s*```", text, _re_runtime.DOTALL)
+                if m:
+                    import json as _json_runtime
+                    parsed = _json_runtime.loads(m.group(1))
+                    rt = parsed.get("runtime_errors") if isinstance(parsed, dict) else None
+                    if isinstance(rt, list) and len(rt) > 0:
+                        return True
+            except Exception:
+                pass
+        return False
+
     def _debugger_noop_reason(self, plan: Plan, subtask: SubTask, prev_results: Dict) -> str:
         if subtask.agent_type != "debugger":
             return ""
@@ -10496,6 +10543,19 @@ class Orchestrator:
                 reviewer_outputs.append(output_text)
             elif task.agent_type == "tester" and output_text:
                 tester_outputs.append(output_text)
+
+        # v7.8 (maintainer 2026-04-28) HARD GATE: if reviewer found actual runtime
+        # errors (Cannot read properties / ReferenceError / 404 / etc.), the
+        # artifact is broken — debugger MUST run and try to repair, regardless
+        # of any soft-pass sentinel set by patcher/tester. Was: PvZ shipped
+        # with `Cannot read properties of null (reading 'zombies')` because
+        # debugger NOOP fired on reviewer-shipped + tester soft-pass.
+        if self._reviewer_has_unresolved_runtime_errors(reviewer_outputs):
+            logger.info(
+                "[v7.8] debugger NOOP suppressed: reviewer flagged runtime errors — "
+                "debugger will run and attempt repair instead of soft-passing broken artifact."
+            )
+            return ""
 
         # v7.2 (maintainer 2026-04-26) — debugger noop also fires when:
         #   reviewer was REJECTED (saved as soft-ship sentinel) + patcher
@@ -18577,24 +18637,19 @@ class Orchestrator:
                     # producing race conditions and wasted cycles.
                     depends_on=[reviewer_id, patcher_id],
                 ),
-                SubTask(
-                    id=tester_id,
-                    agent_type="tester",
-                    description=tester_desc,
-                    depends_on=[reviewer_id, deployer_id],
-                ),
+                # v7.8 (maintainer 2026-04-28): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
                 SubTask(
                     id=debugger_id,
                     agent_type="debugger",
                     description=(
-                        "Fix any issues found by reviewer/tester. "
+                        "Fix any issues found by reviewer (read reviewer.runtime_errors[]). "
                         "Use file_ops list to discover ALL HTML pages in /tmp/evermind_output/, "
                         "then file_ops read EACH page and fix every issue found. "
                         "Save corrected versions via file_ops write. "
                         "Check EVERY page, not just index.html — secondary pages are equally important. "
                         "If no issues were found, confirm everything is good."
                     ),
-                    depends_on=[tester_id],
+                    depends_on=[reviewer_id, deployer_id],
                 ),
                 SubTask(
                     id=patcher_id,
@@ -18711,24 +18766,19 @@ class Orchestrator:
                     # producing race conditions and wasted cycles.
                     depends_on=[reviewer_id, patcher_id],
                 ),
-                SubTask(
-                    id=tester_id,
-                    agent_type="tester",
-                    description=tester_desc,
-                    depends_on=[reviewer_id, deployer_id],
-                ),
+                # v7.8 (maintainer 2026-04-28): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
                 SubTask(
                     id=debugger_id,
                     agent_type="debugger",
                     description=(
-                        "Fix any issues found by reviewer/tester. "
+                        "Fix any issues found by reviewer (read reviewer.runtime_errors[]). "
                         "Use file_ops list to discover ALL HTML pages in /tmp/evermind_output/, "
                         "then file_ops read EACH page and fix every issue found. "
                         "Save corrected versions via file_ops write. "
                         "Check EVERY page, not just index.html — secondary pages are equally important. "
                         "If no issues were found, confirm everything is good."
                     ),
-                    depends_on=[tester_id],
+                    depends_on=[reviewer_id, deployer_id],
                 ),
                 SubTask(
                     id=patcher_id,
@@ -18809,25 +18859,19 @@ class Orchestrator:
                 # See the identical note on the earlier DAG branches.
                 depends_on=[reviewer_id, patcher_id],
             ),
-            SubTask(
-                id=tester_id,
-                agent_type="tester",
-                description=tester_desc,
-                depends_on=[reviewer_id, deployer_id],
-            ),
+            # v7.8 (maintainer 2026-04-28): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
             SubTask(
                 id=debugger_id,
                 agent_type="debugger",
                 description=(
-                    "Fix any issues found by reviewer/tester. "
-                    + ("Refine the assembled pages generated from parallel builder parts if needed. " if is_website else "")
-                    + "Use file_ops list to discover ALL HTML pages in /tmp/evermind_output/, "
+                    "Fix any issues found by reviewer (read reviewer.runtime_errors[]). "
+                    "Use file_ops list to discover ALL HTML pages in /tmp/evermind_output/, "
                     "then file_ops read EACH page and fix every issue found. "
                     "Save corrected versions via file_ops write. "
                     "Check EVERY page, not just index.html — secondary pages are equally important. "
                     "If no issues were found, confirm everything is good."
                 ),
-                depends_on=[tester_id],
+                depends_on=[reviewer_id, deployer_id],
             ),
             SubTask(
                 id=patcher_id,
@@ -24252,7 +24296,6 @@ class Orchestrator:
             return [
                 builder,
                 SubTask(id="2", agent_type="deployer", description=deployer_desc, depends_on=["1"]),
-                SubTask(id="3", agent_type="tester", description=tester_desc, depends_on=["2"]),
             ]
         elif difficulty == "pro":
             return self._build_pro_plan_subtasks(
@@ -24270,13 +24313,11 @@ class Orchestrator:
                     SubTask(id="5", agent_type="builder", description=builder_desc, depends_on=["1", "4"]),
                     SubTask(id="6", agent_type="reviewer", description=self._reviewer_task_description(goal, pro=False), depends_on=["5"]),
                     SubTask(id="7", agent_type="deployer", description=deployer_desc, depends_on=["5"]),
-                    SubTask(id="8", agent_type="tester", description=tester_desc, depends_on=["6", "7"]),
                 ]
             return [
                 builder,
                 SubTask(id="2", agent_type="reviewer", description=self._reviewer_task_description(goal, pro=False), depends_on=["1"]),
                 SubTask(id="3", agent_type="deployer", description=deployer_desc, depends_on=["1"]),
-                SubTask(id="4", agent_type="tester", description=tester_desc, depends_on=["3"]),
             ]
 
     def _enforce_plan_shape(self, plan: Plan, goal: str, difficulty: str):
@@ -24331,7 +24372,6 @@ class Orchestrator:
                     SubTask(id="5", agent_type="builder", description=builder_desc_base, depends_on=["1", "2", "3", "4"]),
                     SubTask(id="6", agent_type="reviewer", description=self._reviewer_task_description(goal, pro=False), depends_on=["5"]),
                     SubTask(id="7", agent_type="deployer", description="List generated files and provide local preview URL http://127.0.0.1:8765/preview/", depends_on=["5"]),
-                    SubTask(id="8", agent_type="tester", description=profile.tester_hint, depends_on=["6", "7"]),
                 ]
                 return
             builder_desc = builder_desc_base
@@ -24339,7 +24379,6 @@ class Orchestrator:
                 SubTask(id="1", agent_type="builder", description=builder_desc, depends_on=[]),
                 SubTask(id="2", agent_type="reviewer", description=self._reviewer_task_description(goal, pro=False), depends_on=["1"]),
                 SubTask(id="3", agent_type="deployer", description="List generated files and provide local preview URL http://127.0.0.1:8765/preview/", depends_on=["1"]),
-                SubTask(id="4", agent_type="tester", description=profile.tester_hint, depends_on=["2", "3"]),
             ]
             return
 
@@ -24348,7 +24387,6 @@ class Orchestrator:
             plan.subtasks = [
                 SubTask(id="1", agent_type="builder", description=builder_desc, depends_on=[]),
                 SubTask(id="2", agent_type="deployer", description="List generated files and provide local preview URL http://127.0.0.1:8765/preview/", depends_on=["1"]),
-                SubTask(id="3", agent_type="tester", description=profile.tester_hint, depends_on=["2"]),
             ]
 
     # ═══════════════════════════════════════════
@@ -24420,7 +24458,11 @@ class Orchestrator:
         # circuit breaker: if the last enrichment call just timed out in the
         # same process, skip the next N minutes to avoid compounded waste.
         if difficulty in ("pro", "deep"):
-            _enrich_timeout = max(5, min(60, int(os.getenv("EVERMIND_ENRICHMENT_TIMEOUT_SEC", "25"))))
+            # v7.8 (maintainer 2026-04-28): default 25→8s. enrichment is a NICE-TO-HAVE
+            # that expands short goals ("做PvZ") into 1.8K char briefs. When relay
+            # is slow we'd rather start planner 17s sooner with the raw goal.
+            # Override via EVERMIND_ENRICHMENT_TIMEOUT_SEC=N.
+            _enrich_timeout = max(5, min(60, int(os.getenv("EVERMIND_ENRICHMENT_TIMEOUT_SEC", "8"))))
             _enrich_cooldown = max(60, min(3600, int(os.getenv("EVERMIND_ENRICHMENT_COOLDOWN_SEC", "600"))))
             _last_fail = float(getattr(type(self), "_enrichment_last_failure_ts", 0.0) or 0.0)
             _cooldown_left = _enrich_cooldown - (time.time() - _last_fail) if _last_fail else 0

@@ -191,6 +191,22 @@ instructions: |
 
   ### TIER-1 MUST-LAND (emit FIRST — each tag MUST be fully closed)
   Per-tag hard caps:
+  - `<task_scope_resolution>` (v7.8 — emit FIRST, ≤ 400 chars). Read user goal
+    LITERALLY and decide what builder must produce. STRUCTURED YAML inside:
+    ```
+    user_goal_verbatim: "<paste the user goal exactly>"
+    surface: frontend_only | frontend+local_persist | fullstack | static_site
+    backend_required: false | true
+    backend_components: []  # only when backend_required=true: e.g. ["express server", "postgres", "websocket"]
+    persistence: none | localStorage | indexedDB | server-db
+    target_artifact: "single index.html with inline JS/CSS" | "multi-page static site" | "frontend + Node/Express + DB"
+    out_of_scope: []  # things user did NOT ask for; DO NOT plan or research these
+    ```
+    Defaults that BIND downstream builders/reviewer:
+    - User says "做游戏 / make a game / 做一个 X 应用" with no backend mention → `surface=frontend_only` `backend_required=false` `target_artifact=single index.html with inline JS/CSS`. DO NOT recommend Node/Express/DB. DO NOT split into multi-file architecture.
+    - User says "网站 / website / landing page" → `surface=frontend_only` `target_artifact=single index.html` (or multi-page if >1 page explicitly requested).
+    - User explicitly says "后端 / backend / API / 数据库 / database / server / login / user accounts / save to server" → `surface=fullstack` `backend_required=true`. ONLY THEN plan backend nodes/routes/schema.
+    - When ambiguous: pick the LIGHTER scope (frontend-only) and note the assumption in `out_of_scope`. NEVER speculatively add backend.
   - `<cross_node_contract>` (v7.0 — emit BEFORE blueprint, adapted from Smol-Developer). Structured YAML inside:
     ```
     dom_ids: [hero, about, menu, location, cta-primary]
@@ -219,7 +235,54 @@ instructions: |
   ### TIER-2 GAME-SPECIFIC (emit after Tier-1 if task_type=game)
   - `<control_frame_contract>` (≤ 500 chars)
   - `<game_mechanics_spec>` (≤ 500 chars)
-  - `<asset_sourcing_plan>` (≤ 500 chars)
+  - `<asset_sourcing_plan>` (≤ 500 chars) — for browser canvas games,
+    spritesheet/assetimport nodes deterministically write `assets/sprites.js`
+    + `assets/loader.js` + `sprite_config.json` + `manifest.json` (Python-
+    generated stable schemas SPRITE_DEFS/drawSprite/AssetLoader.preloadAll).
+    Builder SHOULD wire these via `<script src="assets/sprites.js">` (path A
+    proven in v6.7 5-green runs). Allowed external refs: those four files
+    + `https://` CDN scripts. NEVER invent new `<script src="assets/foo.js">`
+    filenames builder didn't write — that's a guaranteed 404.
+  - `<game_balance_spec>` (v7.8, ≤ 800 chars) — REQUIRED for game tasks.
+    Numeric balance the builder MUST encode verbatim into a frozen `BALANCE`
+    constant (`Object.freeze`). NO hardcoded magic numbers in gameplay code.
+    Concrete YAML inside the tag:
+    ```
+    economy:
+      starting_resource: 50  # e.g. PvZ sun
+      passive_income_per_sec: 1.0
+      collectible_value: 25
+    units:  # one entry per playable unit
+      - { id: peashooter, cost: 100, cooldown_sec: 7.5, hp: 300, dmg: 20, attack_hz: 1.4, role: ranged }
+      - { id: sunflower,  cost: 50,  cooldown_sec: 7.5, hp: 300, produces: '25 sun every 24s' }
+    enemies:  # one entry per enemy type
+      - { id: zombie_normal, hp: 200, speed_pps: 25, bite_dmg: 100, spawn_at_wave: 1 }
+    levels:  # 5-10 entries with escalating waves
+      - { level: 1, waves: 5, zombies_per_wave: [3,4,5,6,8], mix: { zombie_normal: 1.0 } }
+    win_lose: { win: 'all waves cleared', lose: 'any zombie reaches house' }
+    difficulty_curve: 'L+1 spawn rate +15%, hp +10%, new type at L3/L5/L7/L9'
+    ```
+  - `<test_plan_for_reviewer>` (v7.8, ≤ 700 chars) — REQUIRED for game tasks.
+    Concrete reviewer test recipe in YAML:
+    ```
+    smoke_test:
+      - 'Open preview URL → expect title screen with Start button'
+      - 'Click Start → expect lawn grid (9x5) + plant tray + sun counter'
+    primary_loop:
+      - { step: 'Wait 8s', verify: 'sun counter increased by ≥1 drop' }
+      - { step: 'Click sun drop', verify: 'counter == 75' }
+      - { step: 'Drag sunflower card to lawn cell (row=2,col=1)',
+          verify: 'cell becomes occupied (data-occupied OR child .plant element OR canvas pixel changed in cell bbox OR window.__GAME_STATE__.placed.length increased)' }
+      - { step: 'Wait 8s after place', verify: 'sun counter increases more (sunflower producing)' }
+    failure_modes_to_check:
+      - 'console error Cannot read properties of null = REJECT'
+      - 'click Start but lawn doesnt appear within 1s = REJECT'
+      - 'drag plant but cell stays empty = REJECT'
+      - 'no sun counter UI visible = REJECT'
+    drag_protocol:
+      - 'Use browser drag_and_drop(source_selector, target_selector) if DOM-based'
+      - 'Canvas-only: read window.__TEST_TARGETS__ and use mouseDown→steps≥20→mouseUp; single click DOES NOT trigger drop'
+    ```
 
   ### TIER-3 HANDOFFS + SUPPORTING (emit after Tier-2)
   - `<reviewer_handoff>` `<tester_handoff>` `<debugger_handoff>` (≤ 400 chars each)

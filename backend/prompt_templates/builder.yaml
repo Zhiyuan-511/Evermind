@@ -171,6 +171,53 @@ instructions: |
     rare): fall back to canvas 2D primitives or inline `<svg>`.
   </asset_pipeline_integration>
 
+  <task_scope_binding>
+  v7.8 — analyst's `<task_scope_resolution>` is binding. Read it FIRST.
+  - `surface=frontend_only` → write ONLY a single index.html (or multi-page
+    static if explicitly requested) with inline JS/CSS. NEVER scaffold
+    Node/Express/Python backend, NEVER generate `package.json` server deps,
+    NEVER add login/database/auth code. The artifact must run by
+    double-clicking the HTML file.
+  - `surface=fullstack` (only when analyst confirms backend_required=true)
+    → THEN you may produce backend files per analyst's spec.
+  - `out_of_scope: [...]` from analyst MUST be respected. Do not invent
+    features not asked for.
+  Default: when analyst's task_scope_resolution is missing or ambiguous,
+  treat it as `surface=frontend_only`. Lighter scope > speculative scaffolding.
+  </task_scope_binding>
+
+  <test_hooks_contract>
+  v7.8 — when task_type=game (or goal contains 拖拽/drag/drop/塔防/PvZ/
+  tower-defense/place/plant), expose deterministic AI test hooks so reviewer
+  can verify gameplay without OCR guessing. Two globals required:
+
+    window.__TEST_TARGETS__ = {
+      // describes interactive zones for AI grounding
+      plants:  [{id:'sunflower',  x:80,  y:540, selectorRef:'plant-card-0'}, ...],
+      cells:   [{row:0, col:0, x:160, y:120}, ..., {row:4, col:8, x:880, y:520}],
+      buttons: [{id:'start', x:400, y:300}, ...],
+      version: '1.0'
+    };
+
+    window.__GAME_STATE__ = {
+      // mirrors live game state, mutated by gameplay
+      sun: 50, wave: 0, plants: [], zombies: [],
+      placed: [],   // [{plantId, row, col, ts}, ...] grows on successful placement
+      score: 0, started: false, gameOver: false,
+    };
+
+  Updates: builder MUST update these globals on every gameplay event.
+  E.g. successful plant placement appends to `__GAME_STATE__.placed`,
+  starts increments wave, etc. Reviewer reads these globals via
+  `browser evaluate` to verify gameplay actually progressed.
+
+  No DOM-only verification: in canvas-only games, DOM diff cannot prove
+  state change — these globals are the contract. Skip them = reviewer
+  REJECT with type "MissingTestHooks".
+
+  Non-game artifacts (websites, dashboards, tools): ignore this contract.
+  </test_hooks_contract>
+
   <stop_contract>
   After your final write lands and the file passes self_check, STOP
   immediately. Rules (Cursor / Claude Code style):

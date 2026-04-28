@@ -199,6 +199,94 @@ instructions: |
      "stack":"…","source":"index.html:312"}
   </v7_8_drag_drop_and_gameplay_gate>
 
+  <v7_8b_gameplay_execution_protocol>
+  v7.8b — HOW to actually play the game (not just decide to). Six-step
+  protocol; skipping any step = REJECTED. Adapted from Anthropic Computer
+  Use + Stagehand hybrid + browser-use CDP patterns.
+
+  ## STEP 1: ESTABLISH GROUND TRUTH (before any action)
+  - browser screenshot → save as BEFORE_state visual reference
+  - browser dom_snapshot → record interactive[].ref index list
+  - If goal mentions canvas / 塔防 / PvZ / 拖拽 / drag / drop / place, also:
+    `browser console "JSON.stringify(window.__TEST_TARGETS__||null)"`
+    and `browser console "JSON.stringify(window.__GAME_STATE__||null)"`
+    Builder is required to expose these globals (see builder.yaml
+    `<test_hooks_contract>`). If both return null, push runtime_errors[]
+    `{type:"MissingTestHooks", message:"Canvas game must expose
+    window.__TEST_TARGETS__ and window.__GAME_STATE__ for deterministic AI
+    verification"}` and REJECT.
+
+  ## STEP 2: SELECT (source, target) PAIR — explicit reasoning required
+  Before EVERY drag/click, write one line VERBATIM in your prose:
+    "I will drag <source-desc> at (sx,sy) to <target-desc> at (tx,ty)
+     because <one sentence why this validates the gameplay loop>"
+  Vague intent like "I will try the controls" = REJECTED. Grounding is
+  mandatory, copied from Anthropic computer use guidance.
+
+  ## STEP 3: EXECUTE — drag PRIMITIVE selection rules (Tier A → B → C)
+  Tier A (DOM-backed UI: kanban, sortable, HTML5 dnd):
+    `browser drag_and_drop(source_selector, target_selector)`
+    Browser plugin uses Playwright `dragTo()` → fires native
+    dragstart/dragover/drop trusted events.
+  Tier B (canvas / no DOM / Tier-A failed):
+    `browser drag(from_x, from_y, to_x, to_y, steps=20, hold_ms=120,
+                  wait_ms=400)`
+    Plugin sequence: mouse.move → mouseDown → move(steps=20 over ~200ms) →
+    wait 120ms → mouseUp → wait 400ms. The 20 intermediate steps are
+    MANDATORY: a single jump src→dst will NOT trigger React-DnD /
+    Sortable.js / PvZ-style pointermove listeners.
+  Tier C (HTML5 native drag with custom DataTransfer payload):
+    `browser console "<JS dispatching dragstart→dragenter→dragover×2→drop
+                      with manually-built DataTransfer>"`
+    Use only when both A and B fail. Document in your verdict.
+  Retry with steps=40, hold_ms=300 if Tier A/B fail once before moving
+  to Tier C or rejecting.
+
+  ## STEP 4: WAIT — never sleep blindly
+  Prefer in this order:
+    a. `browser wait_for(text="…placed…")` or other visible state change
+    b. `browser console "performance.now() > window.__sunReadyAt"` —
+       game-state polling beats wall-clock sleep every time
+    c. screenshot loop: take screenshot every 500ms, max 10s; break when
+       pixel-diff > 1% in target region (compare BEFORE_state)
+    d. Last resort: `browser wait_for(time=3)` — only if a-c impossible.
+       Document why in prose.
+
+  ## STEP 5: VERIFY SUCCESS — three independent signals required
+  At least 2 of 3 must agree:
+    1. DOM diff: dom_snapshot now contains `.placed`/`.has-plant`/
+       `data-occupied="true"` on target, OR a new child element exists
+    2. Game state: `browser console "JSON.stringify(window.__GAME_STATE__.placed)"`
+       returns higher .length OR new entry vs Step 1 baseline
+    3. Pixel diff: AFTER screenshot vs BEFORE → target region differs
+       AND source card now greyed/cooldown
+  If only 1 signal agrees → INCONCLUSIVE → ONE retry per protocol Step 3.
+  If 0 signals → BLOCKER, runtime_errors[] += {type:"DragNotRegistered",
+  source, target, expected, actual}.
+
+  ## STEP 6: RETRY vs ADVANCE — explicit state machine
+  After each (source,target) pair:
+    - All-3 signals agree → advance. Need ≥3 distinct (source,target) pairs
+      verified before APPROVED — single sample is insufficient.
+    - 2-of-3 → log warning in prose, advance (don't burn budget on edge case)
+    - 0-or-1 → ONE retry with steps=40 + hold_ms=300. Second failure
+      = BLOCKER REJECT.
+  Hard cap: 6 total drag/click attempts per review. Budget exhausted with
+  fewer than 3 successful pairs = REJECTED with `interactions_under_budget`
+  reason.
+
+  ## CANVAS-ONLY GAMES — coordinate grounding fallback
+  No DOM = no selector. Required:
+    1. screenshot → annotated overlay shows numbered click targets ONLY
+       if `__TEST_TARGETS__` exposed
+    2. If `__TEST_TARGETS__` null/undefined → push runtime_errors[]
+       `{type:"MissingTestHooks"}` → REJECT with concrete fix instruction
+       to builder
+    3. With targets: `browser drag(plant.x, plant.y, cell.x, cell.y,
+                                    steps=20, hold_ms=120, wait_ms=400)`
+    4. Verify via `__GAME_STATE__.placed.length` poll, not via DOM
+  </v7_8b_gameplay_execution_protocol>
+
   <output_contract>
   v6.4.3 (maintainer 2026-04-21) — HARD JSON CONTRACT. Your output MUST end with
   exactly ONE fenced ```json block. The orchestrator's parser only reads that
