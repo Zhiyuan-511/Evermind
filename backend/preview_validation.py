@@ -160,7 +160,80 @@ def inspect_html_integrity(html: str) -> Dict[str, Any]:
     errors.extend(truncation_errors)
     interactive_errors = _inspect_interactive_without_script(html)
     errors.extend(interactive_errors)
+    dup_errors = _inspect_duplicate_js_declarations(html)
+    errors.extend(dup_errors)
     return {"ok": not errors, "errors": errors}
+
+
+# v7.7 (2026-04-28): catch the builder1+builder2+merger multi-author bug
+# where each builder emits its own `let lastTime = 0;` (or `const`/`var`)
+# and the merger pastes both into the same <script> block — JS engine
+# throws "Identifier 'lastTime' has already been declared" on first
+# parse, every event handler fails to register, the game is dead.
+# Observed in PvZ pro run #2: 33KB HTML + 25KB JS + canvas, but Start
+# button click does nothing because the script never executed.
+_TOP_LEVEL_DECL_RE = re.compile(
+    r"^[\t ]*(?:let|const|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\b",
+    re.MULTILINE,
+)
+
+
+def _inspect_duplicate_js_declarations(html: str) -> List[str]:
+    text = str(html or "")
+    inline_chunks: List[str] = []
+    for match in _INLINE_SCRIPT_BODY_RE.finditer(text):
+        attrs = str(match.group("attrs") or "")
+        if "src=" in attrs.lower():
+            continue
+        inline_chunks.append(str(match.group("body") or ""))
+    if not inline_chunks:
+        return []
+    # Concatenate (this is what the browser sees per-script-tag if all in one,
+    # but even across separate <script> tags top-level let/const collide
+    # because they share the same global script scope context for
+    # subsequent tags). For maximum signal, scan each inline body separately
+    # AND the concatenation.
+    duplicates_found: Dict[str, int] = {}
+    seen_names: Dict[str, int] = {}
+    for body in inline_chunks:
+        # Strip block + line comments + string literals to avoid false positives
+        cleaned = re.sub(r"/\*.*?\*/", "", body, flags=re.DOTALL)
+        cleaned = re.sub(r"^\s*//[^\n]*$", "", cleaned, flags=re.M)
+        cleaned = re.sub(r'"(?:[^"\\]|\\.)*"', '""', cleaned)
+        cleaned = re.sub(r"'(?:[^'\\]|\\.)*'", "''", cleaned)
+        cleaned = re.sub(r"`(?:[^`\\]|\\.)*`", "``", cleaned, flags=re.DOTALL)
+        # Walk top-level only — a declaration at depth >0 (inside a function,
+        # block, or arrow body) is fine. Track brace depth.
+        depth = 0
+        for line_match in re.finditer(r".*", cleaned, re.MULTILINE):
+            line = line_match.group(0)
+            # Adjust depth from braces in this line BEFORE checking decl,
+            # so a decl on the same line as a closing `}` is still
+            # measured at its column position. For simplicity, only
+            # consider depth at line start.
+            if depth == 0:
+                m = _TOP_LEVEL_DECL_RE.match(line)
+                if m:
+                    name = m.group(1)
+                    seen_names[name] = seen_names.get(name, 0) + 1
+                    if seen_names[name] >= 2:
+                        duplicates_found[name] = seen_names[name]
+            for ch in line:
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth = max(0, depth - 1)
+    if not duplicates_found:
+        return []
+    names = sorted(duplicates_found)
+    sample = ", ".join(f"{n} (×{duplicates_found[n]})" for n in names[:5])
+    return [
+        "Duplicate top-level JS declarations detected ({sample}). "
+        "Likely a multi-builder + merger bug — the merger pasted two "
+        "builders' code into one <script> block without de-duping shared "
+        "names. Browsers throw 'Identifier X has already been declared' "
+        "on parse, killing every event handler — page is dead.".format(sample=sample)
+    ]
 
 
 # v7.7 (2026-04-27): catch builder finish=stop truncation that leaves the
