@@ -450,7 +450,7 @@ class BrowserPlugin(Plugin):
             # common install. Falls back to bundled Chromium if unavailable.
             _use_stable_chrome = str(os.getenv("EVERMIND_BROWSER_USE_STABLE_CHROME", "auto")).strip().lower()
             _launch_kwargs: Dict[str, Any] = {"headless": headless, "args": launch_args}
-            if _use_stable_chrome != "never":
+            if _use_stable_chrome != "never" and not headless:
                 try:
                     _stable_chrome_path = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
                     if os.path.exists(_stable_chrome_path):
@@ -458,6 +458,10 @@ class BrowserPlugin(Plugin):
                         logger.info("BrowserPlugin: using installed Chrome Stable for %sx perf win over bundled Chromium", "~5")
                 except Exception:
                     pass
+            elif headless:
+                logger.debug(
+                    "[v7.19c] BrowserPlugin: headless=True — skipping Chrome Stable channel to avoid macOS GUI window flash; using bundled Chromium."
+                )
             try:
                 self._browser = await self._playwright.chromium.launch(**_launch_kwargs)
                 self._launch_note = ""

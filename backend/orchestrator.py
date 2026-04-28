@@ -26161,14 +26161,50 @@ class Orchestrator:
                     except Exception as _root_fb_err:
                         logger.debug("Merger root-fallback check failed: %s", _root_fb_err)
 
-                    # v7.0 (maintainer 2026-04-24): merger health-check first.
-                    # Per maintainer's directive "merger 稍微合并一下…时间 1-2 min"
-                    # we now do a PYTHON health pass on root index.html
-                    # before deciding to skip. Catches asset-id drift, unclosed
-                    # tags, broken local refs — the stuff builder's self-check
-                    # sometimes misses. This is zero-LLM (fast), and emits
-                    # warnings that reviewer can see/act on, but doesn't block
-                    # the pipeline (root is still a shippable artifact).
+                    if _root_ready:
+                        try:
+                            import re as _re_v719a
+                            def _quality_score_v719a(text: str) -> int:
+                                score = 0
+                                score += len(_re_v719a.findall(r"\bTHREE\.[A-Z]", text)) * 3
+                                score += len(_re_v719a.findall(r"<canvas\b", text)) * 5
+                                score += len(_re_v719a.findall(r"requestAnimationFrame", text)) * 1
+                                score += len(_re_v719a.findall(r"requestPointerLock|movementX|movementY", text)) * 2
+                                score += len(_re_v719a.findall(r"WebGLRenderer|PerspectiveCamera|Scene\(", text)) * 2
+                                return score
+                            _root_text_v719a = _root_index.read_text(encoding="utf-8", errors="replace")
+                            _root_score_v719a = _quality_score_v719a(_root_text_v719a)
+                            _best_v719a = (None, _root_score_v719a, len(_root_text_v719a))
+                            for _td_v719a in OUTPUT_DIR.glob("task_*/index.html"):
+                                try:
+                                    _ttext_v719a = _td_v719a.read_text(encoding="utf-8", errors="replace")
+                                    if len(_ttext_v719a) < 10_000:
+                                        continue
+                                    _ts_v719a = _quality_score_v719a(_ttext_v719a)
+                                    if _ts_v719a > _best_v719a[1] + 5 and len(_ttext_v719a) > 0.7 * _best_v719a[2]:
+                                        _best_v719a = (_td_v719a, _ts_v719a, len(_ttext_v719a))
+                                except Exception:
+                                    continue
+                            if _best_v719a[0] is not None:
+                                try:
+                                    import shutil as _sh_v719a
+                                    _sh_v719a.copy2(_best_v719a[0], _root_index)
+                                    _root_size = _root_index.stat().st_size
+                                    logger.info(
+                                        "[v7.19a] Merger preferred richer builder output: %s (score=%d) replaced root (score=%d). Now %d bytes.",
+                                        _best_v719a[0].parent.name + "/" + _best_v719a[0].name,
+                                        _best_v719a[1],
+                                        _root_score_v719a,
+                                        _root_size,
+                                    )
+                                except Exception as _swap_err_v719a:
+                                    logger.warning(
+                                        "[v7.19a] failed to swap richer builder output to root: %s",
+                                        _swap_err_v719a,
+                                    )
+                        except Exception as _v719a_err:
+                            logger.debug("[v7.19a] quality compare failed: %s", _v719a_err)
+
                     _merger_health_issues: List[str] = []
                     if _root_ready:
                         try:

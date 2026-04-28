@@ -145,6 +145,34 @@ instructions: |
     <game_controls_charter>? Required listeners present in your plan?
   </thinking_gate_v7_16>
 
+  <three_d_game_hard_requirement_v7_19d>
+  v7.19d (maintainer 2026-04-28) — HARD REQUIREMENT for 3D / TPS / FPS / shooter
+  / 第三人称 / 第一人称 / 全民枪战 / Counter-Strike / 射击 game tasks:
+
+  YOU MUST USE: `<canvas>` element + `THREE.WebGLRenderer` + `THREE.Scene` +
+  `THREE.PerspectiveCamera`. Plain `<div>` / CSS-3D / DOM-based "fake 3D"
+  is **CATEGORICALLY FORBIDDEN**. Any submission lacking a real `<canvas>`
+  with active THREE.js render loop will be auto-rejected by the merger
+  quality gate (v7.19a) and shipped to the alternate builder's output.
+
+  Required imports (one of these patterns must appear inline):
+    - `<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>`
+    - `import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js'`
+
+  Required listeners for FPS/TPS:
+    - `canvas.requestPointerLock()` on click
+    - `pointerlockchange` event handler (binds mouselook)
+    - `mousemove` reading `e.movementX` / `e.movementY` for camera yaw/pitch
+    - `keydown`/`keyup` handlers for WASD / Space / R / Tab
+
+  Required render loop:
+    - `requestAnimationFrame` calling `renderer.render(scene, camera)` ≥ 60Hz
+
+  If ANY of the above is missing for a 3D game task, your submission is
+  considered failed and merger will prefer the parallel builder's output.
+  No exceptions. No "lite version". No "DOM placeholder for now".
+  </three_d_game_hard_requirement_v7_19d>
+
   <error_recovery>
   If a tool_call fails (invalid path, permission denied, unknown action),
   read the error message, adjust params, and retry with the correction.

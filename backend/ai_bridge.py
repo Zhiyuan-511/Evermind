@@ -9164,7 +9164,12 @@ class AIBridge:
             "You are the reviewer VERDICT-SYNTHESIZER. Your ONLY job is to "
             "emit exactly one JSON object matching the required shape. "
             "No prose. No markdown. No explanation. No preamble. JSON only. "
-            "If evidence is incomplete or uncertain, verdict is REJECTED."
+            "If evidence is incomplete or uncertain, verdict is REJECTED.\n"
+            "[v7.19b] EMPTY OUTPUT IS NOT ALLOWED. If you return empty content, "
+            "the entire run fails and the user gets nothing. You MUST emit the JSON now. "
+            "When uncertain, emit REJECTED with concrete blocking_issues drawn from the tool evidence (console errors, click failures, missing DOM elements, runtime exceptions) — NEVER use empty arrays or generic placeholders. "
+            "Example minimal valid output (one line, no fences):\n"
+            '{"verdict":"REJECTED","scores":{"layout":6,"color":6,"typography":6,"animation":4,"responsive":5,"functionality":3,"completeness":4,"originality":5},"ship_readiness":4,"average":4.9,"issues":[],"blocking_issues":["start button click_start preflight timeout","missing canvas/Three.js render loop","keydown WASD listeners not bound"],"missing_deliverables":["working 3D scene"],"required_changes":["wire pointerlockchange handler","add THREE.WebGLRenderer initialization"],"acceptance_criteria":["pressing W moves camera forward in 3D space"],"strengths":["start screen renders","button styling acceptable"]}'
         )
         context_parts: List[str] = []
         reason = str(force_reason or "").strip()
@@ -9230,23 +9235,74 @@ class AIBridge:
                 + " but produced no prose"
             )
         note_text = "; ".join(notes) or "reviewer emitted empty output twice"
+
+        diagnostic_issues_v719b: List[str] = []
+        diagnostic_changes_v719b: List[str] = []
+        try:
+            for tr_v719b in (tool_results or [])[:30]:
+                if not isinstance(tr_v719b, dict):
+                    continue
+                data_v719b = tr_v719b.get("data") if isinstance(tr_v719b.get("data"), dict) else {}
+                err_v719b = str(tr_v719b.get("error") or data_v719b.get("error") or "").strip()
+                action_v719b = str(tr_v719b.get("args", {}).get("action") if isinstance(tr_v719b.get("args"), dict) else "") or str(data_v719b.get("action") or "")
+                if err_v719b and len(err_v719b) > 5:
+                    short_err = err_v719b[:140]
+                    if action_v719b:
+                        diagnostic_issues_v719b.append(f"{action_v719b} failed: {short_err}")
+                    else:
+                        diagnostic_issues_v719b.append(f"tool error: {short_err}")
+                console_errs = data_v719b.get("console_errors") or data_v719b.get("recent_console_errors") or []
+                if isinstance(console_errs, list):
+                    for ce in console_errs[:3]:
+                        ce_str = str(ce)[:120]
+                        if ce_str:
+                            diagnostic_issues_v719b.append(f"console error: {ce_str}")
+                if "click_start" in str(tr_v719b.get("name", "")) and tr_v719b.get("success") is False:
+                    diagnostic_changes_v719b.append("Wire start button so reviewer click_start preflight succeeds within 12s")
+        except Exception:
+            pass
+
+        seen = set()
+        unique_issues = []
+        for it in diagnostic_issues_v719b:
+            if it and it not in seen:
+                seen.add(it)
+                unique_issues.append(it)
+        if not unique_issues:
+            unique_issues = [
+                "reviewer_empty_output_fallback (no concrete tool errors visible)",
+                "verify root index.html has functional event listeners + render loop",
+            ]
+        if not diagnostic_changes_v719b:
+            diagnostic_changes_v719b = [
+                "Read root index.html and patch any inline-script syntax errors with file_ops edit",
+                "Ensure 3D game tasks have <canvas> + THREE.WebGLRenderer + requestAnimationFrame loop",
+            ]
+
         prose = (
-            "### Reviewer Fallback Verdict\n"
+            "### Reviewer Fallback Verdict (v7.19b — tool-evidence-driven)\n"
             "The reviewer model returned no natural-language review despite "
             "attempting tool-based QA and a forced no-tool synthesis pass. "
-            "Defaulting to REJECTED with conservative scores so the orchestrator "
-            "can proceed with debugger / soft-pass logic instead of hard-blocking.\n"
+            "Defaulting to REJECTED with concrete blocking_issues extracted "
+            "from tool evidence so the patcher can act surgically instead of "
+            "spinning on read-only iterations.\n"
             f"_Diagnostic: {note_text}._\n\n"
         )
-        verdict_json = (
-            '{"verdict":"REJECTED",'
-            '"scores":{"layout":5,"color":5,"typography":5,"animation":5,'
-            '"responsive":5,"functionality":5,"completeness":5,"originality":5},'
-            '"ship_readiness":5,"average":5.0,'
-            '"blocking_issues":["reviewer_empty_output_fallback"],'
-            '"required_changes":["Rerun reviewer with browser QA"],'
-            '"missing_deliverables":[],"strengths":[]}'
-        )
+        import json as _json_v719b
+        verdict_obj = {
+            "verdict": "REJECTED",
+            "scores": {"layout": 5, "color": 5, "typography": 5, "animation": 5,
+                        "responsive": 5, "functionality": 5, "completeness": 5, "originality": 5},
+            "ship_readiness": 5,
+            "average": 5.0,
+            "issues": [],
+            "blocking_issues": unique_issues[:6],
+            "missing_deliverables": [],
+            "required_changes": diagnostic_changes_v719b[:4],
+            "acceptance_criteria": [],
+            "strengths": [],
+        }
+        verdict_json = _json_v719b.dumps(verdict_obj, ensure_ascii=False)
         return prose + "```json\n" + verdict_json + "\n```"
 
     def _builder_partial_text_is_salvageable(self, input_data: str, output_text: str) -> bool:
