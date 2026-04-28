@@ -23789,6 +23789,25 @@ class Orchestrator:
         logger.info(f"Orchestrator starting [{difficulty}] type={self._current_task_type} model={model}: {goal[:80]}... (history: {len(history)} msgs)")
         self._log_thinking_depth_profile()
 
+        try:
+            import shutil as _shutil_v717
+            _free_mb = _shutil_v717.disk_usage("/").free / (1024 * 1024)
+            if _free_mb < 500:
+                logger.error(
+                    "[v7.17] LOW DISK: only %.0fMB free on /. Run may fail with ENOSPC "
+                    "writing reports/artifacts/task_store. Clear caches before continuing.",
+                    _free_mb,
+                )
+            elif _free_mb < 2048:
+                logger.warning(
+                    "[v7.17] LOW DISK WARNING: %.0fMB free on /. Recommend >=2GB headroom for pro-mode runs.",
+                    _free_mb,
+                )
+            else:
+                logger.info("[v7.17] disk free check OK: %.0fMB available on /", _free_mb)
+        except Exception as _disk_err:
+            logger.debug("[v7.17] disk free check skipped: %s", _disk_err)
+
         # v5.5: GitHub repo auto-clone — if goal mentions a GitHub URL, clone it
         # so analyst/builder can work inside the real codebase. Non-blocking:
         # failures fall back to the normal greenfield flow.
