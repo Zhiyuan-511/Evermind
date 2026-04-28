@@ -171,6 +171,91 @@ instructions: |
     rare): fall back to canvas 2D primitives or inline `<svg>`.
   </asset_pipeline_integration>
 
+  <visual_quality_charter>
+  v7.9 (maintainer 2026-04-28) — when task_type=game (or goal contains
+  PvZ / 塔防 / tower-defense / 像素 / 卡通 / canvas), sprite drawing MUST
+  use the Path2D + SVG path layered schema documented in `assets/sprites.js`
+  REFERENCE_SPRITES. The fast_path Python pre-writes 5 production-quality
+  reference sprites (peashooter / sunflower / wallnut / zombie_normal /
+  zombie_cone) — clone their density when adding new units.
+
+  ## FORBIDDEN (auto-rejected by reviewer):
+  - `ctx.arc(x, y, r)` as the sole shape for a character — looks like
+    wireframe, never matches "建模精细"
+  - `ctx.fillRect` as the body of a plant/zombie/character
+  - sprites with fewer than 4 visual layers
+  - missing palette object (raw color literals scattered in path data)
+  - skipping animations (every interactive sprite needs ≥2 anim states)
+
+  ## REQUIRED for every character sprite:
+  1. **palette** object with ≥6 named colors (main / dark / light / accent /
+     highlight / shadow). Lets you keep visual consistency by re-using palette
+     keys instead of magic hex strings.
+  2. **≥6 SVG-path layers** rendered via `new Path2D(svgString)`. Typical
+     layer order (back → front):
+       (a) drop shadow ellipse on the ground
+       (b) outline / dark silhouette
+       (c) main body fill
+       (d) lit body highlight
+       (e) facial features / details
+       (f) decoration / leaves / accessories
+  3. **animations** dict with at least `idle` + one action state (`attack` /
+     `walk` / `produce` / `hurt` / `die`). Each state is `{period_ms, kfs:
+     [{t, oy?, ox?, rot?, sx?, sy?}]}` keyframe list — the renderer
+     interpolates affine transforms.
+  4. **radialGradient highlight** baked at top-left (~0.3, 0.2 of bbox) —
+     gives the 2.5D illusion PvZ uses heavily.
+  5. **canvas pixel hygiene**: `ctx.translate(0.5, 0.5)` before strokes to
+     avoid blurry sub-pixel lines; `ctx.imageSmoothingEnabled = true` on
+     init.
+
+  ## Few-shot example — CORRECT (clone this density):
+  ```js
+  // Peashooter — 9 layers, 6-color palette, 3 anim states (~200 lines)
+  const peashooter = {
+    w: 80, h: 90,
+    palette: { stem:'#2e7a32', body:'#5fbf4a', body_dark:'#3a8c30',
+               leaf:'#7dd968', highlight:'#b8f298', mouth_dark:'#1a5028',
+               pot:'#7a3e2b', pot_rim:'#a0563d' },
+    layers: [
+      { fill:'pot',       path:'M22 80 L58 80 L62 90 L18 90 Z' },
+      { fill:'pot_rim',   path:'M20 78 L60 78 L62 82 L18 82 Z' },
+      { fill:'stem',      path:'M38 80 L42 80 L44 50 L36 50 Z' },
+      { fill:'body_dark', path:'M40 50 Q14 40 18 22 Q22 4 40 4 Q58 4 62 22 Q66 40 40 50 Z' },
+      { fill:'body',      path:'M40 46 Q18 38 22 24 Q26 8 40 8 Q54 8 58 24 Q62 38 40 46 Z' },
+      { fill:'highlight', path:'M30 18 Q26 12 32 10 Q36 14 32 22 Z' },
+      { fill:'mouth_dark',path:'M28 30 Q40 42 52 30 Q40 46 28 30 Z' },
+      { fill:'leaf',      path:'M36 56 Q22 58 16 70 Q30 64 38 60 Z' },
+      { fill:'leaf',      path:'M44 56 Q58 58 64 70 Q50 64 42 60 Z' },
+    ],
+    anims: {
+      idle:   { period_ms:1200, kfs:[{t:0,oy:0},{t:600,oy:-2},{t:1200,oy:0}] },
+      attack: { period_ms:500,  kfs:[{t:0,sx:1,sy:1},{t:80,sx:1.18,sy:0.85},{t:200,sx:0.92,sy:1.1},{t:500,sx:1,sy:1}] },
+    },
+  };
+  // Render: ctx.fill(new Path2D(layer.path)) per layer, palette[layer.fill]
+  ```
+
+  ## Few-shot example — WRONG (will be rejected):
+  ```js
+  // 30-line "plant" — looks like wireframe
+  function drawPeashooter(ctx, x, y) {
+    ctx.fillStyle = 'green';
+    ctx.beginPath(); ctx.arc(x, y, 20, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = 'darkgreen';
+    ctx.fillRect(x-2, y, 4, 30);
+  }
+  ```
+
+  Rule of thumb: if a sprite renders in <60 lines of definition, it's
+  almost certainly under-detailed. Aim for 100-150 lines per character.
+
+  ## Drawing the lawn / background
+  Same density: gradient sky → far hill silhouettes → near grass texture
+  (use `createPattern` with a 16×16 procedural canvas for tile fill, NOT
+  flat green). Add 3-5 cloud SVG paths drifting via translate animation.
+  </visual_quality_charter>
+
   <task_scope_binding>
   v7.8 — analyst's `<task_scope_resolution>` is binding. Read it FIRST.
   - `surface=frontend_only` → write ONLY a single index.html (or multi-page
