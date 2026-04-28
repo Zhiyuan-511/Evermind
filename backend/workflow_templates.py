@@ -52,7 +52,7 @@ BUILT_IN_TEMPLATES: Dict[str, Dict] = {
             {"key": "builder2", "label": "Builder 2", "depends_on": ["analyst"]},
             {"key": "merger", "label": "Merger", "depends_on": ["builder1", "builder2"]},
             {"key": "reviewer", "label": "Reviewer",  "depends_on": ["merger"]},
-            {"key": "deployer", "label": "Deployer",  "depends_on": ["merger"]},
+            {"key": "deployer", "label": "Deployer",  "depends_on": ["reviewer"]},
             {"key": "debugger", "label": "Debugger",  "depends_on": ["reviewer", "deployer"]},
         ],
     },
@@ -453,7 +453,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                 {"key": "builder2", "label": "Builder 2", "depends_on": ["analyst", "assetimport"]},
                 {"key": "merger", "label": "Merger", "depends_on": ["builder1", "builder2"]},
                 {"key": "reviewer", "label": "Reviewer", "depends_on": ["merger"]},
-                {"key": "deployer", "label": "Deployer", "depends_on": ["merger"]},
+                {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
                 {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
             ]
         elif parallel_builders:
@@ -479,7 +479,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                     {"key": "builder2", "label": "Builder 2", "depends_on": ["analyst", "assetimport"]},
                     {"key": "merger", "label": "Merger", "depends_on": ["builder1", "builder2"]},
                     {"key": "reviewer", "label": "Reviewer", "depends_on": ["merger"]},
-                    {"key": "deployer", "label": "Deployer", "depends_on": ["merger"]},
+                    {"key": "deployer", "label": "Deployer", "depends_on": ["reviewer"]},
                     {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
                 ]
         else:

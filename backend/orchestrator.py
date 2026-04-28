@@ -24884,17 +24884,37 @@ class Orchestrator:
         except Exception as _ws_err:
             logger.warning("Workspace isolation skipped: %s", _ws_err)
         results = {}
-        completed = set()
-        succeeded = set()
-        failed = set()
+        # v7.10 (maintainer 2026-04-28): expose completed/succeeded as instance
+        # attributes so patcher post-exec can discard reviewer + downstream
+        # for true multi-round re-audit. Local references kept for hot-loop
+        # readability — they alias the same sets.
+        self._sched_completed = set()
+        self._sched_succeeded = set()
+        self._sched_failed = set()
+        completed = self._sched_completed
+        succeeded = self._sched_succeeded
+        failed = self._sched_failed
 
         while not self._cancel:
+            # v7.10 (maintainer 2026-04-28): when reviewer multi-round is active
+            # (`_pending_reviewer_requeue_id` set), pause non-loop downstream
+            # nodes so deployer/debugger can't dispatch ahead of reviewer's
+            # second verdict. Per maintainer's directive: "每一次补丁师又改好了
+            # 都再次给到我们的审查员去审查，然后审查员觉得不合格那就再次打回".
+            # Only reviewer (re-audit) + patcher (the loop members) are
+            # allowed to run while requeue is pending. v7.8c's reset path
+            # tried to reset downstream after-the-fact and deadlocked because
+            # deployer/debugger had already started; this gates them BEFORE
+            # dispatch so the race never happens.
+            _reviewer_loop_active = bool(getattr(self, "_pending_reviewer_requeue_id", None))
+            _LOOP_MEMBERS = {"reviewer", "patcher"}
             # Find subtasks ready to execute (all deps satisfied)
             ready = [
                 st for st in plan.subtasks
                 if st.id not in completed
                 and st.status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED)
                 and all(d in succeeded for d in st.depends_on)
+                and (not _reviewer_loop_active or st.agent_type in _LOOP_MEMBERS)
             ]
 
             if not ready:
@@ -30188,16 +30208,17 @@ class Orchestrator:
                     # surface the patch summary in the report. This is the
                     # 95th-percentile correct outcome at 100% reliability.
                     _patcher_soft_pass = bool(patch_outcome.get("soft_pass"))
-                    # v7.8d (maintainer 2026-04-28): v7.8c condition-enabled path
-                    # caused real scheduler deadlock — observed run_7252d097c776
-                    # left reviewer stuck PENDING after reset because deployer/
-                    # debugger had already started and finished. Run failed
-                    # ('1 non-terminal subtasks reviewer/pending'). Reverting
-                    # to v7.1k.2 ALWAYS-skip behavior — multi-round needs a
-                    # proper scheduler fix (deployer/debugger should depend on
-                    # reviewer COMPLETED + pending_requeue=None) before this
-                    # branch can be safely re-enabled. Tracked as v7.10 follow-up.
-                    if False:
+                    # v7.10 (maintainer 2026-04-28): RE-ENABLE multi-round re-audit
+                    # now that scheduler gate (line ~24897) blocks deployer/
+                    # debugger while `_pending_reviewer_requeue_id` is set.
+                    # The scheduler-side gate prevents the race that caused
+                    # v7.8c to deadlock (downstream finishing before reset).
+                    # Trigger condition: reviewer rejected + patcher made
+                    # real edits + budget remaining. Per maintainer: "每一次补丁师
+                    # 又改好了都再次给到我们的审查员去审查".
+                    _max_rej_for_loop = self._configured_max_reviewer_rejections()
+                    _budget_remaining = int(getattr(self, "_reviewer_requeues", 0) or 0) < _max_rej_for_loop
+                    if pending_rv_id and not _patcher_soft_pass and _budget_remaining:
                         _reset_ids: List[str] = [pending_rv_id]
                         # Find all downstream nodes that gated on reviewer
                         _downstream_ids = self._collect_transitive_downstream_ids(plan, [pending_rv_id])
@@ -30205,6 +30226,22 @@ class Orchestrator:
                         _downstream_ids = [d for d in _downstream_ids if d != subtask.id]
                         _reset_ids.extend(_downstream_ids)
                         _reset_ids = list(dict.fromkeys(_reset_ids))
+                        # v7.10 CRITICAL: also remove these subtasks from the
+                        # scheduler's completed/succeeded sets so the readiness
+                        # check `st.id not in completed` evaluates True and the
+                        # reset reviewer can actually dispatch again. Without
+                        # this discard, status=PENDING is necessary but not
+                        # sufficient — was the v7.8c deadlock root cause.
+                        try:
+                            for _rid in _reset_ids:
+                                if hasattr(self, "_sched_completed"):
+                                    self._sched_completed.discard(_rid)
+                                if hasattr(self, "_sched_succeeded"):
+                                    self._sched_succeeded.discard(_rid)
+                                if hasattr(self, "_sched_failed"):
+                                    self._sched_failed.discard(_rid)
+                        except Exception as _set_err:
+                            logger.debug("v7.10 scheduler set discard failed: %s", _set_err)
                         for _rid in _reset_ids:
                             target = next((t for t in plan.subtasks if t.id == _rid), None)
                             if not target:
