@@ -30188,17 +30188,16 @@ class Orchestrator:
                     # surface the patch summary in the report. This is the
                     # 95th-percentile correct outcome at 100% reliability.
                     _patcher_soft_pass = bool(patch_outcome.get("soft_pass"))
-                    # v7.8c (maintainer 2026-04-28): re-enable multi-round re-audit
-                    # when (a) patcher actually produced edits (not soft-pass)
-                    # AND (b) reviewer rejection budget remaining. Per maintainer's
-                    # directive: "用户设置最多打回几次就要打回几次，而且审查员要真的能
-                    # 打回到补丁师，补丁师然后再去修复，然后再返回给审查员，然后再审查".
-                    # Guard against scheduler deadlock by only running this
-                    # path when budget remains; soft-pass + budget-exhausted
-                    # cases still ship via the elif below.
-                    _max_rej_for_loop = self._configured_max_reviewer_rejections()
-                    _budget_remaining = int(getattr(self, "_reviewer_requeues", 0) or 0) < _max_rej_for_loop
-                    if pending_rv_id and not _patcher_soft_pass and _budget_remaining:
+                    # v7.8d (maintainer 2026-04-28): v7.8c condition-enabled path
+                    # caused real scheduler deadlock — observed run_7252d097c776
+                    # left reviewer stuck PENDING after reset because deployer/
+                    # debugger had already started and finished. Run failed
+                    # ('1 non-terminal subtasks reviewer/pending'). Reverting
+                    # to v7.1k.2 ALWAYS-skip behavior — multi-round needs a
+                    # proper scheduler fix (deployer/debugger should depend on
+                    # reviewer COMPLETED + pending_requeue=None) before this
+                    # branch can be safely re-enabled. Tracked as v7.10 follow-up.
+                    if False:
                         _reset_ids: List[str] = [pending_rv_id]
                         # Find all downstream nodes that gated on reviewer
                         _downstream_ids = self._collect_transitive_downstream_ids(plan, [pending_rv_id])
