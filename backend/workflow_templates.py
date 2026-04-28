@@ -20,29 +20,31 @@ _logger = logging.getLogger("evermind.workflow_templates")
 BUILT_IN_TEMPLATES: Dict[str, Dict] = {
     "simple": {
         "id": "simple",
-        "label": "Simple (3 nodes)",
-        "description": "Fast mode: builder → deployer → tester",
+        "label": "Simple (2 nodes)",
+        # v7.8 (maintainer 2026-04-28): tester removed; reviewer (when present)
+        # subsumes interaction/runtime-error testing duties.
+        "description": "Fast mode: builder → deployer",
         "nodes": [
             {"key": "builder",  "label": "Builder",  "depends_on": []},
             {"key": "deployer", "label": "Deployer", "depends_on": ["builder"]},
-            {"key": "tester",   "label": "Tester",   "depends_on": ["deployer"]},
         ],
     },
     "standard": {
         "id": "standard",
-        "label": "Standard (4 nodes)",
-        "description": "Balanced mode: builder → reviewer + deployer → tester",
+        "label": "Standard (3 nodes)",
+        # v7.8: tester folded into reviewer.
+        "description": "Balanced mode: builder → reviewer + deployer",
         "nodes": [
             {"key": "builder",  "label": "Builder",  "depends_on": []},
             {"key": "reviewer", "label": "Reviewer", "depends_on": ["builder"]},
             {"key": "deployer", "label": "Deployer", "depends_on": ["builder"]},
-            {"key": "tester",   "label": "Tester",   "depends_on": ["deployer"]},
         ],
     },
     "pro": {
         "id": "pro",
-        "label": "Pro (9-12 nodes)",
-        "description": "Deep mode: planner → analyst → specialist prep → builders → reviewer + deployer → tester → debugger",
+        "label": "Pro (8-11 nodes)",
+        # v7.8: tester removed; debugger now reads runtime_errors[] from reviewer JSON.
+        "description": "Deep mode: planner → analyst → specialist prep → builders → reviewer + deployer → debugger",
         "nodes": [
             {"key": "planner",  "label": "Planner",   "depends_on": []},
             {"key": "analyst",  "label": "Analyst",   "depends_on": ["planner"]},
@@ -51,8 +53,7 @@ BUILT_IN_TEMPLATES: Dict[str, Dict] = {
             {"key": "merger", "label": "Merger", "depends_on": ["builder1", "builder2"]},
             {"key": "reviewer", "label": "Reviewer",  "depends_on": ["merger"]},
             {"key": "deployer", "label": "Deployer",  "depends_on": ["merger"]},
-            {"key": "tester",   "label": "Tester",    "depends_on": ["reviewer", "deployer"]},
-            {"key": "debugger", "label": "Debugger",  "depends_on": ["tester"]},
+            {"key": "debugger", "label": "Debugger",  "depends_on": ["reviewer", "deployer"]},
         ],
     },
     "ultra": {
@@ -78,8 +79,8 @@ BUILT_IN_TEMPLATES: Dict[str, Dict] = {
             {"key": "reviewer", "label": "Reviewer",  "depends_on": ["polisher"]},
             {"key": "patcher",  "label": "Patcher",   "depends_on": ["reviewer"]},
             {"key": "deployer", "label": "Deployer",  "depends_on": ["reviewer", "patcher"]},
-            {"key": "tester",   "label": "Tester",    "depends_on": ["reviewer", "deployer"]},
-            {"key": "debugger", "label": "Debugger",  "depends_on": ["tester"]},
+            # v7.8: tester removed; debugger consumes reviewer.runtime_errors[] directly
+            {"key": "debugger", "label": "Debugger",  "depends_on": ["reviewer", "deployer"]},
         ],
     },
     "optimize": {
@@ -453,8 +454,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                 {"key": "merger", "label": "Merger", "depends_on": ["builder1", "builder2"]},
                 {"key": "reviewer", "label": "Reviewer", "depends_on": ["merger"]},
                 {"key": "deployer", "label": "Deployer", "depends_on": ["merger"]},
-                {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-                {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+                {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
             ]
         elif parallel_builders:
             if sequential_game_builders:
@@ -467,8 +467,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                     {"key": "builder2", "label": "Builder 2", "depends_on": ["builder1"]},
                     {"key": "reviewer", "label": "Reviewer", "depends_on": ["builder1", "builder2"]},
                     {"key": "deployer", "label": "Deployer", "depends_on": ["builder1", "builder2"]},
-                    {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-                    {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+                    {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
                 ]
             else:
                 nodes = [
@@ -481,8 +480,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                     {"key": "merger", "label": "Merger", "depends_on": ["builder1", "builder2"]},
                     {"key": "reviewer", "label": "Reviewer", "depends_on": ["merger"]},
                     {"key": "deployer", "label": "Deployer", "depends_on": ["merger"]},
-                    {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-                    {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+                    {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
                 ]
         else:
             nodes = [
@@ -493,8 +491,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
                 {"key": "builder", "label": "Builder", "depends_on": ["analyst", "assetimport"]},
                 {"key": "reviewer", "label": "Reviewer", "depends_on": ["builder"]},
                 {"key": "deployer", "label": "Deployer", "depends_on": ["builder"]},
-                {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-                {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+                {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
             ]
     elif profile["include_uidesign"] and profile["include_scribe"] and not profile.get("parallel_builders", True):
         nodes = [
@@ -511,8 +508,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
             {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
-            {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-            {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+            {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     elif profile["include_uidesign"] and profile["include_scribe"] and builder_count >= 3 and task_type != "website":
         scribe_blocks_builders = bool(profile.get("scribe_blocks_builders", True))
@@ -535,8 +531,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
             {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
-            {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-            {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+            {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     elif profile["include_uidesign"] and profile["include_scribe"]:
         scribe_blocks_builders = bool(profile.get("scribe_blocks_builders", True))
@@ -571,8 +566,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
             {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
-            {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-            {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+            {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     elif profile["include_uidesign"]:
         if parallel_builders:
@@ -615,8 +609,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
             {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
-            {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-            {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+            {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
     else:
         if parallel_builders:
@@ -656,8 +649,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         nodes.extend([
             {"key": "reviewer", "label": "Reviewer", "depends_on": polish_dep},
             {"key": "deployer", "label": "Deployer", "depends_on": polish_dep},
-            {"key": "tester", "label": "Tester", "depends_on": ["reviewer", "deployer"]},
-            {"key": "debugger", "label": "Debugger", "depends_on": ["tester"]},
+            {"key": "debugger", "label": "Debugger", "depends_on": ["reviewer", "deployer"]},
         ])
 
     nodes = _enforce_dual_builder_merger(nodes)
@@ -700,7 +692,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
 
     label = "Pro (10-13 nodes)" if not goal else f"Pro ({len(nodes)} nodes)"
     description = (
-        "Deep mode: planner → analyst → optional design/content/asset prep → one to three builders → optional polisher → reviewer + deployer → tester → debugger → patcher (conditional)"
+        "Deep mode: planner → analyst → optional design/content/asset prep → one to three builders → optional polisher → reviewer + deployer → debugger → patcher (conditional). v7.8: tester folded into reviewer."
     )
     return {
         "id": "pro",
@@ -740,12 +732,7 @@ def optimize_template_profile(goal: str = "") -> Dict[str, Any]:
         or (multi_page and long_brief)
         or ("performance" in lowered and task_type in {"dashboard", "tool"})
     )
-    needs_tester = bool(
-        task_type in {"game", "tool", "dashboard"}
-        or verify_hint
-        or "bug" in lowered
-        or "回归" in text
-    )
+    needs_tester = False  # v7.8: tester removed; reviewer subsumes test duties
 
     if small_patch:
         return {
