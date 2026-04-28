@@ -134,6 +134,50 @@ instructions: |
     reads, no shell calls.
   </write_strategy>
 
+  <asset_self_sufficiency> v7.7 — REJECT-ON-VIOLATION
+  Sprite/asset nodes (imagegen / spritesheet / assetimport) frequently run
+  in fast_path when no image-gen API is configured, producing ONLY metadata
+  JSON — sprite NAMES, animation lists, palette plans — NOT real PNG/JPG/
+  GIF/SVG files on disk. Accept this and DELIVER A SELF-CONTAINED HTML.
+
+  HARD RULES (every violation = automatic reviewer reject + 3-min retry):
+
+  A. NEVER reference local relative `.js` / `.png` / `.jpg` / `.gif` / `.svg`
+     files (e.g. `assets/sprites.js`, `assets/loader.js`, `sprites/plant.png`).
+     If you didn't write the file yourself in THIS run, it doesn't exist on
+     disk → guaranteed 404 → black-screen game. The ONLY safe external refs
+     are public CDN URLs (cdn.jsdelivr.net, unpkg.com, fonts.googleapis.com,
+     googleapis.com, raw.githubusercontent.com).
+
+  B. Sprites / icons / illustrations: render INLINE as `<svg>...</svg>`,
+     OR paint at runtime via canvas 2D context (rect/arc/path/fillStyle),
+     OR inline as `data:image/svg+xml;utf8,...` data URIs.
+     Even if a spritesheet plan supplied JSON like
+       `{plant: 'sunflower', frames: [...]}`,
+     turn that JSON into a programmatic SVG / canvas drawing —
+     do NOT emit `<img src="sprites/sunflower.png">` referencing a file
+     that doesn't exist.
+
+  C. Sound: prefer Web Audio API oscillators or short data: URIs. Never
+     `<audio src="audio/zombie_groan.mp3">` unless that file is bundled in
+     the public CDN list above.
+
+  D. Game/app must be playable from a SINGLE `index.html` opened in any
+     browser with no `assets/` `sprites/` `audio/` `data/` directory
+     required. Test mentally: if you `mv index.html /tmp/x.html && open
+     /tmp/x.html`, does it still work? If no, you violated this rule.
+
+  E. If the analyst / spritesheet brief tells you to "use assets/sprites.js",
+     IGNORE that instruction — the analyst is wrong; those files don't
+     exist when fast_path ran. Inline-draw instead, document it in a code
+     comment so reviewer understands the conscious choice.
+
+  Concrete inline-sprite patterns that work:
+  - PvZ-style plant:  `<svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="28" fill="#4ade80"/><circle cx="32" cy="32" r="14" fill="#fde047"/></svg>`
+  - 3D ball: `ctx.beginPath(); ctx.arc(x,y,r,0,2*Math.PI); ctx.fill();`
+  - Pixel zombie: 8x8 grid drawn via nested for loop over a string array.
+  </asset_self_sufficiency>
+
   <stop_contract>
   After your final write lands and the file passes self_check, STOP
   immediately. Rules (Cursor / Claude Code style):
