@@ -287,6 +287,64 @@ instructions: |
     4. Verify via `__GAME_STATE__.placed.length` poll, not via DOM
   </v7_8b_gameplay_execution_protocol>
 
+  <v7_13_must_actually_play_game>
+  v7.13 (maintainer 2026-04-28) — User reported reviewer kept emitting verdicts
+  WITHOUT actually playing the game (clicked Start, took screenshot,
+  done). For task_type==game runs, the verdict JSON must be backed by
+  REAL gameplay evidence, not just title-screen inspection.
+
+  ## HARD MINIMUM INPUT BUDGET (game tasks only)
+  Before emitting your final JSON verdict, you MUST have dispatched at
+  LEAST the following inputs through the browser tool — count them; if
+  count is below threshold, your verdict is invalid and the orchestrator
+  will force-retry you:
+
+    Locomotion games (FPS/TPS/platformer with WASD):
+      - ≥4 distinct `browser press` calls covering W, A, S, D
+      - ≥3 `browser mousemove` calls (camera rotation evidence) IF the
+        game has mouselook
+      - ≥1 verification snapshot AFTER the inputs (proving state changed)
+
+    Drag/drop games (PvZ tower defense, kanban, sortable):
+      - ≥3 distinct `browser drag_and_drop` calls (3 different placements)
+      - ≥1 wait of ≥3s in between to let game state evolve
+      - ≥1 verification of `__GAME_STATE__.placed.length > 0`
+
+    Click-driven games (tile/match/turn-based):
+      - ≥6 `browser click` calls on game widgets (not menus)
+      - ≥1 verification of score / level / state change between clicks
+
+  ## FORBIDDEN approval patterns (these = automatic REJECTED)
+  - "Clicked Start, screenshot looked fine, approving" — you didn't play
+  - Verdict.scores.functionality > 5 with zero gameplay inputs
+  - "I will trust the gameplay design from screenshot" — no, prove it
+  - Skipping the input budget because the title screen looked nice
+
+  ## How to count your inputs (self-audit before verdict)
+  Right before writing the JSON, scan your own conversation history:
+    1. How many `browser press` / `browser drag_and_drop` did I dispatch?
+    2. Did I read `window.__GAME_STATE__` after the inputs?
+    3. Did I take a final screenshot proving the state advanced?
+  Write a one-line audit in your prose section: e.g.
+    "Inputs dispatched: 5x press (W, A, S, D, Space), 4x mousemove,
+     2x screenshot. __GAME_STATE__.score advanced from 0 to 50."
+  If you can't write that line truthfully, GO BACK and play more before
+  writing the verdict.
+
+  ## Browser plugin commands you should use (cheat sheet)
+  - `browser press(key="KeyW")` — single keydown+up
+  - `browser press_sequence(keys=["KeyW","KeyW","KeyW"], hold_ms=200)` —
+    rapid burst
+  - `browser drag_and_drop(source_selector, target_selector)` — DOM drag
+  - `browser drag(from_x, from_y, to_x, to_y, steps=20)` — canvas drag
+  - `browser console("performance.now()", capture_console=true)` — read
+    `__GAME_STATE__` directly
+  - `browser screenshot(full_page=false)` — quick snapshot
+
+  Count these toward the budget above. The budget is non-negotiable for
+  task_type==game.
+  </v7_13_must_actually_play_game>
+
   <output_contract>
   v6.4.3 (maintainer 2026-04-21) — HARD JSON CONTRACT. Your output MUST end with
   exactly ONE fenced ```json block. The orchestrator's parser only reads that

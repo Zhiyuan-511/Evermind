@@ -256,6 +256,84 @@ instructions: |
   flat green). Add 3-5 cloud SVG paths drifting via translate animation.
   </visual_quality_charter>
 
+  <visual_aesthetics_charter>
+  v7.13 (maintainer 2026-04-28) — User reported "节点写的界面美观度还不够". Lift
+  the visual quality bar by following these aesthetic rules. NOT optional.
+
+  ## Color palette discipline (all UI tasks)
+  - Pick ONE base hue + ONE accent hue. Don't mix 5+ unrelated colors.
+  - Use CSS custom properties: --bg, --surface, --surface-2, --primary,
+    --primary-hover, --accent, --text, --text-muted, --border, --shadow.
+  - 60-30-10 rule: 60% base, 30% surface, 10% accent.
+  - Modern cool dark default: bg #0b0f1a, surface #161b2c, primary #6366f1,
+    accent #f59e0b, text #e5e7eb, muted #94a3b8, border #1f2937.
+  - For games: use the spritesheet `palette_constraints` exactly.
+
+  ## Typography (every UI page)
+  - Use `system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif`.
+  - Type scale: 12 / 14 / 16 / 20 / 28 / 40 / 56 px (modular 1.4×). Pick
+    only 4-5 sizes max per page.
+  - Line-height: 1.5 for body, 1.2 for headlines.
+  - Font weights: only 400 (body) and 600 or 700 (heading) — no random 500.
+
+  ## Spacing rhythm (4-pt baseline grid)
+  - Use 4 / 8 / 12 / 16 / 24 / 32 / 48 / 64 / 96 px ONLY for padding and
+    margin. Random `margin: 13px` is rejected.
+  - Container max-width 1200-1280px on desktop; 100% on mobile.
+
+  ## Visual depth + texture
+  - Drop shadows: `0 1px 2px rgba(0,0,0,0.05), 0 4px 12px rgba(0,0,0,0.08)`
+    for elevated cards. Skip shadows = flat = boring.
+  - Subtle gradients: `linear-gradient(135deg, var(--surface), var(--surface-2))`
+    on hero / nav, NOT flat solid colors.
+  - Border radius scale: 4 / 8 / 12 / 16 / 24px. Buttons 8px, cards 12-16px.
+  - Hover states: lift `translateY(-2px)` + tighter shadow + subtle scale
+    `1.02`. Buttons must change appearance on hover.
+
+  ## Motion (every interactive surface)
+  - Default transition: `transition: all 0.18s cubic-bezier(0.4, 0, 0.2, 1)`.
+  - Pageload entrance: animate hero in with `opacity 0 → 1` +
+    `translateY(8px → 0)` over 300ms.
+  - Buttons: tap state with `transform: scale(0.97)` on `:active`.
+  - Game UI: HUD elements pulse/flash on important events
+    (`@keyframes pulse { 50% { transform: scale(1.06); } }`).
+
+  ## Layout (must use modern CSS)
+  - `display: grid` for cards/galleries (NOT float / table-layout).
+  - `display: flex; gap:` for inline groups.
+  - `position: sticky` for nav, `position: fixed` for HUD.
+  - Mobile-first responsive: `@media (min-width: 768px)` breakpoints.
+
+  ## Forbidden lazy patterns (auto-reject)
+  - `style="color: red"` inline ad-hoc colors instead of palette tokens
+  - default `<button>` with no styling
+  - `<table>` for layout
+  - sharp 0px-radius corners on cards (looks unfinished)
+  - flat #fff background with no surface elevation
+  - no hover state on clickable elements
+  - one-shot 1.0 opacity transitions (no easing)
+
+  ## Game-specific visual must-haves
+  - Title screen: hero image / canvas demo + game logo (large) +
+    Start button (huge, primary color, with glow). NOT a wall of text.
+  - HUD: at least 3 visible widgets (score, lives/health, timer/wave).
+  - Game-over screen: "GAME OVER" heading + final score + Restart button.
+  - Win screen: celebratory color + score + next-level CTA.
+  - Particle effects on hits/explosions (canvas drawCircle bursts OK).
+  - Cursor handling: hide cursor when pointerLocked, custom canvas
+    crosshair drawn at center for FPS/TPS.
+
+  ## Self-audit checklist before final write
+    1. Did I declare CSS custom properties for the palette? ✓
+    2. Type scale uses only 4-5 sizes? ✓
+    3. All spacing is on 4-pt grid? ✓
+    4. Hover state on every clickable? ✓
+    5. At least one transition / animation? ✓
+    6. (game) HUD with ≥3 widgets visible? ✓
+  Any "no" → STOP, fix, then write. Reviewer scores ux/polish 1-10 and
+  rejects below 7.
+  </visual_aesthetics_charter>
+
   <task_scope_binding>
   v7.8 — analyst's `<task_scope_resolution>` is binding. Read it FIRST.
   - `surface=frontend_only` → write ONLY a single index.html (or multi-page

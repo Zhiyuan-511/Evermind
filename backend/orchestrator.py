@@ -26067,13 +26067,35 @@ class Orchestrator:
                                                 pass
                             if not _secondaries_support_only:
                                 break
-                        # v7.7 (maintainer 2026-04-28): drop _support_files mandatory gate.
-                        # Symptom: builder2 produced no files OR only files merger
-                        # already ignores (e.g. notes.txt) → _support_files=[] →
-                        # fast path skipped → LLM merger runs 7min on already-good
-                        # primary. Now: NOOP outright when primary is complete and
-                        # secondaries have no conflicting HTML; auto-wire only when
-                        # there ARE support files to inject.
+                        # v7.13 (maintainer 2026-04-28): never NOOP when builder2 wrote
+                        # substantive HTML — even if primary "won" by size, the
+                        # secondary likely has unique modules (weapon system,
+                        # enemy AI, controls module) that must be merged. Was:
+                        # SKIP-LLM dropped builder2's 73KB content silently.
+                        # Now: only NOOP if secondary truly has no substantial
+                        # HTML (renamed-to-.bak files OK to skip).
+                        _secondary_substantive = False
+                        try:
+                            for _sec_info in _survey or []:
+                                _sec_dir = OUTPUT_DIR / str(_sec_info.get("dir") or "")
+                                if not _sec_dir.is_dir() or _sec_dir == _primary:
+                                    continue
+                                for _sf in list(_sec_dir.iterdir()):
+                                    if _sf.is_file() and _sf.suffix.lower() == ".html" \
+                                            and not _sf.name.startswith("_secondary_") \
+                                            and _sf.stat().st_size >= 20_000:
+                                        _secondary_substantive = True
+                                        break
+                                if _secondary_substantive:
+                                    break
+                        except Exception:
+                            pass
+                        if _secondary_substantive:
+                            logger.info(
+                                "[v7.13] Merger SKIP-LLM declined: secondary builder wrote substantive HTML "
+                                "(>=20KB). Falling through to LLM merge to preserve builder2's unique modules."
+                            )
+                            _secondaries_support_only = False
                         if _root_complete and _secondaries_support_only:
                             _wired = False
                             if _support_files:
