@@ -1721,8 +1721,8 @@ export default function SettingsModal({
                                 </div>
                                 <div className="s-hint" style={{ lineHeight: 1.7 }}>
                                     {t(
-                                        'Maximum times the reviewer can REJECT and trigger a patcher repair round. After the budget is exhausted, downstream nodes (tester/debugger/deployer) take over and act as the safety net. 1 = fastest single-loop closure; higher = stricter quality gate at the cost of run time.',
-                                        '审查员最多可以 REJECT 触发补丁修复的次数。预算用完后由下游 tester/debugger/deployer 兜底。1 = 最快的单轮闭环；越大质量越严但运行时间越长。'
+                                        'Maximum reviewer REJECT rounds before downstream tester/debugger takes over. v7.7 ships single-loop (1) only — the multi-round audit path is being rebuilt to prevent scheduler deadlocks (returning in v7.8). Setting >1 saves to disk but does not currently change behavior.',
+                                        '审查员最多可以 REJECT 触发补丁修复的次数。v7.7 仅启用单轮闭环（1）— 多轮审查正在重构以避免调度死锁，将在 v7.8 恢复。当前设置 >1 会保存到磁盘但不会改变行为。'
                                     )}
                                 </div>
                                 <div className="s-row" style={{ marginTop: 8 }}>
@@ -1733,10 +1733,10 @@ export default function SettingsModal({
                                         onChange={(e) => setReviewerMaxRejections(Number(e.target.value))}
                                         style={{ fontWeight: 600 }}
                                     >
-                                        <option value={1}>1 — {t('Single loop (fastest, default)', '单轮闭环（最快，默认）')}</option>
-                                        <option value={2}>2 — {t('Allow one extra rebuild round', '允许一次额外修复')}</option>
-                                        <option value={3}>3 — {t('Standard quality gate', '标准质量门')}</option>
-                                        <option value={5}>5 — {t('Strict (Ultra-style)', '严格模式（Ultra 风格）')}</option>
+                                        <option value={1}>1 — {t('Single loop (effective; v7.7 default)', '单轮闭环（v7.7 唯一生效配置）')}</option>
+                                        <option value={2}>2 — {t('(saved; effective in v7.8)', '（仅保存；v7.8 生效）')}</option>
+                                        <option value={3}>3 — {t('(saved; effective in v7.8)', '（仅保存；v7.8 生效）')}</option>
+                                        <option value={5}>5 — {t('(saved; effective in v7.8)', '（仅保存；v7.8 生效）')}</option>
                                     </select>
                                 </div>
                             </div>

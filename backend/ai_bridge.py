@@ -580,15 +580,21 @@ _BUILDER_GOAL_HINT_PATTERNS = (
 # Model Registry — all supported models
 # ─────────────────────────────────────────────
 MODEL_REGISTRY = {
-    # ── OpenAI GPT-5 family (via relay) ──
+    # ── OpenAI GPT-5 family (default = official OpenAI; users can override
+    #    api_base in Settings → API Keys to point at their own relay). ──
+    # v7.7 (maintainer 2026-04-27): removed hardcoded private relay endpoint
+    # (api.private-relay.com) — open-source users would have routed all GPT
+    # traffic through the project owner's personal relay, leaking keys
+    # and prompt content. Now defaults to official OpenAI; relay opt-in
+    # is per-user via Settings.
     "gpt-5.4-mini": {"provider": "openai", "litellm_id": "openai/gpt-5.4-mini", "supports_tools": True, "supports_cua": True,
-                      "api_base": "https://api.private-relay.com/v1", "fallback_api_bases": []},
+                      "api_base": "https://api.openai.com/v1", "fallback_api_bases": []},
     "gpt-5.4": {"provider": "openai", "litellm_id": "openai/gpt-5.4", "supports_tools": True, "supports_cua": True,
-                 "supports_reasoning_effort": True, "api_base": "https://api.private-relay.com/v1", "fallback_api_bases": []},
+                 "supports_reasoning_effort": True, "api_base": "https://api.openai.com/v1", "fallback_api_bases": []},
     "gpt-5.3-codex": {"provider": "openai", "litellm_id": "openai/gpt-5.3-codex", "supports_tools": True, "supports_cua": False,
-                       "supports_reasoning_effort": True, "api_base": "https://api.private-relay.com/v1", "fallback_api_bases": []},
+                       "supports_reasoning_effort": True, "api_base": "https://api.openai.com/v1", "fallback_api_bases": []},
     "gpt-5.2-codex": {"provider": "openai", "litellm_id": "openai/gpt-5.2-codex", "supports_tools": True, "supports_cua": False,
-                       "api_base": "https://api.private-relay.com/v1", "fallback_api_bases": []},
+                       "api_base": "https://api.openai.com/v1", "fallback_api_bases": []},
     # ── OpenAI legacy family ──
     "gpt-4.1": {"provider": "openai", "litellm_id": "gpt-4.1", "supports_tools": True, "supports_cua": False},
     "gpt-4o": {"provider": "openai", "litellm_id": "gpt-4o", "supports_tools": True, "supports_cua": False},
@@ -715,7 +721,7 @@ MODEL_REGISTRY = {
     "minimax-m2.7-highspeed": {"provider": "minimax", "litellm_id": "openai/MiniMax-M2.7-highspeed",
                                "supports_tools": True, "supports_cua": False,
                                "api_base": "https://api.minimax.io/v1",
-                               "fallback_api_bases": ["https://api.private-relay.com/v1", "https://api.minimax.chat/v1"]},
+                               "fallback_api_bases": ["https://api.minimax.chat/v1"]},
     # ── AiGate (private-relay.example) — 中转池,单 key 访问多家 ──
     # v5.8.6: user onboarded private-relay.example — one key (sk-ag-*) fronts 12 models
     # across minimax/glm/doubao/qwen/deepseek/kimi. TTFB 1.4-7.6s (vs Kimi For

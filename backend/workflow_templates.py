@@ -151,19 +151,30 @@ _PRO_ASSET_HEAVY_RE = re.compile(
     # CSS/canvas, losing visual fidelity.
     r"角色建模|怪物建模|monster\s*model|character\s*model|enemy\s*model|"
     r"sprite\s*sheet|精灵图|游戏素材|game\s*art|character\s*art|game\s*asset|"
-    r"商业级游戏|commercial-?grade\s*game|premium\s*game|aaa\s*game|"
+    r"商业级游戏|commercial-?grade\s*game|premium\s*game|aaa\s*game|production-?grade\s*game|shippable\s*game|"
     r"建模精致|精致建模|精美建模|精致美术|精美美术|"
-    # v7.7 (maintainer 2026-04-27): user typed "建模精细" / "精细建模" / "精细美术" —
-    # was missed by the earlier "致" variants. PvZ-class signals (different
-    # plant/zombie types, tower defense) also strongly imply asset pipeline.
     r"建模精细|精细建模|建模精美|精细美术|"
-    r"植物大战僵尸|pvz|plants?\s*vs\.?\s*zombies?|塔防游戏|tower\s*defense\s*game|"
-    r"不同的怪物.*不同的植物|不同的植物.*不同的怪物|多种怪物.*多种植物)",
+    # v7.7 audit: English equivalents the audit found missing.
+    r"detailed\s*modeling|fine\s*modeling|polished\s*modeling|premium\s*modeling|exquisite\s*modeling|"
+    r"high[- ]?fidelity\s*(?:art|modeling|game|2d|3d)|professional\s*(?:art|sprites|2d|sprite\s*work)|"
+    r"pixel\s*art|polished\s*(?:retro|pixel|2d|game|sprite)|"
+    r"commercial-?grade\s*(?:art|game|2d|3d|shooter|rpg|platformer|sprites)|"
+    r"polished\s*(?:art|sprites|pixel\s*art)|hi-?fi\s*sprites|hand[- ]?drawn|hand[- ]?painted|"
+    r"high[- ]?quality\s*(?:character\s*art|sprites|2d|3d|game|2d\s*assets?)|"
+    r"detailed\s*(?:character\s*art|enemy\s*art|monster\s*art)|"
+    # PvZ / tower defense / multi-class enemy signals
+    r"植物大战僵尸|pvz|plants?\s*vs\.?\s*zombies?|plants?\s*and\s*zombies?|塔防游戏|塔防|"
+    r"tower\s*defense|td\s*game|wave\s*defense|"
+    r"不同的怪物.*不同的植物|不同的植物.*不同的怪物|多种怪物.*多种植物|"
+    r"multiple\s*(?:distinct\s*)?(?:enemies|monsters|plants|towers|characters)\s*and\s*(?:enemies|monsters|plants|towers|characters))",
     re.IGNORECASE,
 )
 _OPTIMIZE_SMALL_PATCH_RE = re.compile(
     r"(修复|修一下|修正|微调|调整|改一下|小改|优化一下|导航|文案|配色|间距|按钮|图标|布局|"
-    r"fix|patch|tweak|polish|refine|adjust|spacing|copy|cta|navbar|button|padding)",
+    r"fix|patch|tweak|polish|refine|adjust|spacing|copy|cta|navbar|button|padding|"
+    # v7.7 audit: English equivalents that previously had no match
+    r"navigation|nav\b|color\s*scheme|palette|color|layout|icons?|"
+    r"change\s*the|update\s*the|move\s*the)",
     re.IGNORECASE,
 )
 _OPTIMIZE_PARALLEL_RE = re.compile(
@@ -172,8 +183,11 @@ _OPTIMIZE_PARALLEL_RE = re.compile(
     re.IGNORECASE,
 )
 _OPTIMIZE_VERIFY_RE = re.compile(
-    r"(测试|试玩|回归|验收|部署|加载|黑屏|性能|帧率|鼠标|视角|相机|输入|控制|射击|碰撞|"
-    r"test|qa|verify|regression|deploy|loading|black screen|performance|fps|camera|input|controls|shoot)",
+    r"(测试|试玩|回归|验收|部署|加载|黑屏|性能|帧率|鼠标|视角|相机|输入|控制|射击|碰撞|卡顿|延迟|"
+    r"test|qa|verify|regression|deploy|loading|black screen|performance|fps|frame\s*rate|"
+    r"camera|input|controls|shoot|mouse|view|perspective|collision|"
+    r"playtest|play\s*through|e2e|end[- ]?to[- ]?end|smoke\s*test|regression\s*test|"
+    r"lag|latency|stutter)",
     re.IGNORECASE,
 )
 _OPTIMIZE_STRATEGIC_DESIGN_RE = re.compile(

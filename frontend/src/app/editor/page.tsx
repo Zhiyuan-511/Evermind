@@ -810,7 +810,14 @@ function EditorPageInner() {
     // wrong product (cross-task pollution between sequential pro runs).
     const lastFreshHandledRef = useRef<string>('');
     useEffect(() => {
-        if (freshParam !== '1') return;
+        // v7.7 audit-fix: reset the guard whenever fresh is dropped from the
+        // URL so a SECOND launchpad → New Task click (after the first one
+        // navigated away) re-arms the fresh flow. Without this, the second
+        // click was silent no-op and the user landed on the prior session.
+        if (freshParam !== '1') {
+            lastFreshHandledRef.current = '';
+            return;
+        }
         if (lastFreshHandledRef.current === '1') return;
         lastFreshHandledRef.current = '1';
         try { selectTask(null); } catch { /* ignore */ } // belt-and-suspenders: ensure no task carries over

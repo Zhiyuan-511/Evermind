@@ -117,15 +117,26 @@ _GAME_EXPLICIT_ASSET_PIPELINE_RE = re.compile(
     r"(spritesheet|sprite sheet|sprite atlas|tileset|tile set|tilemap|tile map|frame animation|animation frames|"
     r"pixel art assets?|pixel asset pack|game asset pack|精灵图|雪碧图|瓦片集|图块集|帧动画|动画帧|"
     r"角色素材|敌人素材|boss素材|特效素材|素材包|asset pack|"
-    # v7.7 (maintainer 2026-04-27): user typed "建模精细" / "精细建模" / "精美" — was
-    # missed because earlier regex listed only "建模精致". One character cost
-    # us the entire imagegen+spritesheet+assetimport pipeline; PvZ users expecting
-    # crafted plant/zombie sprites got builder canvas-drawn placeholders.
     r"建模精细|精细建模|建模精美|精美建模|建模精致|精致建模|精致美术|精美美术|精细美术|"
+    # v7.7 audit: English equivalents the audit found missing — these phrasings
+    # are common in English briefs but previously routed to the bare 12-node
+    # path because the regex was CN-heavy.
+    r"detailed\s*modeling|fine\s*modeling|polished\s*modeling|premium\s*modeling|exquisite\s*modeling|"
+    r"high[- ]?fidelity\s*(?:art|modeling|game|2d|3d)|professional\s*(?:art|sprites|2d)|polished\s*(?:art|sprites)|"
+    r"pixel\s*art|polished\s*(?:retro|pixel|2d|game|sprite)|"
+    r"commercial-?grade\s*(?:art|game|2d|3d|shooter|rpg|platformer|sprites)|"
+    r"hand[- ]?drawn|hand[- ]?painted\s*(?:assets|art|sprites)|"
+    r"high[- ]?quality\s*(?:character\s*art|sprites|2d|3d|game)|"
+    r"detailed\s*(?:character\s*art|enemy\s*art|monster\s*art)|"
+    r"isometric\s*tileset|rpg\s*sprites|2d\s*sprites?|2d\s*character\s*pack|"
+    r"crafted\s*(?:art|sprites|enemies)|"
     # PvZ-class signals: tower defense / multiple distinct character types
-    r"植物大战僵尸|pvz|plants?\s*vs\.?\s*zombies?|塔防游戏|tower\s*defense\s*game|"
+    r"植物大战僵尸|pvz|plants?\s*vs\.?\s*zombies?|plants?\s*and\s*zombies?|塔防游戏|塔防|"
+    r"tower\s*defense|td\s*game|wave\s*defense|horde\s*defense|"
     r"不同的怪物.*不同的植物|不同的植物.*不同的怪物|多种怪物.*多种植物|多种植物.*多种怪物|"
-    r"角色和敌人|敌人和角色|植物和僵尸|僵尸和植物)",
+    r"multiple\s*(?:distinct\s*)?(?:enemies|monsters|plants|towers|characters)\s*and\s*(?:enemies|monsters|plants|towers|characters)|"
+    r"varied\s*enemy\s*roster|diverse\s*(?:defenders|attackers|enemies|characters)|"
+    r"角色和敌人|敌人和角色|植物和僵尸|僵尸和植物|characters?\s*and\s*enemies|heroes?\s*and\s*villains?)",
     re.IGNORECASE,
 )
 

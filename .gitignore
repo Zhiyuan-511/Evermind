@@ -21,6 +21,11 @@ env/
 *.swo
 *~
 
+# v7.7 audit: archived dead-code snapshots not part of the runtime build
+archive_v*_deadcode/
+archive_*/
+backup-pre-rebase
+
 # Build & Output
 dist/
 build/

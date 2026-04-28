@@ -29622,7 +29622,12 @@ class Orchestrator:
                     # surface the patch summary in the report. This is the
                     # 95th-percentile correct outcome at 100% reliability.
                     _patcher_soft_pass = bool(patch_outcome.get("soft_pass"))
-                    if False and pending_rv_id and patch_outcome.get("ok") and not _patcher_soft_pass:
+                    # v7.7 audit-fix: was `if False and pending_rv_id ...` — 60+ lines
+                    # of unreachable code shipped as a "future feature". The
+                    # multi-round re-audit returns in v7.8 with a scheduler fix.
+                    # For now, this branch is collapsed to `False`; the elif
+                    # below handles every patcher post-exec.
+                    if False:
                         _reset_ids: List[str] = [pending_rv_id]
                         # Find all downstream nodes that gated on reviewer
                         _downstream_ids = self._collect_transitive_downstream_ids(plan, [pending_rv_id])
