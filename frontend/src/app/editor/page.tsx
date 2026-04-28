@@ -339,8 +339,14 @@ function EditorPageInner() {
             const linked = tasks.find((task) => task.id === activeRun.task_id);
             if (linked) return linked;
         }
-        return preferredTaskForHydration;
-    }, [activeRun, preferredTaskForHydration, tasks]);
+        // v7.7 audit-fix: was falling through to preferredTaskForHydration
+        // (the most-recent task, regardless of selection) even on
+        // ?fresh=1 / explicit deselect. That leaked the prior task's
+        // title into the header strip — user reported "新会话顶部还是
+        // 上一个任务的名字". Now respect the user's explicit selection;
+        // a fresh session with selectedTask=null shows no leaked title.
+        return selectedTask || null;
+    }, [activeRun, selectedTask, tasks]);
     const activeRunNodeExecutions = useMemo(() => {
         if (!activeRun) return [];
         return nodeExecutions.filter((node) => node.run_id === activeRun.id);
@@ -610,11 +616,20 @@ function EditorPageInner() {
         }
     }, [preferredRunForHydration?.id, preferredRunForHydration?.task_id, runtimeConnected, selectRun, selectedRun, selectedRun?.id, selectedRun?.status, selectedRun?.task_id, selectedTask?.id]);
 
-    // Re-pull node executions for the selected run after reconnect so the timeline/canvas catch up immediately.
-    // v7.7: drop WS gate — `selectRun` already auto-fetches on selection
-    // change. This effect catches reconnect/resync. Without the gate it
-    // also covers cold-mount when WS is slow.
+    // Re-pull node executions for the selected run after a true WS reconnect.
+    // v7.7 audit-fix: was firing on every `selectedRun.id` change AND every
+    // `runtimeConnected` flip during the cold mount, which raced with
+    // `selectRun()`'s built-in fetchNodeExecutions over the same nodesAbortRef
+    // — the second call aborted the first, and on done tasks the NE list never
+    // landed in store. Header showed "0/13" instead of "13/13" + canvas blank.
+    // Now: same prevConnectedRef pattern as fetchRuns above — only refetch on
+    // a real false→true reconnect, never on initial mount.
+    const prevRuntimeConnectedNodesRef = useRef<boolean>(false);
     useEffect(() => {
+        const wasConnected = prevRuntimeConnectedNodesRef.current;
+        const isReconnect = !wasConnected && runtimeConnected;
+        prevRuntimeConnectedNodesRef.current = runtimeConnected;
+        if (!isReconnect) return;
         if (!selectedRun?.id) return;
         void fetchNodeExecutions(selectedRun.id);
     }, [fetchNodeExecutions, runtimeConnected, selectedRun?.id]);
@@ -1524,6 +1539,7 @@ function EditorPageInner() {
                                     runningNodes={summaryRunningNodes}
                                     totalNodes={summaryTotalNodes}
                                     startedAt={activeRun?.started_at || activeRun?.created_at || null}
+                                    endedAt={activeRun?.ended_at || null}
                                     onOpenReports={() => setReportsOpen(true)}
                                     onRevealInFinder={handleRevealInFinder}
                                     selectedRuntime={effectiveSelectedRuntime}

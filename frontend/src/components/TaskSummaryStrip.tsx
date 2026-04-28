@@ -16,6 +16,7 @@ interface TaskSummaryStripProps {
     runningNodes?: number;
     totalNodes?: number;
     startedAt?: number | null;
+    endedAt?: number | null;
 }
 
 const STATUS_DOTS: Record<string, { color: string; label_en: string; label_zh: string }> = {
@@ -29,9 +30,15 @@ const STATUS_DOTS: Record<string, { color: string; label_en: string; label_zh: s
     waiting_selfcheck:{ color: '#06b6d4', label_en: 'Awaiting Check', label_zh: '等待自检' },
 };
 
-function formatElapsed(startMs: number): string {
+function formatElapsed(startMs: number, endMs?: number): string {
     if (!startMs) return '';
-    const sec = Math.max(0, Math.floor((Date.now() - startMs) / 1000));
+    // v7.7: when the run has finished (endMs > 0), freeze the elapsed at
+    // (endMs − startMs). Previously we always used Date.now(), so a done
+    // task's timer kept counting forever — user reported "right-corner
+    // timer stopped at 35min then keeps accumulating from 35min". Now done
+    // runs render the actual run duration (e.g. 22m 36s).
+    const referenceMs = endMs && endMs > 0 ? endMs : Date.now();
+    const sec = Math.max(0, Math.floor((referenceMs - startMs) / 1000));
     if (sec < 60) return `${sec}s`;
     const m = Math.floor(sec / 60);
     const s = sec % 60;
@@ -50,6 +57,7 @@ export default function TaskSummaryStrip({
     runningNodes = 0,
     totalNodes = 0,
     startedAt,
+    endedAt,
 }: TaskSummaryStripProps) {
     const tr = (zh: string, en: string) => lang === 'zh' ? zh : en;
 
@@ -75,11 +83,14 @@ export default function TaskSummaryStrip({
     // V4.3 PERF: Reduced from 1s to 5s to cut React re-renders
     const [, setTick] = useState(0);
     const shouldRender = running || !!taskTitle;
+    const isFinished = endedAt && endedAt > 0;
     useEffect(() => {
-        if (!shouldRender) return;
+        // v7.7: stop the 5s tick once the run is finished — the elapsed string
+        // is now derived from (endedAt − startedAt) and never changes again.
+        if (!shouldRender || isFinished) return;
         const timer = setInterval(() => setTick(t => t + 1), 5000);
         return () => clearInterval(timer);
-    }, [shouldRender]);
+    }, [shouldRender, isFinished]);
 
     // Don't render if nothing is running and no task
     if (!shouldRender) return null;
@@ -88,6 +99,8 @@ export default function TaskSummaryStrip({
     const runStatus = STATUS_DOTS[effectiveStatus] || STATUS_DOTS.executing;
     const startTime = startedAt || 0;
     const normalizedStart = startTime < 10_000_000_000 ? startTime * 1000 : startTime;
+    const endTime = endedAt || 0;
+    const normalizedEnd = endTime > 0 ? (endTime < 10_000_000_000 ? endTime * 1000 : endTime) : 0;
     const normalizedRuntimeMode = normalizeRuntimeModeForDisplay(runtimeMode);
     const runtimeLabel = runtimeLabelForDisplay(runtimeMode);
 
@@ -205,7 +218,7 @@ export default function TaskSummaryStrip({
                     })()}
                     {normalizedStart > 0 && (
                         <span style={{ color: 'var(--text3)' }}>
-                            {formatElapsed(normalizedStart)}
+                            {formatElapsed(normalizedStart, normalizedEnd)}
                         </span>
                     )}
                 </span>

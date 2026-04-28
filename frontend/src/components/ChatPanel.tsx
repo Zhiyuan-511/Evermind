@@ -27,6 +27,7 @@ interface ChatPanelProps {
     runningNodes?: number;
     totalNodes?: number;
     startedAt?: number | null;
+    endedAt?: number | null;
     onOpenReports?: () => void;
     onRevealInFinder?: (previewUrl: string) => void;
     selectedRuntime?: 'local' | 'openclaw';
@@ -358,6 +359,7 @@ export default function ChatPanel({
     runningNodes = 0,
     totalNodes = 0,
     startedAt,
+    endedAt,
     onOpenReports,
     onRevealInFinder,
     selectedRuntime = 'local',
@@ -501,6 +503,7 @@ export default function ChatPanel({
                 runningNodes={runningNodes}
                 totalNodes={totalNodes}
                 startedAt={startedAt}
+                endedAt={endedAt}
             />
 
             {/* Layer 2: Execution Feed */}

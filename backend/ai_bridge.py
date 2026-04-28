@@ -5296,13 +5296,21 @@ class AIBridge:
             # can override via EVERMIND_ROUTER_MAX_TOKENS.
             # v6.3.4 (maintainer 2026-04-21): 2048 → 1024. Post-mortem of latest
             # run: router still took 44s producing 8786 chars (finish=length
-            # exactly at 2048 tokens). Since orchestrator's Python-side
-            # _build_pro_template classifier is the actual source of truth
-            # for node layout and the router JSON gets 'reconciled' against
-            # it anyway, there's zero downstream value in letting router
-            # generate more than a short 12-subtask skeleton. 1024 tokens
-            # ≈ 4KB chars ≈ 22s streaming → halves startup time.
-            value = self._read_int_env("EVERMIND_ROUTER_MAX_TOKENS", 1024, 384, 16384)
+            # exactly at 2048 tokens).
+            # v7.7 (2026-04-27): 1024 → 4096. Real-world data on Kimi
+            # k2.6-code-preview shows 1024 hits finish=length on every
+            # 13-node game/asset task (chunks=1025 reproducibly), AND the
+            # router has 2 candidate models so a length truncation triggers
+            # a SECOND full retry (max_retries=2). Observed pattern:
+            #   - attempt 1: 62s, finish=length, content_chars=1746
+            #   - attempt 2: 49s, finish=length, content_chars=4230
+            #   = 110s burned on output that orchestrator discards anyway
+            #     (it falls back to the default plan after parse error).
+            # 4096 tokens ≈ 16KB chars — fits the 13-node skeleton in one
+            # shot, finishes naturally with finish=stop, no retry. Net win:
+            # ~80 seconds shaved off cold startup. Override via env var if
+            # needed.
+            value = self._read_int_env("EVERMIND_ROUTER_MAX_TOKENS", 4096, 384, 16384)
         elif normalized_node_type == "reviewer":
             # v5.8.4: CRITICAL BUG FIX. Reviewer was falling through to the
             # 4096-token default — but the harness requires zone-by-zone prose
@@ -5419,7 +5427,13 @@ class AIBridge:
             # 45s is one second too tight — kimi-k2.6-code-preview streams
             # ~40 tok/s so 2048 tokens needs ~50s. 60s eliminates the retry
             # waste while still being 2× faster than the old 120s wall.
-            value = self._read_int_env("EVERMIND_ROUTER_TIMEOUT_SEC", 60, 20, 480)
+            # v7.7 (maintainer 2026-04-28): 60 → 120. Observed kimi.com peak-hour
+            # latency repeatedly hitting 60s exactly with first-chunk delay
+            # 35-50s + content burst — entire DAG stalled because router
+            # blocked all 13 NEs for 60s × 3 retries = 3min before fallback.
+            # 120s absorbs the latency spike while still hard-bounded; the
+            # stream_stall watchdog (30s) still catches a truly dead relay.
+            value = self._read_int_env("EVERMIND_ROUTER_TIMEOUT_SEC", 120, 20, 480)
         elif normalized_node_type == "reviewer":
             # v5.8.4: Reviewer runs ≤8 tool calls — mostly browser navigation,
             # screenshot, scroll, act — plus a detailed prose report. Previously

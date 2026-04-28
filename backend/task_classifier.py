@@ -1012,7 +1012,12 @@ _PATTERNS: list[tuple[str, re.Pattern]] = [
         r"(工具|tool|计算器|calculator|转换器|converter|编辑器|editor|"
         r"生成器|generator|format|格式化|密码|password|todo|待办|"
         r"记事本|notepad|markdown|json|timer|计时|countdown|倒计时|"
-        r"color picker|取色|unit convert|翻译|translator|encoder|decoder)",
+        r"stopwatch|秒表|圈数|lap\s*time|拼图|puzzle|"
+        r"random\s*pick|随机|抽签|抽奖|"
+        r"color picker|取色|unit convert|翻译|translator|encoder|decoder|"
+        r"clipboard|剪贴板|note\s*taking|笔记|周转|tip\s*calc|"
+        r"BMI|身高体重|temperature\s*conv|温度换算|currency\s*conv|汇率|"
+        r"checklist|清单|memo|备忘|reminder|提醒)",
         re.IGNORECASE,
     )),
     ("presentation", re.compile(

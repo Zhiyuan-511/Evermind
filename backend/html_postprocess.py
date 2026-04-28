@@ -471,6 +471,25 @@ _JS_TYPO_PATTERNS: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\(\s*\)\s*\(\s*\)\s*;"), r"();"),  # ()(); → ();
     # broken arrow body
     (re.compile(r"=>\s*\{\s*\}"), r"=>{}"),  # cosmetic fix
+    # v7.7 (2026-04-28): bracket-mismatch typos kimi emits.
+    # Observed in EN calculator pro run line 218:
+    #   if (calcHistory[idx) { ... }
+    # — should be `if (calcHistory[idx]) {`. The `[` opens an
+    # index-access that needs `]` to close, but kimi typed `)` AND
+    # forgot the closing `)` for `if(`. node --check crashed at
+    # "Unexpected token ')'" → all 29 buttons died on one syntax
+    # error. Fix: when we see `[<expr>) {` (control-flow body open),
+    # rewrite to `[<expr>]) {`. Same for ` ;` (statement end) and
+    # other JS terminal contexts. Conservative regex limits
+    # `<expr>` to identifier/number/operator chars so we don't
+    # touch real `(...)` groups.
+    (re.compile(r"\[(\s*[\w$.+\-*/% ]+?\s*)\)(\s*\{)"), r"[\1])\2"),  # if/while/for body
+    (re.compile(r"\[(\s*[\w$.+\-*/% ]+?\s*)\)(\s*;)"), r"[\1])\2"),  # statement end
+    (re.compile(r"\[(\s*[\w$.+\-*/% ]+?\s*)\)(\s*,)"), r"[\1]),"),    # arg list
+    (re.compile(r"\[(\s*[\w$.+\-*/% ]+?\s*)\)(\s*\?)"), r"[\1])\2"), # ternary
+    (re.compile(r"\[(\s*[\w$.+\-*/% ]+?\s*)\)(\s*[&|=])"), r"[\1])\2"),  # logical / assign
+    # `arr[].push(x)` from broken merges → `arr.push(x)`
+    (re.compile(r"\[\s*\]\."), r"."),
 ]
 
 

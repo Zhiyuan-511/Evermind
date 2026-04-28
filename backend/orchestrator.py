@@ -8459,7 +8459,23 @@ class Orchestrator:
                 if self._builder_is_merger_like_subtask(st):
                     st.max_retries = min(retries, 2)
                 else:
-                    st.max_retries = min(retries, 2)
+                    # v7.7 (2026-04-28): tool tasks (calculator/todo/timer/etc)
+                    # need a bigger retry budget. The builder model
+                    # (kimi-k2.6-code-preview) regularly drifts into
+                    # marketing-page hallucination on the first attempt and
+                    # produces JS-syntax-error variants on the next 1-2 retries
+                    # before converging to a working artifact. Cap=4 lets the
+                    # tool hard gate + structural retry trigger keep nudging
+                    # the model until it ships a functional utility, instead
+                    # of giving up after 2 attempts and shipping garbage.
+                    _is_tool_task = False
+                    try:
+                        _goal = getattr(plan, "goal", "") or ""
+                        if _goal:
+                            _is_tool_task = task_classifier.classify(_goal).task_type == "tool"
+                    except Exception:
+                        _is_tool_task = False
+                    st.max_retries = min(retries, 4 if _is_tool_task else 2)
             else:
                 st.max_retries = retries
         plan.max_total_retries = max(plan.max_total_retries, retries * max(len(plan.subtasks), 1))
@@ -12329,10 +12345,22 @@ class Orchestrator:
 
             if weak_routes:
                 weak_msg = "Deterministic route snapshot still shows thin/underbuilt pages: " + "; ".join(weak_routes[:4])
+                # v7.7 (2026-04-28): for tool tasks (single-page calculator/
+                # todo/timer), the weak-route signal is over-strict: it
+                # measures content density/route diversity, but a calculator
+                # with all-numeric buttons looks "thin" to that heuristic
+                # even when fully functional. The tool_interactive_minimum
+                # gate is our authoritative interactivity signal — once it
+                # passes, weak-route is downgraded from error to warning.
+                # promote_to_error stays the legacy behaviour for non-tool
+                # tasks (websites, dashboards, multi-page apps).
                 promote_to_error = (
-                    any(item.startswith("index.html") for item in weak_routes)
-                    or len(weak_routes) >= 2
-                    or task_classifier.wants_multi_page(goal)
+                    profile.task_type != "tool"
+                    and (
+                        any(item.startswith("index.html") for item in weak_routes)
+                        or len(weak_routes) >= 2
+                        or task_classifier.wants_multi_page(goal)
+                    )
                 )
                 if promote_to_error:
                     add_unique(errors, weak_msg)
@@ -19628,6 +19656,25 @@ class Orchestrator:
             warnings.append("Image tag without alt text detected")
             score -= 6
 
+        # v7.7 (2026-04-27): tool-task hard gate. Catches the
+        # "calculator-but-marketing-page-or-no-JS" failure mode where
+        # builder ships a structurally-valid HTML that has 0 buttons or
+        # 0 inline JS — every existing gate above accepted those because
+        # they only check structure, not whether the artifact actually
+        # delivers the requested utility. This gate is run directly here
+        # so it fires regardless of the file_ops vs markdown extraction
+        # path (the previous acceptance_checks path only fires on
+        # markdown extraction).
+        try:
+            _current_task_type = getattr(self, "_current_task_type", "website")
+        except Exception:
+            _current_task_type = "website"
+        if _current_task_type == "tool":
+            tool_failures = self._tool_task_hard_gate_failures(html)
+            for failure in tool_failures:
+                errors.append(failure)
+                score -= 35
+
         # v3.0.5: Use explicit quality-gate context from caller to avoid
         # cross-task mutable state under parallel builder execution.
         model_name_clean = str(model_name or "").strip()
@@ -19640,7 +19687,18 @@ class Orchestrator:
             else getattr(self, "_quality_gate_default_threshold", 0)
         )
         # V4.6 SPEED: When threshold is 0, always pass — errors are informational only
-        passed = True if pass_threshold <= 0 else (not errors and score >= pass_threshold)
+        # v7.7 (2026-04-27): tool-task hard gate is non-negotiable — even when
+        # threshold is 0 ("permissive mode"), a marketing-page-disguised-as-
+        # calculator or no-JS skeleton must NOT pass. The hard gate prefixes
+        # its message with "Tool task hard gate failed:" so we can detect it.
+        _has_tool_hard_failure = any(
+            isinstance(e, str) and e.startswith("Tool task hard gate failed:")
+            for e in errors
+        )
+        if _has_tool_hard_failure:
+            passed = False
+        else:
+            passed = True if pass_threshold <= 0 else (not errors and score >= pass_threshold)
         return {
             "pass": passed,
             "score": max(score, 0),
@@ -20330,6 +20388,82 @@ class Orchestrator:
         "no_cdn_fonts": "No remote Google Fonts / CDN webfont imports",
     }
 
+    def _tool_task_hard_gate_failures(self, html: str) -> List[str]:
+        """v7.7 (2026-04-27) — non-negotiable check for tool tasks.
+
+        Returns a list of failure messages (empty list = pass). Triggers
+        when the artifact clearly cannot deliver a working tool. Calibrated
+        against real tool surfaces:
+          - calculator: 17-25 buttons + 2K-4K JS
+          - todo: 1 input + 3-6 buttons + 1.5K-3K JS
+          - stopwatch: 3-5 buttons + 1.5K-3K JS
+          - timer: 1-2 inputs + 2-4 buttons + 1K-2K JS
+
+        Triggers on ANY of:
+          A) controls < 3       — even minimal stopwatch needs 3+ buttons
+          B) inline JS < 300    — anything below this is a stub
+          C) controls >= 3 BUT no addEventListener / querySelector / inline
+             handler — controls are decoration only, page is dead
+
+        v7.7 (2026-04-28) update: controls threshold lowered from 6→3 and
+        JS threshold from 120→300 after observing kimi sometimes ships a
+        working 4-button stopwatch. Combined with the wiring check, marketing
+        pages still fail (1-2 nav buttons, no addEventListener) without
+        hitting valid minimal tools.
+        """
+        text = str(html or "")
+        body_match = re.search(r"<body\b[^>]*>(.*?)</body\s*>", text, re.DOTALL | re.I)
+        body = body_match.group(1) if body_match else text
+        buttons = len(re.findall(r"<button\b", body, re.I))
+        inputs = len(re.findall(r'<input\b(?![^>]*type\s*=\s*["\']hidden["\'])', body, re.I))
+        selects = len(re.findall(r"<select\b", body, re.I))
+        textareas = len(re.findall(r"<textarea\b", body, re.I))
+        controls = buttons + inputs + selects + textareas
+        failures: List[str] = []
+        if controls < 3:
+            failures.append(
+                f"Tool task hard gate failed: only {controls} interactive controls in <body> "
+                f"(button={buttons} input={inputs} select={selects} textarea={textareas}); "
+                "tool deliveries (calculator/todo/timer/stopwatch/converter/etc) need ≥3 controls. "
+                "Likely the builder shipped a marketing page or partial skeleton instead "
+                "of the requested utility."
+            )
+        # Inline JS budget check.
+        inline_js_chunks: List[str] = []
+        for m in re.finditer(r"<script\b([^>]*)>(.*?)</script\s*>", text, re.DOTALL | re.I):
+            attrs = m.group(1) or ""
+            if "src=" in attrs.lower():
+                continue
+            inline_js_chunks.append(m.group(2) or "")
+        inline_js = "\n".join(inline_js_chunks)
+        stripped_js = re.sub(r"/\*.*?\*/", "", inline_js, flags=re.DOTALL)
+        stripped_js = re.sub(r"^\s*//[^\n]*$", "", stripped_js, flags=re.M).strip()
+        if len(stripped_js) < 300:
+            failures.append(
+                f"Tool task hard gate failed: inline <script> body has only {len(stripped_js)} chars "
+                "of code (need ≥300 for a working tool). Every click would throw "
+                "ReferenceError. Likely a builder truncation before the JS block was emitted."
+            )
+        # Wiring check — JS exists AND controls exist, but nothing connects them.
+        if not failures:
+            inline_handlers = len(re.findall(
+                r'\bon(?:click|change|input|submit|keydown|keyup|keypress|mousedown|mouseup|focus|blur)\s*=',
+                body, re.I,
+            ))
+            wired = bool(
+                re.search(r"\baddEventListener\b", stripped_js)
+                or re.search(r"\bquerySelector\b", stripped_js)
+                or re.search(r"\bgetElementById\b", stripped_js)
+                or inline_handlers > 0
+            )
+            if not wired:
+                failures.append(
+                    "Tool task hard gate failed: inline <script> exists but no DOM wiring "
+                    "(no addEventListener / querySelector / getElementById / inline on* handler). "
+                    "Controls cannot fire — page is decoration only."
+                )
+        return failures
+
     def _quality_check_registry(self) -> Dict[str, Any]:
         """v6.4.26 — returns {check_id: Callable[(html, ctx), (ok, reason)]}.
         Built on demand (cheap — no LLM), never cached on self to avoid
@@ -20456,6 +20590,80 @@ class Orchestrator:
             bad = re.search(r'https?://fonts\.googleapis\.com|https?://fonts\.gstatic\.com', h, re.I)
             return not bad, "remote CDN fonts should be inlined or dropped"
 
+        def _ck_tool_interactive_minimum(h: str, ctx: Dict[str, Any]) -> tuple[bool, str]:
+            """v7.7 (2026-04-27): tool task acceptance gate.
+
+            Ships only when the artifact actually IS a tool — at least 6
+            interactive controls (button/input/select/[onclick]/[data-action])
+            AND at least one substantive inline <script> block (≥120 chars of
+            JS code, not just whitespace/comments). Catches:
+              • Calculator that became a marketing landing page (≤3 CTAs,
+                no inline script)
+              • Calculator with buttons but no JS (orphan handlers — page
+                renders but every click throws ReferenceError)
+              • Tool stub with placeholder skeleton only.
+            """
+            # Count interactive controls in <body>. Strip <head>/<style> first
+            # so logo/nav-only buttons in marketing chrome don't accidentally
+            # qualify as a "tool".
+            body_match = re.search(r"<body\b[^>]*>(.*?)</body\s*>", h, re.DOTALL | re.I)
+            body = body_match.group(1) if body_match else h
+            buttons = len(re.findall(r"<button\b", body, re.I))
+            inputs = len(re.findall(r'<input\b(?![^>]*type\s*=\s*["\']hidden["\'])', body, re.I))
+            selects = len(re.findall(r"<select\b", body, re.I))
+            textareas = len(re.findall(r"<textarea\b", body, re.I))
+            data_actions = len(re.findall(r'\bdata-(?:action|key|op|value|cmd)\s*=', body, re.I))
+            inline_handlers = len(re.findall(
+                r'\bon(?:click|change|input|submit|keydown|keyup|keypress|mousedown|mouseup|focus|blur)\s*=',
+                body, re.I,
+            ))
+            controls = buttons + inputs + selects + textareas
+            # Either a strict button-heavy surface (calculator/keypad-style)
+            # OR a moderate forms-style surface (inputs + addEventListener).
+            if controls < 6:
+                return False, (
+                    f"tool surface too thin (only {controls} interactive controls "
+                    f"in <body>: button={buttons} input={inputs} select={selects} textarea={textareas}); "
+                    "tool tasks need ≥6 buttons/inputs to deliver a usable utility"
+                )
+            # Substantive inline JS — concat all inline <script> bodies, ignore externals.
+            inline_js_chunks: List[str] = []
+            for m in re.finditer(r"<script\b([^>]*)>(.*?)</script\s*>", h, re.DOTALL | re.I):
+                attrs = m.group(1) or ""
+                if "src=" in attrs.lower():
+                    continue
+                inline_js_chunks.append(m.group(2) or "")
+            inline_js = "\n".join(inline_js_chunks)
+            # Strip /* comments */ and // line comments before measuring.
+            stripped_js = re.sub(r"/\*.*?\*/", "", inline_js, flags=re.DOTALL)
+            stripped_js = re.sub(r"^\s*//[^\n]*$", "", stripped_js, flags=re.M)
+            stripped_js = stripped_js.strip()
+            if len(stripped_js) < 120:
+                return False, (
+                    f"inline <script> body has only {len(stripped_js)} chars of code "
+                    f"(need ≥120 for a working tool); tool surface is dead — every click "
+                    "throws ReferenceError. Likely builder truncated before emitting JS, "
+                    "or wrote a marketing page instead of the requested tool."
+                )
+            # Sanity: page should reference at least one of the controls from JS,
+            # otherwise the controls are decoration only. Look for either
+            # addEventListener / querySelector / getElementById / a function name
+            # used in an inline handler.
+            wires_anything = bool(
+                re.search(r"\baddEventListener\b", stripped_js)
+                or re.search(r"\bquerySelector\b", stripped_js)
+                or re.search(r"\bgetElementById\b", stripped_js)
+                or (inline_handlers > 0 and re.search(r"\bfunction\s+\w+|\bconst\s+\w+\s*=|\blet\s+\w+\s*=|\bvar\s+\w+\s*=", stripped_js))
+                or (data_actions > 0 and re.search(r"data-(?:action|key|op|value|cmd)", stripped_js))
+            )
+            if not wires_anything:
+                return False, (
+                    "inline <script> has code but never wires any DOM control "
+                    "(no addEventListener/querySelector/getElementById/handler reference); "
+                    "controls cannot fire — tool is non-functional"
+                )
+            return True, ""
+
         return {
             "has_doctype": _ck_has_doctype,
             "has_viewport_meta": _ck_has_viewport,
@@ -20479,6 +20687,7 @@ class Orchestrator:
             "all_routes_exist": _ck_all_routes,
             "no_emoji_icons": _ck_no_emoji,
             "no_cdn_fonts": _ck_no_cdn_fonts,
+            "tool_interactive_minimum": _ck_tool_interactive_minimum,
         }
 
     def _default_acceptance_checks(
@@ -20534,6 +20743,17 @@ class Orchestrator:
             ]
             if multi_page:
                 base.extend(["has_shared_nav", "all_routes_exist"])
+            # v7.7 (2026-04-27): tool tasks (calculator/todo/timer/converter/etc)
+            # MUST ship a working interactive surface. Without this gate, kimi
+            # k2.6-code-preview occasionally hallucinates a marketing landing
+            # page (Hero + Features + Pricing) when asked for "做一个计算器",
+            # which passes every structural check above but is completely
+            # off-topic. tool_interactive_minimum requires ≥6 buttons/inputs
+            # in <body> AND a substantive inline <script> that actually wires
+            # them. Goes alongside no_truncation_markers so a truncated tool
+            # also fails this gate (no JS = no wiring).
+            if task_type == "tool":
+                base.append("tool_interactive_minimum")
             return base
         if agent == "merger":
             return [
@@ -29469,6 +29689,32 @@ class Orchestrator:
                             _sp_text = _root_idx_sp.read_text(encoding="utf-8", errors="replace")
                             if "<!doctype" in _sp_text[:300].lower() and "</html>" in _sp_text[-500:].lower():
                                 _root_ok_for_softpass = True
+                                # v7.7 (2026-04-28): tool tasks must NOT
+                                # SOFT-PASS on a broken artifact. The 10KB +
+                                # </html> check is structural — a marketing
+                                # page passes it trivially. For tool tasks
+                                # (calculator/todo/timer/stopwatch), require
+                                # the same hard-gate the tester runs:
+                                # ≥3 controls + ≥300 JS + wired. If broken,
+                                # let patcher fail so reviewer keeps rejecting
+                                # → builder regenerates. Without this guard,
+                                # observed in pro EN calc round 2: marketing
+                                # landing page shipped under "Patcher SOFT-PASS"
+                                # despite reviewer rejection.
+                                try:
+                                    _current_tt = getattr(self, "_current_task_type", "website")
+                                except Exception:
+                                    _current_tt = "website"
+                                if _current_tt == "tool":
+                                    _tool_failures = self._tool_task_hard_gate_failures(_sp_text)
+                                    if _tool_failures:
+                                        _root_ok_for_softpass = False
+                                        logger.warning(
+                                            "[v7.7] Patcher SOFT-PASS BLOCKED for tool task: "
+                                            "root artifact still fails hard gate (%s). Patcher "
+                                            "will be marked failed so reviewer can keep rejecting.",
+                                            "; ".join(_tool_failures)[:200],
+                                        )
                     except Exception:
                         _root_ok_for_softpass = False
                     if _root_ok_for_softpass:
@@ -30842,7 +31088,27 @@ class Orchestrator:
                 # → eventually `_execute_openai_compatible`). Reviewer + deployer are
                 # the authoritative quality + reachability gates.
                 _gate_softpass = False
-                if not gate_ok:
+                # v7.7 (2026-04-28): tool task hard gate is non-negotiable.
+                # SOFT-PASS was designed for flaky visual-diff rejections on
+                # reviewer-shipped artifacts; it must NOT cover "page has 1
+                # button + 0 JS" or other concrete tool-functionality
+                # failures. Without this guard, a marketing page (1 nav
+                # button) shipped as "calculator" because reviewer's reject
+                # budget exhausted (often via patcher finish=length 0-files
+                # path) — total quality regression. Detect tool hard gate
+                # in gate_errors and DISABLE softpass for that case.
+                _has_tool_hard_failure = any(
+                    "tool task hard gate failed" in str(e).lower()
+                    for e in (gate_errors or [])
+                )
+                if not gate_ok and _has_tool_hard_failure:
+                    logger.warning(
+                        "[v7.7] Visual gate FAIL pinned (no SOFT-PASS): tool task "
+                        "hard gate failed — reviewer/deployer status irrelevant; "
+                        "errors=%s",
+                        str(gate_errors[:2])[:200],
+                    )
+                if not gate_ok and not _has_tool_hard_failure:
                     # Three signals that reviewer has shipped without further requeue:
                     #   (a) requeue counter at/above budget (patcher-driven path)
                     #   (b) _reviewer_shipped_as_is sentinel (set by all 3 ship-as-is
@@ -31339,7 +31605,21 @@ class Orchestrator:
                 failures = self._run_acceptance_checks(html, acceptance_checks)
                 if not failures:
                     return ""
-                # Only 1 failure = soft warn, allow through. Lets reviewer
+                # v7.7 (2026-04-27): some checks are non-negotiable — failing
+                # them alone is enough to discard the artifact. Specifically
+                # tool_interactive_minimum: a marketing page or button-less
+                # skeleton that "passes everything else" still cannot deliver
+                # the requested utility. Allowing it through with the legacy
+                # "1 failure = soft warn" rule ships a non-functional product.
+                _hard_check_ids = {
+                    "tool_interactive_minimum",
+                    "no_truncation_markers",
+                }
+                hard_failures = [(cid, msg) for cid, msg in failures if cid in _hard_check_ids]
+                if hard_failures:
+                    summary = "; ".join(f"[{cid}] {msg}" for cid, msg in hard_failures[:4])
+                    return f"Hard acceptance check failed: {summary}"
+                # Only 1 (soft) failure = soft warn, allow through. Lets reviewer
                 # catch it downstream rather than discarding a large
                 # near-valid draft.
                 if len(failures) == 1:
@@ -34125,14 +34405,58 @@ class Orchestrator:
             # asyncio deadlocks (server CPU=0%, no kimi TCP, /api/health timeout). The
             # reviewer is the authoritative quality gate — the deterministic gate becomes
             # advisory once reviewer has shipped. User can iterate manually on gate notes.
-            # How to apply: only this branch — JSON path, infra markers, and fail-marker
-            # heuristics keep their existing retry semantics.
+            # v7.7 (2026-04-27): tool-task hard-gate failures are an EXCEPTION —
+            # they fire on "<6 buttons" or "<120 chars JS", which are unambiguous
+            # "page is non-functional" signals where builder regeneration is the
+            # correct response. Unlike visual-diff flakiness (the v7.1j deadlock
+            # case), the builder has concrete, actionable feedback. Mark these
+            # retryable so simple-template runs (no reviewer) don't permanently
+            # fail on a fixable broken artifact.
+            # v7.7 (2026-04-27): broaden retryable triggers beyond just the
+            # tool hard gate. Concrete structural failures the builder can
+            # actually fix on a retry — including JS syntax errors, truncated
+            # markup, unbalanced tags, missing inline script, repetitive
+            # garbage content — all benefit from a regen attempt. The v7.1j
+            # deadlock concern was specifically about flaky visual-diff
+            # rejections with reviewer-shipped artifacts; structural failures
+            # are deterministic and the builder gets concrete feedback.
+            _structural_retry_markers = (
+                "tool task hard gate failed",
+                "inline script #",                 # JS syntax error
+                "invalid syntax",
+                "unbalanced",
+                "html appears truncated",
+                "missing </script>",
+                "page is non-functional",
+                "html structure is incomplete",
+                "incomplete html",
+                "repetitive garbage",
+                "missing <script",
+                "no inline <script>",
+                "html output too small",
+                "missing inline <style>",
+                "content completeness failure",
+            )
+            is_structural_retry = any(marker in lower for marker in _structural_retry_markers)
+            is_tool_hard_failure = "tool task hard gate failed" in lower
             return {
                 "status": "fail",
                 "errors": [output[:500]],
-                "suggestion": "Review tester visual gate findings; reviewer-approved artifact preserved",
-                "retryable": False,
-                "non_retryable_reason": "deterministic_gate_only",
+                "suggestion": (
+                    "Tool task hard gate triggered — regenerate the page with a "
+                    "complete interactive surface (≥6 buttons/inputs) AND a "
+                    "substantive inline <script> block that wires every control."
+                    if is_tool_hard_failure
+                    else (
+                        "Builder produced a structurally broken artifact — regenerate "
+                        "with full closing tags, valid JS syntax, and the inline <script> "
+                        "block intact."
+                        if is_structural_retry
+                        else "Review tester visual gate findings; reviewer-approved artifact preserved"
+                    )
+                ),
+                "retryable": is_structural_retry,
+                "non_retryable_reason": "" if is_structural_retry else "deterministic_gate_only",
             }
         if "__evermind_tester_gate__=pass" in lower or "deterministic visual gate passed" in lower:
             if "quality gate failed" not in lower:

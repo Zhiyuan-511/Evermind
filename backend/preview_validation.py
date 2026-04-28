@@ -154,7 +154,206 @@ def inspect_html_integrity(html: str) -> Dict[str, Any]:
             errors.append(message)
     script_integrity = inspect_script_tag_integrity(html)
     errors.extend(script_integrity.get("errors", []))
+    handler_errors = _inspect_orphan_inline_handlers(html)
+    errors.extend(handler_errors)
+    truncation_errors = _inspect_trailing_truncation(html)
+    errors.extend(truncation_errors)
+    interactive_errors = _inspect_interactive_without_script(html)
+    errors.extend(interactive_errors)
     return {"ok": not errors, "errors": errors}
+
+
+# v7.7 (2026-04-27): catch builder finish=stop truncation that leaves the
+# DOM with an unclosed tag right before </body>. Postprocess auto-appends
+# </body></html> to "fix" markup, masking the actual truncation point —
+# so by the time we see the artifact, the page looks well-formed but
+# everything after the cut is missing (entire <script> block, etc).
+# Pattern observed in real runs:
+#   <span class\n</body>          (incomplete attribute on open tag)
+#   <kbd>.</\n</body>             (incomplete closing tag)
+# Both leave a dangling `<` in the last ~120 chars before `</body>`.
+_TRAILING_OPEN_TAG_RE = re.compile(
+    r"<\s*[a-zA-Z][a-zA-Z0-9-]*(?:\s+[a-zA-Z-]+(?:\s*=\s*(?:\"[^\"]*\"?|'[^']*'?|[^\s>]*))?)*\s*$"
+)
+_TRAILING_PARTIAL_CLOSE_RE = re.compile(r"<\s*/\s*[a-zA-Z]*\s*$")
+
+
+def _inspect_trailing_truncation(html: str) -> List[str]:
+    text = str(html or "")
+    if not text:
+        return []
+    # Find the last </body> position. Postprocess auto-appends one even on
+    # truncated streams, so we slice the content BEFORE it.
+    body_close_match = re.search(r"</body\s*>", text, re.IGNORECASE)
+    candidate = text[:body_close_match.start()] if body_close_match else text
+    # Strip trailing whitespace, look at the final non-whitespace segment.
+    tail = candidate.rstrip()
+    if not tail:
+        return []
+    last_chunk = tail[-200:]
+    # If the last chunk ends with an unclosed `<...` open tag → truncation.
+    if _TRAILING_OPEN_TAG_RE.search(last_chunk):
+        return [
+            "HTML appears truncated mid-tag near </body> "
+            "(unclosed opening tag in trailing content). "
+            "Likely a builder finish=stop before completing the page; "
+            "postprocess auto-appended </body></html> but content after "
+            "the cut (often the entire <script> block) is missing."
+        ]
+    if _TRAILING_PARTIAL_CLOSE_RE.search(last_chunk):
+        return [
+            "HTML appears truncated mid-closing-tag near </body> "
+            "(incomplete `</tag` pattern). "
+            "Likely a builder finish=stop before completing the page."
+        ]
+    return []
+
+
+# v7.7 (2026-04-27): if the page has interactive surface (data-action
+# buttons, form inputs with IDs that imply JS wiring, etc.) but NO inline
+# <script> at all, it's a non-functional skeleton. Calculator/todo/timer
+# style utilities all rely on inline JS — without it every click is dead.
+# This covers the case where builder finish=stop happened BEFORE the
+# <script> opening tag was even written, so orphan-handler detection
+# (which needs `onclick=` references) doesn't fire.
+_INTERACTIVE_DATA_HOOK_RE = re.compile(
+    r'\bdata-(?:action|key|op|value)\s*=\s*["\'][^"\']+["\']',
+    re.IGNORECASE,
+)
+
+
+def _inspect_interactive_without_script(html: str) -> List[str]:
+    text = str(html or "")
+    lower = text.lower()
+    # A page with <button> AND data-action/key/op hooks declares an
+    # interactive contract — every click must fire JS. Bare static pages
+    # (article/landing/marketing) rarely use data-action.
+    if not _INTERACTIVE_DATA_HOOK_RE.search(text):
+        return []
+    if "<button" not in lower:
+        return []
+    # Concatenate inline-script bodies; ignore externals.
+    inline_js_parts: List[str] = []
+    for match in _INLINE_SCRIPT_BODY_RE.finditer(text):
+        attrs = str(match.group("attrs") or "")
+        if "src=" in attrs.lower():
+            continue
+        inline_js_parts.append(str(match.group("body") or ""))
+    inline_js = "\n".join(inline_js_parts).strip()
+    # Treat <50 chars of JS as effectively empty — typical truncation
+    # leaves either zero bytes or a stub like `"use strict";` only.
+    if len(inline_js) < 50:
+        return [
+            "Page declares interactive controls (data-action buttons) but no "
+            "substantive inline <script> defines the handlers — clicks are "
+            "dead. Likely a builder truncation before the JS block."
+        ]
+    return []
+
+
+# v7.7 (2026-04-27): orphan inline-handler detector. Catches the
+# "builder finish=stop mid-content" failure mode where the model emits
+# `<button onclick="calc.appendNum('7')">` but never streams the
+# `<script>const calc = {...}</script>` block. Postprocess auto-closes
+# `</body></html>` so basic tag checks pass — but every button is dead
+# because the namespace `calc` is undefined. inspect_html_integrity
+# now flags this as a hard failure so the builder retry path kicks in
+# instead of saving a non-functional artifact.
+_INLINE_HANDLER_RE = re.compile(
+    r'\bon(?:click|change|input|submit|keydown|keyup|keypress|mousedown|mouseup|mouseover|mouseout|mousemove|focus|blur|load|unload|dblclick|touchstart|touchend|touchmove)\s*=\s*["\']([^"\']+)["\']',
+    re.IGNORECASE,
+)
+_HANDLER_ROOT_IDENT_RE = re.compile(r"^\s*(?:return\s+|new\s+|await\s+|!\s*)?([A-Za-z_$][A-Za-z0-9_$]*)")
+_INLINE_SCRIPT_BODY_RE = re.compile(
+    r"<script\b(?P<attrs>[^>]*)>(?P<body>.*?)</script\s*>", re.DOTALL | re.IGNORECASE,
+)
+# JS keywords that look like identifiers but aren't user-defined namespaces.
+_JS_KEYWORD_ROOTS = {
+    "this", "window", "document", "self", "globalThis", "navigator", "location",
+    "console", "alert", "confirm", "prompt", "void", "typeof", "instanceof",
+    "true", "false", "null", "undefined", "NaN", "Infinity",
+    "Math", "Date", "Object", "Array", "String", "Number", "Boolean", "Symbol",
+    "JSON", "RegExp", "Error", "Promise", "Map", "Set", "WeakMap", "WeakSet",
+    "Function", "Reflect", "Proxy", "ArrayBuffer", "DataView",
+    "setTimeout", "setInterval", "clearTimeout", "clearInterval",
+    "requestAnimationFrame", "cancelAnimationFrame",
+    "fetch", "encodeURIComponent", "decodeURIComponent", "encodeURI", "decodeURI",
+    "parseInt", "parseFloat", "isNaN", "isFinite",
+    "if", "else", "for", "while", "do", "switch", "case", "default",
+    "break", "continue", "return", "throw", "try", "catch", "finally",
+    "var", "let", "const", "function", "class", "import", "export",
+    "event", "e", "ev",
+}
+
+
+def _inspect_orphan_inline_handlers(html: str) -> List[str]:
+    text = str(html or "")
+    handlers = list(_INLINE_HANDLER_RE.finditer(text))
+    if not handlers:
+        return []
+
+    # Collect the union of identifier roots referenced from inline handlers.
+    referenced_roots: Dict[str, int] = {}
+    for match in handlers:
+        expr = str(match.group(1) or "").strip()
+        if not expr:
+            continue
+        # Split on `;` so multi-statement handlers contribute every root.
+        for stmt in expr.split(";"):
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            ident_match = _HANDLER_ROOT_IDENT_RE.match(stmt)
+            if not ident_match:
+                continue
+            root = str(ident_match.group(1) or "").strip()
+            if not root or root in _JS_KEYWORD_ROOTS:
+                continue
+            referenced_roots[root] = referenced_roots.get(root, 0) + 1
+
+    if not referenced_roots:
+        return []
+
+    # Concatenate all inline <script> bodies (skip src= externals — we can't
+    # resolve those statically, give them benefit of doubt).
+    inline_js_parts: List[str] = []
+    for match in _INLINE_SCRIPT_BODY_RE.finditer(text):
+        attrs = str(match.group("attrs") or "")
+        if "src=" in attrs.lower():
+            continue
+        inline_js_parts.append(str(match.group("body") or ""))
+    inline_js = "\n".join(inline_js_parts)
+
+    if not inline_js.strip() and referenced_roots:
+        return [
+            "Inline handlers reference identifiers ({roots}) but no inline <script> defines them — "
+            "page is non-functional (clicks will throw 'X is not defined').".format(
+                roots=", ".join(sorted(referenced_roots)[:5]),
+            )
+        ]
+
+    missing: List[str] = []
+    for root in sorted(referenced_roots):
+        # Look for a definition: const|let|var|function|class root = ... OR
+        # `root =` at line start OR `window.root =`. We accept any of those.
+        patterns = [
+            rf"\b(?:const|let|var)\s+{re.escape(root)}\b",
+            rf"\bfunction\s+{re.escape(root)}\b",
+            rf"\bclass\s+{re.escape(root)}\b",
+            rf"\bwindow\.{re.escape(root)}\s*=",
+            rf"^\s*{re.escape(root)}\s*=",  # bare assignment at line start
+        ]
+        if any(re.search(p, inline_js, re.MULTILINE) for p in patterns):
+            continue
+        missing.append(root)
+
+    if missing:
+        return [
+            "Inline handlers reference undefined identifiers ({names}) — "
+            "page will throw 'X is not defined' on user interaction. "
+            "Likely a builder truncation mid-stream.".format(names=", ".join(missing[:5]))
+        ]
+    return []
 
 
 def inspect_script_tag_integrity(html: str) -> Dict[str, Any]:

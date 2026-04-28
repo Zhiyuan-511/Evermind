@@ -560,12 +560,29 @@ export function useRunManager({
     // never cleaned them, so cross-task NE updates leaked into the active
     // pipeline panel. The current `runs` array IS task-scoped (cleared on
     // task switch in the effect at line ~298), so use it as the truth source.
+    //
+    // v7.7 audit-fix #2 (2026-04-27): added `bootstrapping` exception. After
+    // a task switch, useRunManager clears `runs` and starts fetchRuns(B);
+    // during the GAP (≈100-500ms), backend WS already starts emitting
+    // openclaw_node_update for the new run. With the strict gate above, all
+    // those early NE events were silently dropped — canvas would show
+    // nodes via setNodes (separate code path) but the header counter
+    // (computed from nodeExecutions store) stayed at 0/N until something
+    // else triggered a refetch. User reported "前端 UI 不同步：节点已经在
+    // 跑但顶部计数器没动". Bootstrap-accept lets the first wave through;
+    // fetchRuns will then catch up with the run record. If the run turns
+    // out to be cross-task (foreign run_id), the next fetchRuns won't
+    // contain it and subsequent NE updates will be rejected naturally —
+    // the brief window is harmless.
     const mergeNodeExecution = useCallback((ne: NodeExecutionMergePatch) => {
         const matchesSelected = selectedRunId && ne.run_id === selectedRunId;
         // When no run is selected yet, accept NEs only from runs that are
         // part of the current task's `runs` list (task-scoped).
         const knownInScope = !selectedRunId && runs.some((r) => r.id === ne.run_id);
-        if (!matchesSelected && !knownInScope) return;
+        // Bootstrap exception: runs[] is empty (task just switched or cold
+        // mount), accept the NE so the header doesn't lag behind canvas.
+        const bootstrapping = runs.length === 0;
+        if (!matchesSelected && !knownInScope && !bootstrapping) return;
         setNodeExecutions((prev) => {
             const idx = prev.findIndex((n) => n.id === ne.id);
             if (idx >= 0) {
