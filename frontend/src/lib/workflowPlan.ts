@@ -10,7 +10,6 @@ const SUPPORTED_RUN_GOAL_NODE_TYPES = new Set([
     'patcher',
     'reviewer',
     'deployer',
-    'tester',
     'debugger',
     'imagegen',
     'spritesheet',

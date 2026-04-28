@@ -20,7 +20,7 @@ interface SidebarProps {
 
 // v5.8.6: added router (entry) + merger (required for multi-builder DAGs).
 const CATEGORIES = [
-    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['router', 'planner', 'analyst', 'uidesign', 'builder', 'merger', 'polisher', 'patcher', 'reviewer', 'tester', 'debugger', 'deployer', 'scribe'] },
+    { key: 'core', label_en: 'AI Agents', label_zh: 'AI 智能体', types: ['router', 'planner', 'analyst', 'uidesign', 'builder', 'merger', 'polisher', 'patcher', 'reviewer', 'debugger', 'deployer', 'scribe'] },
     { key: 'media', label_en: 'Art & Media', label_zh: '美术 & 媒体', types: ['imagegen', 'spritesheet', 'assetimport'] },
 ];
 

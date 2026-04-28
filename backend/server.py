@@ -11115,7 +11115,25 @@ async def websocket_endpoint(ws: WebSocket):
                                 "请在左上角切换到 kimi-k2.6-code-preview，或在设置里更换 API key/base_url。"
                             )
                         elif _status_hint == 401:
-                            _user_err = f"模型 {chat_model} 鉴权失败（401）：API key 无效或已过期，请到设置里更新。"
+                            # v7.8c (maintainer 2026-04-28): long chat sessions occasionally hit
+                            # 401 even when the key is valid — relay session timeout / cached
+                            # auth in the httpx client. Close the cached client + clear the
+                            # OpenAI client cache so the NEXT user turn rebuilds with a fresh
+                            # connection and re-reads the current key from settings.
+                            try:
+                                _chat_http_client.close()
+                            except Exception:
+                                pass
+                            try:
+                                # Clear AIBridge's openai_compat client cache; rebuilds on next call.
+                                if ai_bridge_instance is not None and hasattr(ai_bridge_instance, "_openai_clients"):
+                                    ai_bridge_instance._openai_clients.clear()
+                            except Exception:
+                                pass
+                            _user_err = (
+                                f"模型 {chat_model} 鉴权失败（401）。已自动清空连接缓存——下次发送消息时会用新连接重试。"
+                                "如果仍然 401，请到设置里检查/更新 API key。"
+                            )
                         elif _status_hint in (404, 400) and ("model" in _low or "not found" in _low):
                             _user_err = f"模型 {chat_model} 在当前中转不存在（{_status_hint}）：请切换其他模型。"
                         elif ("timeout" in _low or "timed out" in _low

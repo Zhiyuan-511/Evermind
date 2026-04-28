@@ -146,7 +146,6 @@ const NODE_MODEL_CONFIG_ROLES = [
     'polisher',
     'patcher',
     'reviewer',
-    'tester',
     'debugger',
     'deployer',
     'imagegen',

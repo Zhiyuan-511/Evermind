@@ -117,7 +117,7 @@ export const TEMPLATES: TemplateDef[] = [
         nodes: [
             { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
             { type: 'reviewer', x: 510, y: 200 }, { type: 'builder', x: 740, y: 120 },
-            { type: 'builder', x: 740, y: 300 }, { type: 'tester', x: 970, y: 200 },
+            { type: 'builder', x: 740, y: 300 }, { type: 'debugger', x: 970, y: 200 },
             { type: 'deployer', x: 1200, y: 200 },
         ],
         edges: [[0, 1], [1, 2], [2, 3], [2, 4], [3, 5], [4, 5], [5, 6]],
@@ -172,7 +172,7 @@ export const TEMPLATES: TemplateDef[] = [
         nodes: [
             { type: 'router', x: 50, y: 250 }, { type: 'planner', x: 240, y: 250 },
             { type: 'reviewer', x: 430, y: 250 }, { type: 'builder', x: 620, y: 80 },
-            { type: 'builder', x: 620, y: 250 }, { type: 'tester', x: 620, y: 420 },
+            { type: 'builder', x: 620, y: 250 }, { type: 'debugger', x: 620, y: 420 },
             { type: 'analyst', x: 810, y: 80 }, { type: 'scribe', x: 810, y: 420 },
             { type: 'reviewer', x: 1000, y: 250 }, { type: 'deployer', x: 1190, y: 250 },
         ],
@@ -205,7 +205,7 @@ export const TEMPLATES: TemplateDef[] = [
             { type: 'spritesheet', x: 410, y: 340 }, { type: 'assetimport', x: 600, y: 340 },
             { type: 'builder', x: 790, y: 100 }, { type: 'builder', x: 790, y: 300 },
             { type: 'merger', x: 980, y: 200 }, { type: 'reviewer', x: 1170, y: 200 },
-            { type: 'tester', x: 1360, y: 120 }, { type: 'debugger', x: 1360, y: 280 },
+            { type: 'debugger', x: 1360, y: 120 }, { type: 'debugger', x: 1360, y: 280 },
             { type: 'deployer', x: 1550, y: 200 },
         ],
         edges: [

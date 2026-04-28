@@ -29968,12 +29968,17 @@ class Orchestrator:
                     # surface the patch summary in the report. This is the
                     # 95th-percentile correct outcome at 100% reliability.
                     _patcher_soft_pass = bool(patch_outcome.get("soft_pass"))
-                    # v7.7 audit-fix: was `if False and pending_rv_id ...` — 60+ lines
-                    # of unreachable code shipped as a "future feature". The
-                    # multi-round re-audit returns in v7.8 with a scheduler fix.
-                    # For now, this branch is collapsed to `False`; the elif
-                    # below handles every patcher post-exec.
-                    if False:
+                    # v7.8c (maintainer 2026-04-28): re-enable multi-round re-audit
+                    # when (a) patcher actually produced edits (not soft-pass)
+                    # AND (b) reviewer rejection budget remaining. Per maintainer's
+                    # directive: "用户设置最多打回几次就要打回几次，而且审查员要真的能
+                    # 打回到补丁师，补丁师然后再去修复，然后再返回给审查员，然后再审查".
+                    # Guard against scheduler deadlock by only running this
+                    # path when budget remains; soft-pass + budget-exhausted
+                    # cases still ship via the elif below.
+                    _max_rej_for_loop = self._configured_max_reviewer_rejections()
+                    _budget_remaining = int(getattr(self, "_reviewer_requeues", 0) or 0) < _max_rej_for_loop
+                    if pending_rv_id and not _patcher_soft_pass and _budget_remaining:
                         _reset_ids: List[str] = [pending_rv_id]
                         # Find all downstream nodes that gated on reviewer
                         _downstream_ids = self._collect_transitive_downstream_ids(plan, [pending_rv_id])
@@ -34536,6 +34541,8 @@ class Orchestrator:
                 "html output too small",
                 "missing inline <style>",
                 "content completeness failure",
+                "duplicate top-level js declarations",  # v7.7 multi-builder merge bug
+                "has already been declared",            # browser-side variant
             )
             is_structural_retry = any(marker in lower for marker in _structural_retry_markers)
             is_tool_hard_failure = "tool task hard gate failed" in lower
