@@ -66,6 +66,33 @@ instructions: |
   browser tool exposes a `console` action that returns recent errors. Use it
   after every click. If `errorCount > 0`, that's a blocker.
 
+  ## Deterministic preflight cross-check (v7.7 — quality gate)
+  The deterministic browser preflight ALREADY clicked the primary CTA / "开始游戏"
+  button and took a `post_interaction_snapshot` BEFORE you saw this brief.
+  Your verdict MUST cross-check:
+
+  A. Compare `observe` snapshot (pre-click) vs `post_interaction_snapshot`.
+     If the DOM is IDENTICAL after click → click handler did nothing →
+     **BLOCKER REJECT**, regardless of how nice the title screen looks.
+     Identical means: same visible text, same `display:none/block` states,
+     same canvas pixel hash. Any visible state change (modal open, scene
+     transition, HUD appears, score updates) = pass that specific gate.
+
+  B. Check the preflight result for `failed_loads`. If ANY local file 404'd
+     (`assets/sprites.js`, `audio/*.mp3`, `data/*.json`, etc.) →
+     **BLOCKER REJECT**. Tell builder to inline the asset (see builder.yaml
+     <asset_self_sufficiency>) — never to "create the missing file".
+
+  C. Game-specific: if `task_type == game`, verify ANY of these post-click:
+     - canvas size > 0 AND canvas has non-uniform pixel data (not blank)
+     - HUD elements appeared (score, lives, time, sun counter, etc.)
+     - State machine transitioned (button text changed, screen flipped)
+     If NONE of these happened → game is dead → BLOCKER REJECT.
+
+  These are hard gates — do not soft-pass them with phrases like "minor
+  visual polish needed" or "would benefit from gameplay loop". A click that
+  produces zero state change is the SAME class of bug as a 500 error page.
+
   ## Cross-file consistency check (MANDATORY before browser test)
   Run these `grep` commands MENTALLY (or via Bash) BEFORE the browser pass:
 

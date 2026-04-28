@@ -11186,6 +11186,43 @@ class AIBridge:
                 },
             ),
         ]
+        # v7.7 quality-fix: actively click the primary CTA / 开始游戏 button
+        # so reviewer can detect "click does nothing" failures (broken event
+        # listeners, 404 sprites blocking init, missing handler bindings).
+        # Static observe+snapshot only validates the title screen renders;
+        # most user-facing breakage hides behind the first interaction.
+        if task_type == "game":
+            preflight_steps.append((
+                "click_start",
+                {
+                    "action": "click",
+                    "text": "开始游戏",
+                    "fallback_texts": ["开始", "START", "Start", "Play", "Begin", "进入"],
+                    "wait_after_ms": 1500,
+                    "screenshot": True,
+                    "tolerate_failure": True,
+                },
+            ))
+            preflight_steps.append((
+                "post_interaction_snapshot",
+                {
+                    "action": "snapshot",
+                    "screenshot": True,
+                    "limit": 36,
+                    "include_console": True,
+                },
+            ))
+        else:
+            preflight_steps.append((
+                "click_cta",
+                {
+                    "action": "click",
+                    "fallback_texts": ["了解更多", "Learn More", "Get Started", "Start", "登录", "Sign In", "立即体验"],
+                    "wait_after_ms": 1200,
+                    "screenshot": True,
+                    "tolerate_failure": True,
+                },
+            ))
         if on_progress:
             await self._emit_noncritical_progress(on_progress, {
                 "stage": "qa_browser_prefetch",
