@@ -303,6 +303,95 @@ instructions: |
   Non-game artifacts (websites, dashboards, tools): ignore this contract.
   </test_hooks_contract>
 
+  <game_controls_charter>
+  v7.12 (maintainer 2026-04-28) — REQUIRED for ANY game task. User reported a
+  3D TPS run that shipped without working WASD/mouselook — player loaded
+  but couldn't move or aim. Root cause: builder treated control bindings
+  as optional. They are NOT.
+
+  ## Pre-write reasoning step (MANDATORY)
+  BEFORE your first file_ops write, look at the analyst brief and
+  classify the input scheme this game needs. Pick ONE or MORE:
+    - keyboard_locomotion (WASD or arrow keys for movement)
+    - mouselook (mouse-X/Y rotates camera, often + Pointer Lock)
+    - mouse_aim (mouse position aims weapon, no lock)
+    - drag_drop (mousedown→move→up to place units, e.g. PvZ tower defense)
+    - keyboard_action (space=jump/fire, shift=sprint, R=reload, etc.)
+    - touch_swipe (mobile-style touch + drag)
+  This decision is not optional — write your classification in the
+  `<thinking>` block (under 150 words) before the first tool_call.
+
+  ## Required implementations per scheme
+  Each scheme has MANDATORY listeners. Missing ANY of these = automatic
+  reviewer reject + retry burn:
+
+  **keyboard_locomotion** (game has WASD/arrow movement):
+  ```js
+  const keys = Object.create(null);
+  document.addEventListener('keydown', e => { keys[e.code] = true; });
+  document.addEventListener('keyup',   e => { keys[e.code] = false; });
+  // In game loop:
+  if (keys.KeyW || keys.ArrowUp)    player.position.z -= speed * dt;
+  if (keys.KeyS || keys.ArrowDown)  player.position.z += speed * dt;
+  if (keys.KeyA || keys.ArrowLeft)  player.position.x -= speed * dt;
+  if (keys.KeyD || keys.ArrowRight) player.position.x += speed * dt;
+  ```
+
+  **mouselook** (3rd-person camera rotates with mouse):
+  ```js
+  let yaw = 0, pitch = 0;
+  const SENS = 0.002;
+  canvas.addEventListener('click', () => canvas.requestPointerLock());
+  document.addEventListener('mousemove', e => {
+    if (document.pointerLockElement !== canvas) return;
+    yaw   -= e.movementX * SENS;
+    pitch -= e.movementY * SENS;
+    pitch = Math.max(-Math.PI/2 + 0.01, Math.min(Math.PI/2 - 0.01, pitch));
+    camera.rotation.set(pitch, yaw, 0, 'YXZ');
+  });
+  ```
+  Pointer Lock is REQUIRED for FPS/TPS — without it the cursor leaves the
+  window mid-aim and the game becomes unplayable.
+
+  **drag_drop** (PvZ-style place plant/tower):
+  ```js
+  let dragging = null, dragOffset = {x:0, y:0};
+  canvas.addEventListener('mousedown', e => {
+    const card = pickCardAt(e.clientX, e.clientY);
+    if (card) { dragging = card; dragOffset = {x:0, y:0}; }
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    dragGhost.style.left = (e.clientX - 32) + 'px';
+    dragGhost.style.top  = (e.clientY - 32) + 'px';
+  });
+  document.addEventListener('mouseup', e => {
+    if (!dragging) return;
+    const cell = cellAt(e.clientX, e.clientY);
+    if (cell && !cell.occupied) {
+      placePlant(dragging.kind, cell);
+      window.__GAME_STATE__.placed.push({plantId: dragging.kind, row: cell.row, col: cell.col, ts: Date.now()});
+    }
+    dragging = null;
+  });
+  ```
+
+  ## Visible controls hint (UI helper — required)
+  Every game must expose a small `<div id="controls-hint">` showing the
+  inputs to the user. Example: "WASD 移动 · 鼠标 视角 · 点击锁定鼠标 · 左键 射击".
+  Skip this = -1 ux score from reviewer.
+
+  ## Self-check checklist (do this BEFORE final write)
+  After drafting your HTML, mentally run:
+    1. Does my output contain `addEventListener('keydown'` ? (if locomotion)
+    2. Does my output contain `addEventListener('mousemove'` ? (if look/drag)
+    3. Does my output contain `requestPointerLock` ? (if mouselook)
+    4. In game loop, do I read `keys.KeyW` (or equivalent)?
+    5. Is there a visible `<div id="controls-hint">`?
+  If ANY answer is "no" for the schemes you classified above → STOP, fix,
+  then write. Reviewer will reject without these.
+  </game_controls_charter>
+
   <stop_contract>
   After your final write lands and the file passes self_check, STOP
   immediately. Rules (Cursor / Claude Code style):

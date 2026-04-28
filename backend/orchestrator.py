@@ -30129,6 +30129,29 @@ class Orchestrator:
                                 _root_softpass_after_rollback = True
                     except Exception:
                         _root_softpass_after_rollback = False
+                    # v7.12 (maintainer 2026-04-28): same gate as v7.11 SOFT-PASS:
+                    # if reviewer flagged unresolved runtime errors, this
+                    # SOFT-PASS-after-rollback path must also fail so the
+                    # multi-round re-audit loop can engage. Was: v7.11 BLOCK
+                    # fired on the primary SOFT-PASS path but THIS rollback
+                    # path silently shipped broken games anyway.
+                    if _root_softpass_after_rollback:
+                        try:
+                            _rev_outputs_rb: List[str] = []
+                            for _t in (plan.subtasks or []):
+                                if _t.agent_type == "reviewer":
+                                    _rt_out = str(getattr(_t, "output", "") or "").strip()
+                                    if _rt_out:
+                                        _rev_outputs_rb.append(_rt_out)
+                            if self._reviewer_has_unresolved_runtime_errors(_rev_outputs_rb):
+                                _root_softpass_after_rollback = False
+                                logger.warning(
+                                    "[v7.12] Patcher SOFT-PASS-after-rollback BLOCKED: "
+                                    "reviewer flagged unresolved runtime errors. Patcher "
+                                    "fails so reviewer keeps rejecting / multi-round engages."
+                                )
+                        except Exception as _v712_err:
+                            logger.debug("[v7.12] runtime-error gate failed: %s", _v712_err)
                     if _root_softpass_after_rollback:
                         logger.warning(
                             "[v7.1k.3] Patcher SOFT-PASS after rollback: %s — root artifact is still shippable.",
