@@ -9628,6 +9628,30 @@ class AIBridge:
         await self._publish_partial_output(on_progress, text, phase="finalizing")
         return text, continuation_count, cont_resp
 
+    def _strip_builder_plan_block(self, text: str) -> str:
+        """v7.16 (maintainer 2026-04-28): strip leading <plan>...</plan> block
+        from builder output before HTML extraction. Per the new
+        thinking_gate_v7_16 contract, builder MUST emit a ≤220-char plan
+        block grounding tech / files / controls / risk before the actual
+        HTML. The orchestrator removes it from saved artifacts so the
+        plan is reasoning-only metadata, not content. Hard cap: if the
+        block exceeds 320 chars it's clearly narration abuse — strip and
+        log a warning."""
+        if not text:
+            return text
+        import re as _re_v716
+        m = _re_v716.match(r"\s*<plan>(.{0,3000}?)</plan>\s*", text, _re_v716.DOTALL)
+        if not m:
+            return text
+        plan_body = m.group(1) or ""
+        if len(plan_body) > 320:
+            logger.warning(
+                "[v7.16] builder <plan> block exceeded 320 chars (%d) — likely narration abuse",
+                len(plan_body),
+            )
+        # Drop the matched prefix (whole `<plan>...</plan>` + surrounding whitespace).
+        return text[m.end():]
+
     def _extract_html_files_from_text_output(
         self, output_text: str, input_data: str = ""
     ) -> Dict[str, str]:
@@ -9643,7 +9667,8 @@ class AIBridge:
 
         This method parses all such blocks and returns {filename: html_content}.
         """
-        text = str(output_text or "")
+        # v7.16: strip <plan> block before extracting HTML.
+        text = self._strip_builder_plan_block(str(output_text or ""))
         if len(text) < 120:
             return {}
 

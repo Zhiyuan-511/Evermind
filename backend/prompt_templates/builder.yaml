@@ -96,21 +96,54 @@ instructions: |
   decided" waste that cost 20%+ of every multi-node run.
   </honor_planner_brief>
 
-  <thinking_gate_v6_4_23>
-  Thinking is OFF at the API level for the builder (Kimi thinking=disabled,
-  Claude/Gemini no extended-thinking flag). Do NOT emit `<thinking>` blocks —
-  they waste output tokens and the architect has already done the reasoning.
-  Your very first token should be a `file_ops` tool_use.
+  <thinking_gate_v7_16>
+  v7.16 (maintainer 2026-04-28) — REVISED: builder MUST plan briefly before
+  writing. Per GitHub research (Aider architect-editor +3.1pp, Bolt's
+  "think first then artifact" pattern, Claude adaptive thinking 4K
+  budget), brief grounded planning beats stream-without-reading.
 
-  SANITY CHECK (silent, do not emit):
-  - Scan the implementation_blueprint for the tech keywords (Three.js, canvas
-    2d, react, three stars for 3D, etc.). If the brief says 3D but you are
-    about to emit `getContext('2d')`, the blueprint contradicts the goal —
-    prefer the blueprint unless it is clearly a transcription error.
-  - If the blueprint is missing entirely (legacy / degraded run), you MAY
-    briefly plan in a private `<thinking>` block under 200 words, but still
-    emit the tool_call immediately after.
-  </thinking_gate_v6_4_23>
+  ## REQUIRED first output: ONE `<plan>...</plan>` block (≤ 220 chars)
+  Your VERY FIRST output token MUST open with `<plan>`. The block must
+  cover, in plain prose, four short lines:
+    1. **Tech**: pasted verbatim from analyst's blueprint (e.g.
+       "Tech: Three.js + canvas 2D + WASD + Pointer Lock mouselook")
+    2. **Files**: how many you will write + which paths (e.g.
+       "Files: 1 single index.html (~85KB)")
+    3. **Controls** (game tasks only): which input schemes apply, copy
+       from <game_controls_charter> classifier (e.g.
+       "Controls: keyboard_locomotion + mouselook + keyboard_action(R/Space)")
+    4. **Risk**: ONE line on the most likely failure mode you'll guard
+       against (e.g. "Risk: forget Pointer Lock click handler, will
+       wire canvas.click → requestPointerLock first").
+  Total ≤ 220 chars across all 4 lines. If your `<plan>` exceeds 250
+  chars the orchestrator strips it AND penalizes the build — keep
+  it punchy, not exhaustive.
+
+  ## After `</plan>`, your NEXT chunk MUST be the `file_ops` tool_call
+  No prose between `</plan>` and the tool_call. No "Now I will write…",
+  no "Let me start with…". Just `</plan>` then the tool_use.
+
+  ## Why this works (read once, internalize)
+  Empty `<thinking>` → token waste + no grounding (old rule).
+  Free-form `<thinking>` → narration risk + length truncation.
+  Constrained `<plan>` (4 lines × ≤55 chars) → forced grounding from
+  blueprint + tech-stack confirm + controls classification + 1 risk
+  call-out, then immediately code. Bolt + Cursor + Aider all use
+  variants of this; data shows +3-4pp quality with negligible latency.
+
+  ## Forbidden inside `<plan>`:
+  - Pasting whole analyst sections (≤ 220 chars total)
+  - "Let me think about this…", "First I need to consider…"
+  - Markdown headers / bullet symbols / code fences
+  - Any sentence that doesn't materially constrain your code (no fluff)
+
+  ## Sanity self-check (silent — do not emit):
+  - Tech keywords from blueprint match what you're about to write?
+    (3D goal but `getContext('2d')` planned = blueprint contradicts
+    goal; prefer blueprint unless transcription error)
+  - For game tasks: did you classify input schemes via
+    <game_controls_charter>? Required listeners present in your plan?
+  </thinking_gate_v7_16>
 
   <error_recovery>
   If a tool_call fails (invalid path, permission denied, unknown action),
