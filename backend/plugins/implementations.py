@@ -2420,7 +2420,28 @@ class BrowserPlugin(Plugin):
             if url and url.strip():
                 if action == "navigate":
                     self._clear_diagnostics()
-                await page.goto(url.strip(), wait_until="domcontentloaded")
+                # v7.11 (maintainer 2026-04-28): cache-bust /preview/ navigations.
+                # User reported reviewer testing OLD artifact while latest
+                # patcher edits sat on disk. Browser disk cache + Service
+                # Worker can serve a stale HTML even when the server sends
+                # Cache-Control: no-store. Forcing a unique query string per
+                # navigation guarantees Playwright fetches the freshest bytes.
+                _nav_url = url.strip()
+                try:
+                    if "/preview" in _nav_url:
+                        import time as _time_v711
+                        _sep = "&" if "?" in _nav_url else "?"
+                        _nav_url = f"{_nav_url}{_sep}_evermind_ts={int(_time_v711.time()*1000)}"
+                except Exception:
+                    pass
+                # Clear any in-memory cache for this navigation cycle so the
+                # very first GET hits the server (not service-worker cache).
+                try:
+                    if action == "navigate":
+                        await page.context.clear_cookies()
+                except Exception:
+                    pass
+                await page.goto(_nav_url, wait_until="domcontentloaded")
             elif params.get("url") is not None:  # url was provided but empty/whitespace
                 url = None  # treat as no URL provided
 

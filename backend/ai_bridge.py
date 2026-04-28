@@ -20102,6 +20102,16 @@ class AIBridge:
         if name == "browser" and force_visible and normalized_node_type in ("reviewer", "tester", "uidesign"):
             plugin_context["browser_headful"] = True
             plugin_context["browser_force_reason"] = f"{normalized_node_type}_visible_review"
+        # v7.11 (maintainer 2026-04-28): EXPLICITLY force headless for reviewer/
+        # tester unless EVERMIND_REVIEWER_TESTER_FORCE_HEADFUL is set.
+        # User reported "reviewer 打开外部浏览器之前还是会先打开内部浏览器" — the
+        # second visible Chromium window confused them. Default operation
+        # MUST be backend headless (no visible window), with the reviewer's
+        # browser tool driven invisibly via Playwright. Visible mode kept
+        # only as opt-in for power users debugging review failures.
+        if name in ("browser", "browser_use") and not force_visible \
+                and normalized_node_type in ("reviewer", "tester"):
+            plugin_context["browser_headful"] = False
         if name == "browser":
             node_meta = node if isinstance(node, dict) else {}
             plugin_context["node_type"] = normalized_node_type or node_type
