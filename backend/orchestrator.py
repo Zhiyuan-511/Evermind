@@ -10486,7 +10486,7 @@ class Orchestrator:
         if not reviewer_outputs:
             return False
         runtime_error_patterns = (
-            "cannot read propert",  # Cannot read properties of null/undefined
+            "cannot read propert",
             "is not defined",
             "is not a function",
             "uncaught typeerror",
@@ -10500,24 +10500,50 @@ class Orchestrator:
             "browser smoke test failed",
             "interaction gate failed",
             "click handler did nothing",
+            # v7.8b (maintainer 2026-04-28): paraphrased interaction-failure idioms
+            # — reviewer LLM doesn't always say "interaction gate failed";
+            # observed run_b3cc1099cc12 reviewer wrote "Game start/play
+            # control does not appear to dismiss the menu" which is the same
+            # bug class but slipped past v7.8 keyword set. Adding common
+            # alternate phrasings.
+            "does not appear to dismiss",
+            "does not appear to switch",
+            "control does not",
+            "no primary interaction",
+            "preview rendering and interaction failures",
+            "low semantic structure",
+            "menu does not",
+            "click does not",
+            "start button does not",
+            "switch runtime state into gameplay",
         )
+        import re as _re_runtime
+        import json as _json_runtime
         for text in reviewer_outputs:
-            lower = (text or "").lower()
+            if not text:
+                continue
+            lower = text.lower()
+            # Signal 1: parse JSON verdict block. v7.8b: REJECTED with non-
+            # empty blocking_issues triggers debugger regardless of phrasing.
+            # The reviewer thinks the artifact is broken; that's enough.
+            try:
+                m = _re_runtime.search(r"```json\s*(\{.*?\})\s*```", text, _re_runtime.DOTALL)
+                if m:
+                    parsed = _json_runtime.loads(m.group(1))
+                    if isinstance(parsed, dict):
+                        verdict = str(parsed.get("verdict") or "").strip().upper()
+                        blocking = parsed.get("blocking_issues")
+                        rt = parsed.get("runtime_errors")
+                        if verdict == "REJECTED" and isinstance(blocking, list) and len(blocking) > 0:
+                            return True
+                        if isinstance(rt, list) and len(rt) > 0:
+                            return True
+            except Exception:
+                pass
+            # Signal 2: substring scan for known runtime-error idioms
             for pat in runtime_error_patterns:
                 if pat in lower:
                     return True
-            # Also try parsing the JSON verdict block for runtime_errors[]
-            try:
-                import re as _re_runtime
-                m = _re_runtime.search(r"```json\s*(\{.*?\})\s*```", text, _re_runtime.DOTALL)
-                if m:
-                    import json as _json_runtime
-                    parsed = _json_runtime.loads(m.group(1))
-                    rt = parsed.get("runtime_errors") if isinstance(parsed, dict) else None
-                    if isinstance(rt, list) and len(rt) > 0:
-                        return True
-            except Exception:
-                pass
         return False
 
     def _debugger_noop_reason(self, plan: Plan, subtask: SubTask, prev_results: Dict) -> str:
