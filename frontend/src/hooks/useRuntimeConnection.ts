@@ -266,6 +266,10 @@ export interface UseRuntimeConnectionOptions {
     onMergeRun?: (run: Partial<RunRecord> & Pick<RunRecord, 'id'>) => void;
     /** Merge a node execution update into the canonical NE list. */
     onMergeNodeExecution?: (ne: Partial<NodeExecutionRecord> & Pick<NodeExecutionRecord, 'id' | 'run_id'>) => void;
+    /** v7.7: when run_goal_ack creates a new task, frontend MUST switch
+     *  selectedTask to it — otherwise UI keeps showing the prior task's
+     *  summary header (13/13 / elapsed timer) over the new run.  */
+    onTaskSelected?: (taskId: string) => void;
     /** Active OpenClaw runs to re-check when the WS reconnects. */
     reconnectRunIds?: string[];
     /** Feed connector/session events to UI consumers such as OpenClawPanel. */
@@ -311,7 +315,7 @@ export interface UseRuntimeConnectionReturn {
 export function useRuntimeConnection({
     wsUrl, lang, difficulty, goalRuntime = 'local', sessionId = '', activeTaskId = '', messages, addMessage, addReport,
     buildPlanNodes, updateNodeData, nodes, edges, setNodes,
-    onMergeTask, onMergeRun, onMergeNodeExecution, reconnectRunIds = [], onConnectorEvent,
+    onMergeTask, onMergeRun, onMergeNodeExecution, onTaskSelected, reconnectRunIds = [], onConnectorEvent,
 }: UseRuntimeConnectionOptions): UseRuntimeConnectionReturn {
     const [running, setRunning] = useState(false);
     const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -673,6 +677,14 @@ export function useRuntimeConnection({
             // Merge run
             if (runId && runData && onMergeRun) {
                 onMergeRun({ id: runId, ...runData } as Partial<RunRecord> & Pick<RunRecord, 'id'>);
+            }
+            // v7.7: switch selectedTask to the just-created task. Without
+            // this, UI stays on whatever task the user came from, the
+            // pipeline header keeps showing the PRIOR run's "13/13 已完成"
+            // and timer keeps counting from the prior start_at — the
+            // exact "cross-session pollution" symptom user reported.
+            if (taskId && onTaskSelected) {
+                try { onTaskSelected(taskId); } catch { /* ignore */ }
             }
             // Merge NEs
             if (onMergeNodeExecution) {

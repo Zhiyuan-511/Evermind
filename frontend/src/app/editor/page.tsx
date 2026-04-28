@@ -430,6 +430,13 @@ function EditorPageInner() {
         onMergeTask: mergeTask,
         onMergeRun: mergeRun,
         onMergeNodeExecution: mergeNodeExecution,
+        // v7.7: when chat panel posts a goal and backend creates a new
+        // canonical task, auto-switch selectedTask to it — kills the
+        // "顶部还是上一轮 13/13" cross-session pollution.
+        onTaskSelected: (taskId: string) => {
+            try { selectTask(taskId); } catch { /* ignore */ }
+            try { lastTaskChatSyncRef.current = ''; } catch { /* ignore */ }
+        },
         reconnectRunIds,
         onConnectorEvent: appendConnectorEvent,
     });
