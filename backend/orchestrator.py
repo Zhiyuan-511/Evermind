@@ -31053,6 +31053,28 @@ class Orchestrator:
             ):
                 reviewer_output = (result.get("output") or "").strip()
                 reviewer_verdict = self._parse_reviewer_verdict(reviewer_output)
+                # v7.36 (maintainer 2026-04-29): track the BEST avg reviewer score
+                # across all rounds. Used by v7.35 regression rollback at the
+                # budget-exhausted soft-pass site. Without this update here,
+                # the v7.35 check at soft-pass always saw `_best=0` and the
+                # rollback never fired even when patcher clearly made things
+                # worse (round-2 score < round-1 score). Now updated after
+                # every successful reviewer round so the soft-pass site has
+                # historical data to compare against.
+                try:
+                    _curr_avg_round = self._extract_reviewer_avg_score_v735(reviewer_output)
+                    if _curr_avg_round > 0:
+                        _prev_best = float(getattr(self, "_best_reviewer_avg_score_v735", 0.0) or 0.0)
+                        if _curr_avg_round > _prev_best:
+                            self._best_reviewer_avg_score_v735 = _curr_avg_round
+                            logger.info(
+                                "[v7.36] best reviewer avg score updated: %.2f → %.2f (round=%d/%d)",
+                                _prev_best, _curr_avg_round,
+                                int(getattr(self, "_reviewer_requeues", 0) or 0) + 1,
+                                self._configured_max_reviewer_rejections(),
+                            )
+                except Exception as _bs_err:
+                    logger.debug("[v7.36] best-score tracking failed: %s", _bs_err)
                 if reviewer_verdict == "UNKNOWN":
                     # v6.4.2 (maintainer 2026-04-21) — HARD CAP on UNKNOWN retries.
                     # Previously retryable=True would keep reviewer spinning
@@ -31183,12 +31205,31 @@ class Orchestrator:
                     eligible_builders: List[SubTask] = []
                     eligible_asset_tasks: List[SubTask] = []
                     eligible_polishers_for_patch: List[SubTask] = []
+                    max_rejections = self._configured_max_reviewer_rejections()
+                    # v7.36 (maintainer 2026-04-29): align patcher.max_retries with
+                    # the user-configured `reviewer_max_rejections`. Previously
+                    # patcher.max_retries was hard-pinned at 1, so even when
+                    # the user set `reviewer_max_rejections=3`, the patcher
+                    # subtask's eligibility check (`retries < max_retries`)
+                    # caused `eligible_patchers_for_udiff` to be empty after
+                    # one round and the loop fell through to the
+                    # "builder retries exhausted" silent-ship path. The two
+                    # caps must agree: max_rejections is the user-visible
+                    # reviewer-loop budget, and patcher.max_retries is the
+                    # internal counter that gates eligibility for each round.
+                    # Bump patcher.max_retries to at least max_rejections so
+                    # the loop honors the user's setting end-to-end.
+                    for _pt in (plan.subtasks or []):
+                        if _pt.agent_type == "patcher" and _pt.max_retries < max_rejections:
+                            try:
+                                _pt.max_retries = max_rejections
+                            except Exception:
+                                pass
                     eligible_patchers_for_udiff = [
                         st for st in plan.subtasks
                         if st.agent_type == "patcher"
                         and st.retries < st.max_retries
                     ]
-                    max_rejections = self._configured_max_reviewer_rejections()
 
                     _v728b_should_softpass = False
                     try:
