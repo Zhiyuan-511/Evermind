@@ -31470,11 +31470,59 @@ class Orchestrator:
                             existing_html = self._current_run_html_artifacts()
                             has_usable_artifacts = bool(existing_html) or bool(restored_files)
                             if has_usable_artifacts:
+                                # v7.35 (maintainer 2026-04-29): regression check.
+                                # When the rejection budget is exhausted, the
+                                # current on-disk artifact is whatever patcher
+                                # last touched. If patcher's edits made things
+                                # WORSE (lower reviewer scores than an earlier
+                                # round), shipping "as-is" hands the user a
+                                # downgraded product. Track the best score
+                                # seen across rounds; if the latest score
+                                # regressed by ≥ 1.0 average points AND a
+                                # stable_preview snapshot from a better round
+                                # exists, restore that snapshot before the
+                                # soft-pass. Observed in run_c4b4804fbbd5
+                                # where round-1 avg was 5.8/10 but post-patcher
+                                # round-2 avg was 3.8/10 — patcher made it
+                                # worse but the worse version got shipped.
+                                _curr_avg = self._extract_reviewer_avg_score_v735(reviewer_output)
+                                _best_avg = float(getattr(self, "_best_reviewer_avg_score_v735", 0.0) or 0.0)
+                                _regression_detected = False
+                                if _curr_avg > 0 and _best_avg > 0 and _curr_avg + 1.0 < _best_avg:
+                                    _regression_detected = True
+                                    try:
+                                        _rb_files = self._restore_output_from_stable_preview() or []
+                                        if _rb_files:
+                                            restored_files = list(_rb_files)
+                                            logger.warning(
+                                                "[v7.35] Reviewer score regression detected: latest=%.1f best=%.1f. "
+                                                "Restored %d file(s) from stable preview snapshot — "
+                                                "shipping the BETTER pre-patcher version instead of "
+                                                "the patcher-degraded artifact.",
+                                                _curr_avg, _best_avg, len(_rb_files),
+                                            )
+                                            self._append_ne_activity(
+                                                subtask.id,
+                                                f"[v7.35] Patcher 把质量改差了（{_best_avg:.1f}/10 → {_curr_avg:.1f}/10），"
+                                                f"已回滚到补丁前更好的版本（{len(_rb_files)} 个文件）。",
+                                                entry_type="warn",
+                                            )
+                                    except Exception as _rb_err:
+                                        logger.debug("[v7.35] regression rollback failed: %s", _rb_err)
+                                if _curr_avg > _best_avg:
+                                    self._best_reviewer_avg_score_v735 = _curr_avg
+                                _regression_note = (
+                                    f" Patcher 让分数从 {_best_avg:.1f}/10 跌到 {_curr_avg:.1f}/10，已回滚至更好版本。"
+                                    if _regression_detected else ""
+                                )
                                 soft_pass_msg = (
                                     f"Reviewer flagged issues but requeue budget exhausted ({reason}). "
-                                    f"Delivering existing artifacts as-is. Notes: {rejection_details[:400]}"
+                                    f"Delivering existing artifacts as-is.{_regression_note} Notes: {rejection_details[:400]}"
                                 )
-                                reviewer_warning_summary = "审查未通过，重试预算耗尽，当前版本带风险交付。"
+                                reviewer_warning_summary = (
+                                    "Patcher 改差了，已回滚到更好版本交付。" if _regression_detected
+                                    else "审查未通过，重试预算耗尽，当前版本带风险交付。"
+                                )
                                 logger.warning(soft_pass_msg)
                                 self._reviewer_shipped_as_is = True
                                 result["success"] = True
@@ -35202,6 +35250,33 @@ class Orchestrator:
                                      "created successfully", "looks correct", "approved", "status\": \"pass"]):
             return {"status": "pass", "details": output[:500], "retryable": False}
         return {"status": "pass", "details": output[:500], "retryable": False}
+
+    def _extract_reviewer_avg_score_v735(self, output: str) -> float:
+        """
+        v7.35 — pull the average score from reviewer output. Used by the
+        budget-exhausted soft-pass branch to detect when patcher caused a
+        quality regression so we can roll back to the better snapshot.
+        Returns 0.0 if no scores are parseable.
+        """
+        if not output:
+            return 0.0
+        try:
+            import re as _re_v735
+            payload = self._extract_embedded_json_object(output) or {}
+            scores = payload.get("scores") if isinstance(payload, dict) else None
+            if isinstance(scores, dict) and scores:
+                _vals = [float(v) for v in scores.values() if isinstance(v, (int, float))]
+                if _vals:
+                    return sum(_vals) / len(_vals)
+            # Fallback: scan prose like "layout 评分：7/10" or "color: 4/10".
+            _matches = _re_v735.findall(r"(?:layout|color|typography|animation|responsive|completeness|originality|functionality|ship_readiness)[^\d]*?(\d+(?:\.\d+)?)\s*(?:/\s*10|分)", output, _re_v735.IGNORECASE)
+            if _matches:
+                _vals = [float(m) for m in _matches if 0 <= float(m) <= 10]
+                if _vals:
+                    return sum(_vals) / len(_vals)
+        except Exception:
+            pass
+        return 0.0
 
     def _parse_reviewer_verdict(self, output: str) -> str:
         """
