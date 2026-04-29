@@ -5282,7 +5282,7 @@ class AIBridge:
             # added game_balance_spec + test_plan_for_reviewer + task_scope_resolution
             # ≈ 1.9K extra chars; analyst now needs 50%+ more headroom to land all
             # MUST-LAND sections before truncation.
-            value = self._read_int_env("EVERMIND_ANALYST_MAX_TOKENS", 18432, 2048, 32768)
+            value = self._read_int_env("EVERMIND_ANALYST_MAX_TOKENS", 26624, 2048, 32768)
         elif normalized_node_type == "router":
             # V4.3: Router only generates a JSON routing table — 2K tokens is
             # more than enough.  4K encouraged verbose reasoning that pushed
