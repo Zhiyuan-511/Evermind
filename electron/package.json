@@ -59,6 +59,11 @@
             "identity": null,
             "extendInfo": {
                 "NSAppleEventsUsageDescription": "Evermind uses AppleScript only to open the preview URL in your default browser after a run completes.",
+                "NSDesktopFolderUsageDescription": "Evermind reads its own .app bundle resources to launch the backend service. macOS asks once because the bundle commonly lives on your Desktop.",
+                "NSDocumentsFolderUsageDescription": "Evermind may save deliverables to your Documents folder if you choose that as the workspace root.",
+                "NSDownloadsFolderUsageDescription": "Evermind may export run artifacts to Downloads on your request.",
+                "NSRemovableVolumesUsageDescription": "Evermind requires this only if you select an external drive as workspace root.",
+                "NSNetworkVolumesUsageDescription": "Evermind requires this only if you select a network share as workspace root.",
                 "LSEnvironment": {
                     "EVERMIND_TCC_BUNDLE": "1"
                 }
