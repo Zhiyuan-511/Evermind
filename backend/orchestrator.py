@@ -30379,6 +30379,49 @@ class Orchestrator:
                     # surface the patch summary in the report. This is the
                     # 95th-percentile correct outcome at 100% reliability.
                     _patcher_soft_pass = bool(patch_outcome.get("soft_pass"))
+
+                    try:
+                        import re as _re_v729b
+                        _orphan_assets_v729b: List[str] = []
+                        _html_blob_v729b = ""
+                        for _hf_v729b in OUTPUT_DIR.glob("*.html"):
+                            try:
+                                _html_blob_v729b += _hf_v729b.read_text(encoding="utf-8", errors="replace")
+                            except Exception:
+                                pass
+                        for _af_v729b in OUTPUT_DIR.glob("*.css"):
+                            try:
+                                if _af_v729b.stat().st_mtime < (subtask.started_at or 0):
+                                    continue
+                            except Exception:
+                                continue
+                            _name = _af_v729b.name
+                            if _name not in _html_blob_v729b:
+                                _orphan_assets_v729b.append(_name)
+                        for _af_v729b in OUTPUT_DIR.glob("*.js"):
+                            try:
+                                if _af_v729b.stat().st_mtime < (subtask.started_at or 0):
+                                    continue
+                            except Exception:
+                                continue
+                            _name = _af_v729b.name
+                            if _name not in _html_blob_v729b:
+                                _orphan_assets_v729b.append(_name)
+                        if _orphan_assets_v729b:
+                            logger.warning(
+                                "[v7.29b] patcher created %d orphan asset file(s) NOT referenced by any HTML: %s — "
+                                "the user will see no visual change. patcher must edit HTML files directly.",
+                                len(_orphan_assets_v729b), _orphan_assets_v729b[:5],
+                            )
+                            self._append_ne_activity(
+                                subtask.id,
+                                f"[v7.29b] 警告: patcher 创建的 {len(_orphan_assets_v729b)} 个资产文件 (如 {_orphan_assets_v729b[:3]}) "
+                                f"没有任何 HTML 引用 — 用户预览不会变化",
+                                entry_type="warn",
+                            )
+                    except Exception as _v729b_err:
+                        logger.debug("[v7.29b] orphan asset check failed: %s", _v729b_err)
+
                     # v7.10 (maintainer 2026-04-28): RE-ENABLE multi-round re-audit
                     # now that scheduler gate (line ~24897) blocks deployer/
                     # debugger while `_pending_reviewer_requeue_id` is set.

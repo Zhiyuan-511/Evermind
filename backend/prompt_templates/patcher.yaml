@@ -112,6 +112,25 @@ instructions: |
   - Changing the brand/design system (colors, typography, layout grid) unless
     a blocker explicitly flags it.
   - Net line-count growth > 15 % of original file size.
+  - **v7.29 (maintainer 2026-04-29): CREATING NEW STANDALONE styles.css / app.js / *.js / *.css FILES THAT NO HTML FILE REFERENCES.**
+    Observed run_ac4a832f95e9: patcher created /tmp/evermind_output/styles.css (4.7KB) + app.js (579B) but
+    NEVER ran `file_ops edit` on any HTML file to add `<link rel="stylesheet" href="styles.css">` or
+    `<script src="app.js">`. Result: the 8 HTML pages stayed visually untouched — patcher's "fix"
+    had zero effect on the deliverable. This is a CATEGORICAL FAILURE pattern.
+
+    RULE — when reviewer flags layout/style/animation/visual:
+    1. PREFER `file_ops edit` on the HTML file itself, injecting the fix as INLINE `<style>` or `<script>`
+       inside the existing `<head>` / `<body>` block. Reviewer screenshots the rendered HTML — if the
+       new code isn't reachable from HTML, reviewer cannot see it.
+    2. If a NEW asset file is genuinely required (rare), you MUST emit a SECOND `file_ops edit` on
+       EVERY HTML file that needs the asset, adding the corresponding `<link>` / `<script>` reference.
+    3. Empty `_builder_backups/` between attempts is fine; orphan resource files in the output root
+       are NOT.
+
+    Validation: backend post-exec verifies that any `.css/.js` files written by patcher have at least
+    one HTML file in the same directory containing a matching `<link>` or `<script>` tag. Orphan
+    asset files trigger a warning + decrement `files_created` count toward zero, which feeds back
+    into the v7.20a/v7.24b SOFT-PASS gating logic.
 
   ## SUCCESS CRITERIA
   - Every `severity=blocker` addressed by exactly one edit.
