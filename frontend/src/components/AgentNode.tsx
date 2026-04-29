@@ -145,7 +145,20 @@ export function invalidateAvailableModels(): void {
 }
 
 function AgentNode({ id, data, selected }: NodeProps) {
-    const nodeType = data.nodeType as string || 'builder';
+    // v7.26 (maintainer 2026-04-28): merger/patcher/etc nodes were displaying as
+    // "builder" when an upstream update path lost data.nodeType. Walk a
+    // fallback chain (nodeKey → rawNodeKey → agent → infer-from-id) before
+    // giving up to "builder", so a transient nodeType drop on UI sync no
+    // longer mislabels the canvas.
+    const _idLower = (id || '').toLowerCase();
+    const _idHints = ['merger', 'patcher', 'reviewer', 'analyst', 'planner', 'uidesign', 'scribe', 'polisher', 'deployer', 'debugger', 'imagegen', 'spritesheet', 'assetimport', 'tester', 'router', 'builder1', 'builder2'];
+    const _idGuess = _idHints.find((h) => _idLower.includes(h));
+    const nodeType = (data.nodeType as string)
+        || (data.nodeKey as string)
+        || (data.rawNodeKey as string)
+        || (data.agent as string)
+        || _idGuess
+        || 'builder';
     const info = NODE_TYPES[nodeType] || { icon: '', color: '#666', label_en: nodeType, label_zh: nodeType, desc_en: '', desc_zh: '', inputs: [{ id: 'in', label: 'Input' }], outputs: [{ id: 'out', label: 'Output' }] };
     const rawStatus = data.status as string || 'idle';
     const progress = Math.max(0, Math.min(100, (data.progress as number) || 0));
