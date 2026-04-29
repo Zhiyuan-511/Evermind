@@ -203,20 +203,20 @@ def inspect_game_functional_completeness(html: str) -> List[str]:
         r"['\"`]Key[WASD]['\"`]|['\"`]Arrow(Up|Down|Left|Right)['\"`]",
         text,
     ))
-    has_position_apply = bool(re.search(
-        r"(?:player|character|hero|cameraGroup|playerObj|playerMesh|controls|camera)\."
+    has_position_apply_anywhere = bool(re.search(
+        r"(?:player|character|hero|cameraGroup|playerObj|playerMesh|controls|camera|playerBody|cam|rig|mesh|body)\."
         r"(?:position|translate)"
-        r"(?:\.(?:add|copy|set|sub|copy|x|y|z)|[XYZ]?\s*\(|\s*[+\-]?=)"
+        r"(?:\.(?:add|copy|set|sub|x|y|z|addScaledVector)|[XYZ]?\s*\(|\s*[+\-]?=)"
         r"|"
-        r"\.(?:moveForward|moveRight|moveBackward|moveLeft)\s*\(",
+        r"\.(?:moveForward|moveRight|moveBackward|moveLeft|translateX|translateY|translateZ)\s*\(",
         text,
     ))
-    if has_wasd_listen and not has_position_apply:
+    if has_wasd_listen and not has_position_apply_anywhere:
         issues.append(
-            "v7.21h: WASD/Arrow keys are in keydown listener but the resulting movement vector "
-            "is never applied to player or camera position — pressing W will do nothing visually; "
-            "wire the keydown handler to mutate player.position (e.g. `player.position.add(forward.multiplyScalar(speed))`) "
-            "or call PointerLockControls.moveForward(speed)"
+            "v7.21h: WASD/Arrow keys are in keydown listener but no code anywhere applies a "
+            "movement vector to player/camera position — pressing W will do nothing visually; "
+            "either (a) add to keydown body, or (b) read `keys` state inside animate() and call "
+            "`player.position.addScaledVector(forward, speed*dt)` or `controls.moveForward(speed)`"
         )
 
     raf_match = re.search(r"requestAnimationFrame\(\s*([A-Za-z_$][A-Za-z0-9_$]*)", text)
@@ -237,20 +237,28 @@ def inspect_game_functional_completeness(html: str) -> List[str]:
                 i += 1
             if depth == 0:
                 body = text[body_pattern.end():i - 1]
-                if not re.search(r"renderer\.render\s*\(|\.render\(\s*scene", body):
+                render_call_inline = bool(re.search(r"renderer\.render\s*\(|\.render\(\s*scene", body))
+                safe_render_helper = bool(re.search(
+                    r"_evermindSafeRender|safeRender\s*\(|EVERMIND_SAFE_RENDER|composer\.render\s*\(",
+                    body,
+                ))
+                if not (render_call_inline or safe_render_helper):
                     issues.append(
-                        f"v7.21h: animate loop function `{fn_name}` does not call renderer.render(scene, camera) — "
-                        "every frame would be blank; add `renderer.render(scene, camera)` inside the loop body"
+                        f"v7.21h: animate loop function `{fn_name}` does not call renderer.render(scene, camera) "
+                        "or any *render helper — every frame would be blank; add `renderer.render(scene, camera)` inside the loop body"
                     )
 
     has_scene = bool(re.search(r"new\s+(?:THREE\.)?Scene\s*\(", text))
     has_camera = bool(re.search(r"new\s+(?:THREE\.)?(?:Perspective|Orthographic)Camera", text))
     has_renderer = bool(re.search(r"new\s+(?:THREE\.)?WebGLRenderer", text))
-    has_render_call = bool(re.search(r"renderer\.render\s*\(|\.render\(\s*scene", text))
-    if has_scene and has_camera and has_renderer and not has_render_call:
+    has_any_render_call = bool(re.search(
+        r"renderer\.render\s*\(|\.render\(\s*scene|_evermindSafeRender|safeRender\s*\(|EVERMIND_SAFE_RENDER|composer\.render\s*\(",
+        text,
+    ))
+    if has_scene and has_camera and has_renderer and not has_any_render_call:
         issues.append(
             "v7.21h: Three.js Scene + Camera + WebGLRenderer all declared but renderer.render(scene, camera) "
-            "is never invoked anywhere — the canvas will stay black"
+            "is never invoked anywhere (also no _evermindSafeRender or composer.render) — the canvas will stay black"
         )
 
     return issues
