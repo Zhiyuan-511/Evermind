@@ -5644,7 +5644,47 @@ class FileOpsPlugin(Plugin):
                     content = f.read()
                 count = content.count(old_string)
                 if count == 0:
-                    return PluginResult(success=False, error="old_string not found in file")
+                    # v7.31 (maintainer 2026-04-29): instead of bare "not found",
+                    # find the closest matching line + emit a 6-line context
+                    # window so the LLM can correct the anchor on the next
+                    # turn. Without this hint, patcher LLMs (esp. kimi) tend
+                    # to retry the same wrong anchor 6+ times before giving
+                    # up — observed in run_28ec559d3311 where reviewer flagged
+                    # animation issues but patcher's edits all missed because
+                    # polisher had altered the anchor lines minutes earlier.
+                    _hint = ""
+                    try:
+                        old_first_line = (old_string.split("\n", 1)[0] or "").strip()
+                        if old_first_line and 8 <= len(old_first_line) <= 200:
+                            file_lines = content.splitlines()
+                            best_idx = -1
+                            best_score = 0
+                            # Cheap substring overlap: find line with most shared chars
+                            old_set = set(old_first_line)
+                            for i, ln in enumerate(file_lines):
+                                if not ln.strip():
+                                    continue
+                                # Quick bigram/literal substring check
+                                if old_first_line[:30] in ln or any(t in ln for t in old_first_line.split() if len(t) >= 6):
+                                    score = len(old_set & set(ln))
+                                    if score > best_score:
+                                        best_score = score
+                                        best_idx = i
+                            if best_idx >= 0:
+                                lo = max(0, best_idx - 3)
+                                hi = min(len(file_lines), best_idx + 4)
+                                window = "\n".join(f"{n+1:>4}: {file_lines[n]}" for n in range(lo, hi))
+                                _hint = (
+                                    f" Closest match around line {best_idx+1}:\n{window}\n"
+                                    f"Hint: re-emit `file_ops edit` with `old_string` copied verbatim "
+                                    f"from the lines above (escape \\n if multi-line)."
+                                )
+                    except Exception:
+                        pass
+                    return PluginResult(
+                        success=False,
+                        error=f"old_string not found in file.{_hint}",
+                    )
                 if count > 1 and not params.get("replace_all", False):
                     return PluginResult(success=False, error=f"old_string matches {count} locations; set replace_all=true or provide more context")
                 if params.get("replace_all", False):

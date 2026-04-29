@@ -30432,7 +30432,40 @@ class Orchestrator:
                     # 又改好了都再次给到我们的审查员去审查".
                     _max_rej_for_loop = self._configured_max_reviewer_rejections()
                     _budget_remaining = int(getattr(self, "_reviewer_requeues", 0) or 0) < _max_rej_for_loop
-                    if pending_rv_id and not _patcher_soft_pass and _budget_remaining:
+                    # v7.31 (maintainer 2026-04-29): also re-audit when patcher
+                    # SOFT-PASSED with 0 effective edits AND reviewer had real
+                    # blocking_issues. User feedback: silently skipping after
+                    # 1 patcher attempt feels like "I don't know if it passed
+                    # or got auto-skipped". The re-audit loop with budget cap
+                    # (max_rejections=2) gives the artifact one more honest
+                    # check — reviewer either APPROVES (base artifact decent
+                    # enough) or REJECTS triggering patcher round 2. The
+                    # original v7.1k concern (infinite loop) is prevented by
+                    # _budget_remaining; observed in run_28ec559d3311 where
+                    # reviewer flagged animation 4/10 + responsive 5/10 but
+                    # patcher 0-edit silently shipped without retry.
+                    _patcher_files_count = len(patch_outcome.get("files_patched", []) or [])
+                    _softpass_zero_edits = bool(_patcher_soft_pass and _patcher_files_count == 0)
+                    _allow_reaudit_after_softpass_zero = (
+                        _softpass_zero_edits
+                        and bool(pending_rv_id)
+                        and _budget_remaining
+                    )
+                    if _allow_reaudit_after_softpass_zero:
+                        # Surface clearly so user sees in NE activity stream.
+                        self._append_ne_activity(
+                            subtask.id,
+                            "[v7.31] Patcher 本轮 0 改动 (SOFT-PASS)，reviewer 标记的问题尚未修复 — "
+                            "让 reviewer 再审一次（预算还在），看是否能 APPROVE 或触发新一轮 patcher。",
+                            entry_type="warn",
+                        )
+                        logger.warning(
+                            "[v7.31] Patcher SOFT-PASS with 0 edits — re-engaging reviewer (budget %d/%d) "
+                            "to honor flagged issues instead of silent skip.",
+                            int(getattr(self, "_reviewer_requeues", 0) or 0),
+                            _max_rej_for_loop,
+                        )
+                    if pending_rv_id and (not _patcher_soft_pass or _allow_reaudit_after_softpass_zero) and _budget_remaining:
                         _reset_ids: List[str] = [pending_rv_id]
                         # Find all downstream nodes that gated on reviewer
                         _downstream_ids = self._collect_transitive_downstream_ids(plan, [pending_rv_id])
