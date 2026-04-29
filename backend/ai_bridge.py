@@ -15545,10 +15545,9 @@ class AIBridge:
                 # if-branches previously duplicated across compat + chat paths.
                 # Deep mode actually enables thinking now (was only disabling);
                 # fast mode forces off; env overrides still win per-provider.
-                _run_id = str((node or {}).get("run_id") or "").strip()
-                _ne_id = str((node or {}).get("node_execution_id") or "").strip()
-                _cache_key_parts = [p for p in [_run_id, normalized_node_type or node_type or "node", _ne_id] if p]
-                _cache_key = "-".join(_cache_key_parts)[:128] if _cache_key_parts else ""
+                _role_v722a = normalized_node_type or node_type or "node"
+                _diff_v722a = str((node or {}).get("difficulty") or "std").lower()
+                _cache_key = f"evermind-{_role_v722a}-{_diff_v722a}"[:128]
                 self._apply_thinking_config_to_kwargs(
                     kwargs,
                     model_info,
