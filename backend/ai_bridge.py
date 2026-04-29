@@ -3353,7 +3353,7 @@ class AIBridge:
                 (_think or {}).get("type") if isinstance(_think, dict) else _think
             ) or "(n/a)"
             try:
-                logger.info(
+                logger.debug(
                     "thinking_config: node=%s model=%s depth=%s effort=%s thinking=%s",
                     node_type or "(unknown)",
                     model_name or "(unknown)",

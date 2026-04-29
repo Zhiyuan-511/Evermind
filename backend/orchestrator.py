@@ -74,6 +74,7 @@ from preview_validation import (
     inspect_javascript_syntax,
     inspect_shared_local_script_safety,
     inspect_html_integrity,
+    inspect_game_functional_completeness,
     inspect_inline_handler_contract,
     inspect_script_tag_integrity,
     is_bootstrap_html_artifact,
@@ -23850,9 +23851,12 @@ class Orchestrator:
             from asset_prefetcher import prefetch_for_goal as _prefetch_for_goal
             import asyncio as _asyncio
             try:
-                _prefetch_report = _asyncio.run(_prefetch_for_goal(goal, OUTPUT_DIR))
+                _running = _asyncio.get_running_loop()
             except RuntimeError:
-                # Already inside an event loop (orchestrator.run is async)
+                _running = None
+            if _running is None:
+                _prefetch_report = _asyncio.run(_prefetch_for_goal(goal, OUTPUT_DIR))
+            else:
                 _prefetch_report = await _prefetch_for_goal(goal, OUTPUT_DIR)
             if _prefetch_report:
                 logger.info(
@@ -26238,6 +26242,16 @@ class Orchestrator:
                                     _broken.append(_ref)
                             if _broken:
                                 _merger_health_issues.append(f"broken local refs: {_broken[:3]}")
+                            try:
+                                _func_issues_v721h = inspect_game_functional_completeness(_html)
+                                if _func_issues_v721h:
+                                    _merger_health_issues.extend(_func_issues_v721h)
+                                    logger.warning(
+                                        "[v7.21h] Game functional gate found %d issues — merger LLM will repair",
+                                        len(_func_issues_v721h),
+                                    )
+                            except Exception as _v721h_err:
+                                logger.debug("[v7.21h] functional gate check failed: %s", _v721h_err)
                             if _merger_health_issues:
                                 logger.warning(
                                     "v7.0 merger health check flagged %d issues (soft — shipping anyway, reviewer will act): %s",

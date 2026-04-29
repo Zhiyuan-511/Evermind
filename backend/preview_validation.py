@@ -165,6 +165,97 @@ def inspect_html_integrity(html: str) -> Dict[str, Any]:
     return {"ok": not errors, "errors": errors}
 
 
+def inspect_game_functional_completeness(html: str) -> List[str]:
+    """v7.21h (maintainer 2026-04-28): catch builders that satisfy v7.19d's
+    hard listener requirements but never wire them to actual movement /
+    camera mutations. Symptom from run_bb161ee37766: 100KB Three.js
+    artifact had keydown('KeyW') listening but `move` vector was never
+    applied to player.position; mouselook had pointerlockchange handler
+    but never read e.movementX/Y. Pressing W did nothing, mouse did
+    nothing — yet builder.yaml's literal rules all passed.
+
+    Returns a list of human-readable issues to inject as merger health
+    issues so the merger LLM repairs them in <90s. Empty list = passed.
+    """
+    text = str(html or "")
+    if not text or len(text) < 1000:
+        return []
+
+    is_3d_game = bool(re.search(
+        r"<canvas|\bTHREE\.|WebGLRenderer|PerspectiveCamera|requestPointerLock",
+        text,
+    ))
+    if not is_3d_game:
+        return []
+
+    issues: List[str] = []
+
+    has_pointer_lock = bool(re.search(r"requestPointerLock\s*\(", text))
+    has_movement_xy = bool(re.search(r"\.movement[XY]\b|e\.movement[XY]", text))
+    if has_pointer_lock and not has_movement_xy:
+        issues.append(
+            "v7.21h: canvas.requestPointerLock() declared but no handler reads e.movementX/Y — "
+            "mouselook will never rotate the camera; add `mousemove` listener that reads "
+            "movementX/Y and adjusts camera rotation/yaw/pitch when document.pointerLockElement is set"
+        )
+
+    has_wasd_listen = bool(re.search(
+        r"['\"`]Key[WASD]['\"`]|['\"`]Arrow(Up|Down|Left|Right)['\"`]",
+        text,
+    ))
+    has_position_apply = bool(re.search(
+        r"(?:player|character|hero|cameraGroup|playerObj|playerMesh|controls|camera)\."
+        r"(?:position|translate)"
+        r"(?:\.(?:add|copy|set|sub|copy|x|y|z)|[XYZ]?\s*\(|\s*[+\-]?=)"
+        r"|"
+        r"\.(?:moveForward|moveRight|moveBackward|moveLeft)\s*\(",
+        text,
+    ))
+    if has_wasd_listen and not has_position_apply:
+        issues.append(
+            "v7.21h: WASD/Arrow keys are in keydown listener but the resulting movement vector "
+            "is never applied to player or camera position — pressing W will do nothing visually; "
+            "wire the keydown handler to mutate player.position (e.g. `player.position.add(forward.multiplyScalar(speed))`) "
+            "or call PointerLockControls.moveForward(speed)"
+        )
+
+    raf_match = re.search(r"requestAnimationFrame\(\s*([A-Za-z_$][A-Za-z0-9_$]*)", text)
+    if raf_match:
+        fn_name = raf_match.group(1)
+        body_pattern = re.search(rf"function\s+{re.escape(fn_name)}\s*\([^)]*\)\s*\{{", text)
+        if not body_pattern:
+            body_pattern = re.search(rf"(?:const|let|var)\s+{re.escape(fn_name)}\s*=\s*(?:function\s*\([^)]*\)|\([^)]*\)\s*=>)\s*\{{", text)
+        if body_pattern:
+            depth = 1
+            i = body_pattern.end()
+            while i < len(text) and depth > 0:
+                ch = text[i]
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                i += 1
+            if depth == 0:
+                body = text[body_pattern.end():i - 1]
+                if not re.search(r"renderer\.render\s*\(|\.render\(\s*scene", body):
+                    issues.append(
+                        f"v7.21h: animate loop function `{fn_name}` does not call renderer.render(scene, camera) — "
+                        "every frame would be blank; add `renderer.render(scene, camera)` inside the loop body"
+                    )
+
+    has_scene = bool(re.search(r"new\s+(?:THREE\.)?Scene\s*\(", text))
+    has_camera = bool(re.search(r"new\s+(?:THREE\.)?(?:Perspective|Orthographic)Camera", text))
+    has_renderer = bool(re.search(r"new\s+(?:THREE\.)?WebGLRenderer", text))
+    has_render_call = bool(re.search(r"renderer\.render\s*\(|\.render\(\s*scene", text))
+    if has_scene and has_camera and has_renderer and not has_render_call:
+        issues.append(
+            "v7.21h: Three.js Scene + Camera + WebGLRenderer all declared but renderer.render(scene, camera) "
+            "is never invoked anywhere — the canvas will stay black"
+        )
+
+    return issues
+
+
 # v7.7 (2026-04-28): catch the builder1+builder2+merger multi-author bug
 # where each builder emits its own `let lastTime = 0;` (or `const`/`var`)
 # and the merger pastes both into the same <script> block — JS engine
