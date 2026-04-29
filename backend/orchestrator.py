@@ -10755,10 +10755,23 @@ class Orchestrator:
                         verdict = str(parsed.get("verdict") or "").strip().upper()
                         blocking = parsed.get("blocking_issues")
                         rt = parsed.get("runtime_errors")
+                        _placeholder_markers_v724b = (
+                            "reviewer_empty_output_fallback",
+                            "verify root index.html has functional event listeners",
+                            "rerun reviewer with browser",
+                            "no concrete tool errors visible",
+                        )
+                        def _is_placeholder(_item: str) -> bool:
+                            _l = str(_item or "").lower()
+                            return any(_m in _l for _m in _placeholder_markers_v724b)
                         if verdict == "REJECTED" and isinstance(blocking, list) and len(blocking) > 0:
-                            return True
+                            real_blocking = [b for b in blocking if not _is_placeholder(b)]
+                            if real_blocking:
+                                return True
                         if isinstance(rt, list) and len(rt) > 0:
-                            return True
+                            real_rt = [e for e in rt if not _is_placeholder(e)]
+                            if real_rt:
+                                return True
             except Exception:
                 pass
             # Signal 2: substring scan for known runtime-error idioms
@@ -24735,7 +24748,14 @@ class Orchestrator:
             _enrich_cooldown = max(60, min(3600, int(os.getenv("EVERMIND_ENRICHMENT_COOLDOWN_SEC", "600"))))
             _last_fail = float(getattr(type(self), "_enrichment_last_failure_ts", 0.0) or 0.0)
             _cooldown_left = _enrich_cooldown - (time.time() - _last_fail) if _last_fail else 0
-            if _cooldown_left > 0:
+            _v723a_skip_for_long_goal = len(str(goal or "")) >= 280
+            if _v723a_skip_for_long_goal:
+                logger.info(
+                    "[v7.23a] Goal enrichment skipped: raw_goal already %d chars (>=280) — saves ~8s on planning startup.",
+                    len(goal),
+                )
+                enriched_goal = goal
+            elif _cooldown_left > 0:
                 logger.info(
                     "Goal enrichment skipped — cooldown active (%.0fs left after prior timeout). Override via EVERMIND_ENRICHMENT_COOLDOWN_SEC.",
                     _cooldown_left,

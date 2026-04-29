@@ -9265,12 +9265,14 @@ class AIBridge:
         try:
             import os as _os_v720b
             import re as _re_v720b
-            _root_path_v720b = _os_v720b.path.join(
+            _output_dir_v720b = (
                 _os_v720b.environ.get("EVERMIND_OUTPUT_DIR", "")
-                or _os_v720b.path.join(_os_v720b.environ.get("TMPDIR", "/tmp"), "evermind_output"),
-                "index.html",
+                or _os_v720b.path.join(_os_v720b.environ.get("TMPDIR", "/tmp"), "evermind_output")
             )
+            _root_path_v720b = _os_v720b.path.join(_output_dir_v720b, "index.html")
             _root_size_v720b = 0
+            _total_html_size_v720b = 0
+            _html_file_count_v720b = 0
             _root_quality_v720b = 0
             _has_click_start_failure = any(
                 isinstance(tr, dict) and tr.get("success") is False and "click_start" in str(tr.get("name", ""))
@@ -9284,9 +9286,20 @@ class AIBridge:
                 _root_quality_v720b += len(_re_v720b.findall(r"requestAnimationFrame", _root_html_v720b))
                 _root_quality_v720b += len(_re_v720b.findall(r"requestPointerLock|movementX|movementY", _root_html_v720b)) * 2
                 _root_quality_v720b += len(_re_v720b.findall(r"WebGLRenderer|PerspectiveCamera|Scene\(", _root_html_v720b)) * 2
+            try:
+                for _f_v720b in _os_v720b.listdir(_output_dir_v720b):
+                    if _f_v720b.endswith((".html", ".htm")) and not _f_v720b.startswith("_"):
+                        _fp_v720b = _os_v720b.path.join(_output_dir_v720b, _f_v720b)
+                        if _os_v720b.path.isfile(_fp_v720b):
+                            _total_html_size_v720b += _os_v720b.path.getsize(_fp_v720b)
+                            _html_file_count_v720b += 1
+            except Exception:
+                pass
+            _multi_page_v724a = _html_file_count_v720b >= 3 and _total_html_size_v720b >= 25_000
+            _single_page_healthy_v724a = _root_size_v720b >= 8000 and _root_quality_v720b >= 30
+            _legacy_3d_healthy_v720b = _root_size_v720b >= 30_000 and _root_quality_v720b >= 100
             if (
-                _root_size_v720b >= 30000
-                and _root_quality_v720b >= 100
+                (_legacy_3d_healthy_v720b or _multi_page_v724a or _single_page_healthy_v724a)
                 and not _has_click_start_failure
                 and not any("console error" in s.lower() for s in diagnostic_issues_v719b)
             ):
