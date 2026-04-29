@@ -5288,7 +5288,7 @@ async def get_settings():
             settings.get("node_model_preferences", {})
         ),
         "thinking_depth": str(settings.get("thinking_depth", "deep")).strip().lower(),
-        "reviewer_max_rejections": coerce_int(settings.get("reviewer_max_rejections", 1), 1, minimum=0, maximum=10),
+        "reviewer_max_rejections": coerce_int(settings.get("reviewer_max_rejections", 2), 2, minimum=0, maximum=10),
         "model_catalog": model_catalog,
         "relay_endpoints": get_relay_manager().list(),
         "relay_count": len(get_relay_manager().list()),

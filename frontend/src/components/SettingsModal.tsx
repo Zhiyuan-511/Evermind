@@ -1720,8 +1720,8 @@ export default function SettingsModal({
                                 </div>
                                 <div className="s-hint" style={{ lineHeight: 1.7 }}>
                                     {t(
-                                        'Maximum reviewer REJECT rounds before downstream tester/debugger takes over. v7.7 ships single-loop (1) only — the multi-round audit path is being rebuilt to prevent scheduler deadlocks (returning in v7.8). Setting >1 saves to disk but does not currently change behavior.',
-                                        '审查员最多可以 REJECT 触发补丁修复的次数。v7.7 仅启用单轮闭环（1）— 多轮审查正在重构以避免调度死锁，将在 v7.8 恢复。当前设置 >1 会保存到磁盘但不会改变行为。'
+                                        'How many times reviewer can REJECT and trigger patcher to rewrite + reviewer to re-audit. Each round is reviewer→patcher→reviewer. v7.10+ fully supports multi-round (deadlock-free); 0=single-pass, 2=balanced (recommended), 5=Ultra mode.',
+                                        '审查员最多 REJECT 触发补丁师重写 + 再审查的轮数。每轮 = reviewer→patcher→reviewer。v7.10+ 已支持多轮闭环（无死锁）；0=单轮、2=均衡（推荐）、5=Ultra 死磕。'
                                     )}
                                 </div>
                                 <div className="s-row" style={{ marginTop: 8 }}>
