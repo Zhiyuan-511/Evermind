@@ -16967,6 +16967,57 @@ class AIBridge:
                                 node_type=node_type,
                                 node=node,
                             )
+                    elif fn_name == "file_ops" and normalized_node_type == "patcher":
+                        # v7.32 (maintainer 2026-04-29): hard-block patcher's
+                        # `action="read"`. The patcher.yaml v6.6 already
+                        # FORBIDS reads — the file_snapshot is embedded in
+                        # the system prompt — but kimi LLMs ignored that
+                        # rule and burned 6 turns of read calls in
+                        # run_c9462fad38c7 instead of emitting edits.
+                        # Without this guard, the run failed because v7.11
+                        # blocked SOFT-PASS on reviewer-flagged runtime
+                        # errors and patcher.retries=1 was already used.
+                        # Returning a hard error on the first read forces
+                        # the LLM to switch to edit/write within 1 turn
+                        # instead of 6.
+                        parsed_args = self._safe_json_object(fn_args)
+                        action = str(parsed_args.get("action", "")).strip().lower()
+                        if action in ("read", "list", "search"):
+                            _read_path = str(parsed_args.get("path", "")).strip()
+                            result = {
+                                "success": False,
+                                "data": {},
+                                "error": (
+                                    f"BLOCKED (v7.32): patcher cannot use `file_ops {action}`. "
+                                    f"The current on-disk content for every file you might patch "
+                                    f"is already embedded in the <file_snapshot> blocks of your "
+                                    f"prompt. Find the `old_string` there directly and emit "
+                                    f"`file_ops edit` (preferred) or `file_ops write` "
+                                    f"(only for tiny new files) NEXT — do NOT call read/list/search "
+                                    f"again. Path you tried: {_read_path[-80:]}"
+                                ),
+                                "artifacts": [],
+                            }
+                            logger.warning(
+                                "[v7.32] Blocked patcher file_ops %s on %s — forcing edit/write next turn",
+                                action, _read_path[-60:],
+                            )
+                        else:
+                            if fn_name == "file_ops":
+                                self._builder_capture_prewrite_snapshot(
+                                    node=node,
+                                    input_data=input_data,
+                                    tool_action=action,
+                                    parsed_args=parsed_args,
+                                    snapshot_cache=builder_support_snapshots,
+                                )
+                            result = await self._run_plugin(
+                                fn_name,
+                                fn_args,
+                                plugins or [],
+                                node_type=node_type,
+                                node=node,
+                            )
                     else:
                         if fn_name == "file_ops":
                             self._builder_capture_prewrite_snapshot(
