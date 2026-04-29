@@ -5627,6 +5627,10 @@ class FileOpsPlugin(Plugin):
                     "path": path, "size": len(patched), "patched": True,
                     "created": creates_new_file and original == "",
                     "bytes_changed": abs(len(patched) - len(original)),
+                    # v7.30 (maintainer 2026-04-29): mark patch as a write so
+                    # _tool_result_has_write detects it (parallel to edit fix).
+                    "written": True,
+                    "bytes_written": len(patched.encode("utf-8")),
                 })
             elif action == "edit":
                 # Claude Code-style diff edit: replace old_string with new_string
@@ -5649,8 +5653,17 @@ class FileOpsPlugin(Plugin):
                     new_content = content.replace(old_string, new_string, 1)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(new_content)
+                # v7.30 (maintainer 2026-04-29): include written/bytes_written so
+                # _tool_result_has_write recognizes edits as writes. Without
+                # these fields, patcher's `file_ops edit` calls registered as
+                # 0 writes — the orchestrator counted 6 successful tool_calls
+                # as files=0 and failed the patcher round.
                 return PluginResult(success=True, data={
-                    "path": path, "replacements": count if params.get("replace_all") else 1
+                    "path": path,
+                    "replacements": count if params.get("replace_all") else 1,
+                    "written": True,
+                    "bytes_written": len(new_content.encode("utf-8")),
+                    "size": len(new_content),
                 })
             elif action == "search":
                 # Grep/glob hybrid: search file contents or find files by pattern

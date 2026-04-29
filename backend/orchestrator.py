@@ -31145,7 +31145,25 @@ class Orchestrator:
 
                     _v728b_should_softpass = False
                     try:
-                        _full_text = " ".join([str(o or "").lower() for o in (reviewer_outputs or [])])
+                        # v7.30 (maintainer 2026-04-29): bug fix — referenced
+                        # `reviewer_outputs` (plural) which is undefined in
+                        # this scope; the local var is `reviewer_output`
+                        # (singular). NameError was silently caught by the
+                        # except below, so the bypass NEVER triggered. Now
+                        # uses the correct singular and falls back to walking
+                        # plan.subtasks for prior reviewer outputs too.
+                        _rev_texts: List[str] = []
+                        if reviewer_output:
+                            _rev_texts.append(str(reviewer_output))
+                        try:
+                            for _t in (plan.subtasks or []):
+                                if _t.agent_type == "reviewer":
+                                    _t_out = str(getattr(_t, "output", "") or "").strip()
+                                    if _t_out and _t_out not in _rev_texts:
+                                        _rev_texts.append(_t_out)
+                        except Exception:
+                            pass
+                        _full_text = " ".join([t.lower() for t in _rev_texts if t])
                         _v728b_markers = [
                             "reviewer_empty_output_fallback",
                             "verify root index.html has functional",
@@ -31157,6 +31175,16 @@ class Orchestrator:
                             "add three.webglrenderer initialization",
                             "rerun reviewer",
                             "reviewer fallback verdict",
+                            # v7.30: explicit prose forms emitted by both
+                            # v7.19b (LAST-RESORT) and v7.20b (healthy SOFT-PASS)
+                            # synthesizers — guarantees the bypass fires when
+                            # the reviewer model went silent.
+                            "tool-evidence-driven",
+                            "healthy-product soft-pass",
+                            "returned no natural-language review",
+                            "reviewer model did not emit prose",
+                            "reviewer returned empty output twice",
+                            "forced no-tool synthesis pass",
                         ]
                         _is_fallback = any(m in _full_text for m in _v728b_markers)
                         if _is_fallback:
