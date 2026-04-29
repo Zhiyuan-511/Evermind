@@ -73,8 +73,15 @@ function userTemplateToDef(raw: any): TemplateDef | null {
         const d = depth[i] || 0;
         const col = cols[d] || [];
         const row = col.indexOf(i);
+        // v7.34 (maintainer 2026-04-29): strip the dedupe-suffix (`builder2` →
+        // `builder`) so the canvas-side NODE_TYPES lookup hits the real
+        // role and renders the correct icon/label. Backend node_roles.py
+        // aliases `builderN` to `builder` anyway; the suffix is only for
+        // depends_on graph keying.
+        const rawKey = String(n?.key || 'agent').toLowerCase();
+        const role = rawKey.replace(/\d+$/, '') || rawKey;
         return {
-            type: String(n?.key || 'agent').toLowerCase(),
+            type: role,
             x: 50 + d * 220,
             y: 100 + row * 130,
         };
@@ -107,136 +114,154 @@ function userTemplateToDef(raw: any): TemplateDef | null {
     };
 }
 
+// v7.34 (maintainer 2026-04-29): WORKFLOW TEMPLATE OVERHAUL.
+// Previous templates referenced node types like `screenshot`, `localshell`,
+// `gitops`, `bgremove`, `videoedit` that have NO AGENT_PRESETS entry in
+// ai_bridge.py — running them would fall through to a generic harness with
+// no real behavior. Also missing `patcher` from every pipeline despite the
+// v6.4 architecture requiring `reviewer→patcher→reviewer` for repair.
+//
+// New rules:
+//  - Only use the 14 backend-supported roles: planner / analyst / uidesign /
+//    scribe / imagegen / spritesheet / assetimport / builder / merger /
+//    polisher / reviewer / patcher / debugger / deployer / tester.
+//  - Every pipeline that includes `reviewer` ALSO includes `patcher` so the
+//    repair loop can fire (v6.4 surgical edits).
+//  - Pro/heavy templates use multiple builders + merger + polisher.
+//  - All templates start with `planner` (router is supported but optional).
 export const TEMPLATES: TemplateDef[] = [
     {
         key: 'webdev', icon: 'WEB',
-        title_en: 'Web Development', title_zh: 'Web开发',
-        desc_en: 'Full-stack web app with auto-testing and deployment.',
-        desc_zh: '全栈Web应用，含自动测试和部署。',
-        tags: ['Frontend', 'Backend', 'CI/CD'],
+        title_en: 'Web Development', title_zh: 'Web 开发',
+        desc_en: 'Modern web app with parallel builders + repair loop.',
+        desc_zh: '现代 Web 应用，双 builder 并行 + reviewer→patcher 修复闭环。',
+        tags: ['Frontend', 'Web', 'Repair Loop'],
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'reviewer', x: 510, y: 200 }, { type: 'builder', x: 740, y: 120 },
-            { type: 'builder', x: 740, y: 300 }, { type: 'debugger', x: 970, y: 200 },
-            { type: 'deployer', x: 1200, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'analyst', x: 240, y: 200 },
+            { type: 'uidesign', x: 430, y: 200 },  { type: 'builder', x: 620, y: 100 },
+            { type: 'builder', x: 620, y: 300 },   { type: 'merger', x: 810, y: 200 },
+            { type: 'polisher', x: 1000, y: 200 }, { type: 'reviewer', x: 1190, y: 200 },
+            { type: 'patcher', x: 1380, y: 200 },  { type: 'deployer', x: 1570, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [2, 4], [3, 5], [4, 5], [5, 6]],
+        edges: [[0,1],[1,2],[2,3],[2,4],[3,5],[4,5],[5,6],[6,7],[7,8],[8,9]],
     },
     {
         key: 'artpipe', icon: 'ART',
-        title_en: 'Art Asset Pipeline', title_zh: '美术管线',
-        desc_en: 'Complete game art pipeline from generation to import.',
-        desc_zh: '完整的游戏美术管线，从生成到导入。',
-        tags: ['ImageGen', 'BGRemove', 'Sprites'],
+        title_en: 'Art Asset Pipeline', title_zh: '美术资产管线',
+        desc_en: 'Image generation → spritesheet → asset import for game art.',
+        desc_zh: '游戏美术管线：图像生成 → 精灵图打包 → 资产导入。',
+        tags: ['ImageGen', 'Sprites', 'Game Art'],
         nodes: [
-            { type: 'router', x: 50, y: 160 }, { type: 'imagegen', x: 280, y: 30 },
-            { type: 'imagegen', x: 280, y: 160 }, { type: 'imagegen', x: 280, y: 290 },
-            { type: 'bgremove', x: 510, y: 160 }, { type: 'spritesheet', x: 740, y: 160 },
-            { type: 'assetimport', x: 970, y: 160 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'analyst', x: 240, y: 200 },
+            { type: 'imagegen', x: 430, y: 80 },   { type: 'imagegen', x: 430, y: 200 },
+            { type: 'imagegen', x: 430, y: 320 },  { type: 'spritesheet', x: 620, y: 200 },
+            { type: 'assetimport', x: 810, y: 200 },
         ],
-        edges: [[0, 1], [0, 2], [0, 3], [1, 4], [2, 4], [3, 4], [4, 5], [5, 6]],
+        edges: [[0,1],[1,2],[1,3],[1,4],[2,5],[3,5],[4,5],[5,6]],
     },
     {
         key: 'bugfix', icon: 'BUG',
-        title_en: 'Automated Bug Fix', title_zh: '自动修Bug',
-        desc_en: 'Auto-detect, analyze, fix, test, and commit bugs.',
-        desc_zh: '自动检测、分析、修复、测试和提交Bug。',
-        tags: ['Debug', 'Git', 'Shell'],
+        title_en: 'Bug Fix Loop', title_zh: '缺陷修复闭环',
+        desc_en: 'Analyze → patch → review → re-patch until reviewer approves.',
+        desc_zh: '分析 → 补丁 → 审查 → 再补丁，直到 reviewer 批准。',
+        tags: ['Debug', 'Patch', 'Repair Loop'],
         nodes: [
-            { type: 'screenshot', x: 50, y: 200 }, { type: 'debugger', x: 280, y: 200 },
-            { type: 'planner', x: 510, y: 200 }, { type: 'reviewer', x: 740, y: 200 },
-            { type: 'builder', x: 970, y: 200 }, { type: 'localshell', x: 1200, y: 120 },
-            { type: 'gitops', x: 1200, y: 300 }, { type: 'deployer', x: 1430, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'analyst', x: 240, y: 200 },
+            { type: 'debugger', x: 430, y: 200 },  { type: 'patcher', x: 620, y: 200 },
+            { type: 'reviewer', x: 810, y: 200 },  { type: 'deployer', x: 1000, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5], [4, 6], [5, 7], [6, 7]],
+        edges: [[0,1],[1,2],[2,3],[3,4],[4,5]],
     },
     {
-        key: 'vidprod', icon: 'VID',
-        title_en: 'Video Production', title_zh: '视频制作',
-        desc_en: 'Automated video editing workflow.',
-        desc_zh: '自动化视频编辑工作流。',
-        tags: ['Video', 'Effects'],
+        key: 'docpipe', icon: 'DOC',
+        title_en: 'Documentation Pipeline', title_zh: '文档生成管线',
+        desc_en: 'Multi-source research → merge → narrative writing.',
+        desc_zh: '多源调研合并 → 文案撰写,适合白皮书/教程/产品文档。',
+        tags: ['Docs', 'Research', 'Writing'],
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'analyst', x: 280, y: 120 },
-            { type: 'analyst', x: 280, y: 300 }, { type: 'merger', x: 510, y: 200 },
-            { type: 'scribe', x: 740, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'analyst', x: 240, y: 100 },
+            { type: 'analyst', x: 240, y: 300 },   { type: 'merger', x: 430, y: 200 },
+            { type: 'scribe', x: 620, y: 200 },    { type: 'reviewer', x: 810, y: 200 },
         ],
-        edges: [[0, 1], [0, 2], [1, 3], [2, 3], [3, 4]],
+        edges: [[0,1],[0,2],[1,3],[2,3],[3,4],[4,5]],
     },
     {
         key: 'fullstack', icon: 'PRO',
-        title_en: 'Full Stack Pro', title_zh: '全栈Pro',
-        desc_en: 'Enterprise full-stack with analysis and documentation.',
-        desc_zh: '企业级全栈项目，含分析和文档。',
-        tags: ['Frontend', 'Backend', 'Docs'],
+        title_en: 'Full Stack Pro', title_zh: '全栈 Pro',
+        desc_en: 'Heavy pipeline: analyst → ui → 2 builders → merger → polisher → review→patch→ship.',
+        desc_zh: '重型管线：分析 → UI 设计 → 双 builder → 合并 → 抛光 → 审查/补丁 → 部署。',
+        tags: ['Frontend', 'Backend', 'Premium'],
         nodes: [
-            { type: 'router', x: 50, y: 250 }, { type: 'planner', x: 240, y: 250 },
-            { type: 'reviewer', x: 430, y: 250 }, { type: 'builder', x: 620, y: 80 },
-            { type: 'builder', x: 620, y: 250 }, { type: 'debugger', x: 620, y: 420 },
-            { type: 'analyst', x: 810, y: 80 }, { type: 'scribe', x: 810, y: 420 },
-            { type: 'reviewer', x: 1000, y: 250 }, { type: 'deployer', x: 1190, y: 250 },
+            { type: 'planner', x: 50, y: 250 },    { type: 'analyst', x: 230, y: 250 },
+            { type: 'uidesign', x: 410, y: 250 },  { type: 'scribe', x: 590, y: 80 },
+            { type: 'builder', x: 590, y: 250 },   { type: 'builder', x: 590, y: 420 },
+            { type: 'merger', x: 770, y: 250 },    { type: 'polisher', x: 950, y: 250 },
+            { type: 'reviewer', x: 1130, y: 250 }, { type: 'patcher', x: 1310, y: 250 },
+            { type: 'deployer', x: 1490, y: 250 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [2, 4], [2, 5], [3, 6], [5, 7], [4, 8], [6, 8], [7, 8], [8, 9]],
+        edges: [[0,1],[1,2],[2,3],[2,4],[2,5],[4,6],[5,6],[3,7],[6,7],[7,8],[8,9],[9,10]],
     },
     // v5.8.6: three new curated starter templates tuned to Evermind's real node economics.
     // Each template is self-contained (fills canvas + runnable end-to-end).
     {
         key: 'landing', icon: 'LAND',
         title_en: 'Quick Landing Page', title_zh: '单页落地页',
-        desc_en: 'Fast single-page marketing site. Minimal pipeline for quick turnaround.',
-        desc_zh: '快速单页营销站，极简管线,适合 5-10 分钟出稿。',
+        desc_en: 'Fast single-page marketing site with repair loop.',
+        desc_zh: '快速单页营销站，含 reviewer→patcher 修复闭环。',
         tags: ['Landing', 'Marketing', 'Fast'],
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'builder', x: 510, y: 200 }, { type: 'reviewer', x: 740, y: 200 },
-            { type: 'deployer', x: 970, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'builder', x: 240, y: 200 },
+            { type: 'reviewer', x: 430, y: 200 },  { type: 'patcher', x: 620, y: 200 },
+            { type: 'deployer', x: 810, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [3, 4]],
+        edges: [[0,1],[1,2],[2,3],[3,4]],
     },
     {
         key: 'game3d', icon: '3D',
         title_en: '3D Game (Premium)', title_zh: '3D 游戏 (高质量)',
-        desc_en: 'Complete 3D game with asset pipeline + 2 parallel builders + strict QA.',
-        desc_zh: '完整 3D 游戏,含资产管线 + 2 并行构建 + 严格 QA。对标商业级产出。',
+        desc_en: 'Three.js game with asset pipeline + 2 builders + repair loop.',
+        desc_zh: 'Three.js 完整 3D 游戏,资产管线 + 双 builder + 修复闭环。',
         tags: ['3D', 'Three.js', 'Game', 'Premium'],
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 230, y: 200 },
-            { type: 'analyst', x: 410, y: 60 }, { type: 'imagegen', x: 410, y: 200 },
-            { type: 'spritesheet', x: 410, y: 340 }, { type: 'assetimport', x: 600, y: 340 },
-            { type: 'builder', x: 790, y: 100 }, { type: 'builder', x: 790, y: 300 },
-            { type: 'merger', x: 980, y: 200 }, { type: 'reviewer', x: 1170, y: 200 },
-            { type: 'debugger', x: 1360, y: 120 }, { type: 'debugger', x: 1360, y: 280 },
-            { type: 'deployer', x: 1550, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'analyst', x: 230, y: 80 },
+            { type: 'imagegen', x: 230, y: 200 },  { type: 'spritesheet', x: 230, y: 320 },
+            { type: 'assetimport', x: 410, y: 320 },
+            { type: 'builder', x: 600, y: 100 },   { type: 'builder', x: 600, y: 300 },
+            { type: 'merger', x: 790, y: 200 },    { type: 'polisher', x: 980, y: 200 },
+            { type: 'reviewer', x: 1170, y: 200 }, { type: 'patcher', x: 1360, y: 200 },
+            { type: 'debugger', x: 1550, y: 200 }, { type: 'deployer', x: 1740, y: 200 },
         ],
         edges: [
-            [0, 1], [1, 2], [1, 3], [1, 4], [3, 5], [4, 5],
-            [2, 6], [5, 6], [2, 7], [5, 7],
-            [6, 8], [7, 8], [8, 9], [9, 10], [9, 11], [10, 12], [11, 12],
+            [0,1],[0,2],[0,3],[2,4],[3,4],
+            [1,5],[4,5],[1,6],[4,6],
+            [5,7],[6,7],[7,8],[8,9],[9,10],[10,11],[11,12],
         ],
     },
     {
         key: 'dashboard', icon: 'DASH',
         title_en: 'Data Dashboard', title_zh: '数据仪表盘',
-        desc_en: 'Analytics-heavy dashboard with 3 parallel builders for widgets.',
-        desc_zh: '重数据的仪表盘,3 个并行构建者各自负责一组 widget,适合大量图表的产品。',
+        desc_en: '3 parallel widget builders + merger + polisher + repair loop.',
+        desc_zh: '3 个并行 widget builder + 合并 + 抛光 + 修复闭环,适合复杂仪表盘。',
         tags: ['Dashboard', 'Charts', 'Parallel'],
         nodes: [
-            { type: 'router', x: 50, y: 250 }, { type: 'planner', x: 240, y: 250 },
-            { type: 'analyst', x: 430, y: 250 }, { type: 'uidesign', x: 620, y: 250 },
-            { type: 'builder', x: 810, y: 80 }, { type: 'builder', x: 810, y: 250 },
-            { type: 'builder', x: 810, y: 420 }, { type: 'merger', x: 1000, y: 250 },
-            { type: 'reviewer', x: 1190, y: 250 }, { type: 'deployer', x: 1380, y: 250 },
+            { type: 'planner', x: 50, y: 250 },    { type: 'analyst', x: 230, y: 250 },
+            { type: 'uidesign', x: 410, y: 250 },
+            { type: 'builder', x: 590, y: 80 },    { type: 'builder', x: 590, y: 250 },
+            { type: 'builder', x: 590, y: 420 },
+            { type: 'merger', x: 770, y: 250 },    { type: 'polisher', x: 950, y: 250 },
+            { type: 'reviewer', x: 1130, y: 250 }, { type: 'patcher', x: 1310, y: 250 },
+            { type: 'deployer', x: 1490, y: 250 },
         ],
         edges: [
-            [0, 1], [1, 2], [2, 3], [3, 4], [3, 5], [3, 6],
-            [4, 7], [5, 7], [6, 7], [7, 8], [8, 9],
+            [0,1],[1,2],[2,3],[2,4],[2,5],
+            [3,6],[4,6],[5,6],[6,7],[7,8],[8,9],[9,10],
         ],
     },
 
-    // ─── v6.2 Quick-Start Templates (maintainer 2026-04-20) ───
-    // 8 curated goal+graph pairs. Clicking pre-fills the chat input with
-    // `goal` so the user only needs to hit "Run" after configuring their
-    // own API key. No shared-key / cost exposure for the Evermind author.
+    // ─── Quick-Start Templates ───
+    // Goal+graph pairs. Clicking pre-fills the chat input with `goal`. Every
+    // pipeline that includes `reviewer` ALSO includes `patcher` so reviewer
+    // rejections can be surgically repaired (v6.4 architecture).
     {
         key: 'qs-2d-snake', icon: '🐍', category: 'quickstart',
         title_en: '2D Snake Game', title_zh: '2D 贪吃蛇小游戏',
@@ -246,11 +271,11 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '🐍', est_duration_sec: 180,
         goal: 'Build a polished 2D Snake game in a single HTML5 page. WASD or arrow keys move the snake; eating food increases length and score; wall/self collision ends the game with a restart prompt.',
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'builder', x: 510, y: 200 }, { type: 'reviewer', x: 740, y: 200 },
-            { type: 'deployer', x: 970, y: 200 },
+            { type: 'planner', x: 50, y: 200 },   { type: 'builder', x: 240, y: 200 },
+            { type: 'reviewer', x: 430, y: 200 }, { type: 'patcher', x: 620, y: 200 },
+            { type: 'deployer', x: 810, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [3, 4]],
+        edges: [[0,1],[1,2],[2,3],[3,4]],
     },
     {
         key: 'qs-landing-saas', icon: '🚀', category: 'quickstart',
@@ -261,11 +286,12 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '🚀', est_duration_sec: 240,
         goal: "Build a modern SaaS landing page for a fictional project management tool 'Orbit'. Sections: hero with tagline and primary CTA, three-feature grid with icons, testimonials carousel, three-tier pricing, FAQ accordion, footer. Use restrained motion and a soft purple/blue palette.",
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'uidesign', x: 510, y: 200 }, { type: 'builder', x: 740, y: 200 },
-            { type: 'polisher', x: 970, y: 200 }, { type: 'reviewer', x: 1200, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'uidesign', x: 240, y: 200 },
+            { type: 'builder', x: 430, y: 200 },   { type: 'polisher', x: 620, y: 200 },
+            { type: 'reviewer', x: 810, y: 200 },  { type: 'patcher', x: 1000, y: 200 },
+            { type: 'deployer', x: 1190, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+        edges: [[0,1],[1,2],[2,3],[3,4],[4,5],[5,6]],
     },
     {
         key: 'qs-analytics-dashboard', icon: '📊', category: 'quickstart',
@@ -276,11 +302,11 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '📊', est_duration_sec: 300,
         goal: 'Build an analytics dashboard for a fictional e-commerce store. Include: sidebar nav, 4 KPI stat cards (revenue, orders, customers, AOV), a line chart using Chart.js (last 30 days), a sortable data table of recent orders, a theme toggle. Use mock data inline.',
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 240, y: 200 },
-            { type: 'analyst', x: 430, y: 200 }, { type: 'builder', x: 620, y: 200 },
-            { type: 'reviewer', x: 810, y: 200 }, { type: 'deployer', x: 1000, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'analyst', x: 240, y: 200 },
+            { type: 'builder', x: 430, y: 200 },   { type: 'reviewer', x: 620, y: 200 },
+            { type: 'patcher', x: 810, y: 200 },   { type: 'deployer', x: 1000, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+        edges: [[0,1],[1,2],[2,3],[3,4],[4,5]],
     },
     {
         key: 'qs-slides-pitch', icon: '📽️', category: 'quickstart',
@@ -291,10 +317,10 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '📽️', est_duration_sec: 240,
         goal: 'Build a 10-slide pitch deck using Reveal.js for a fictional climate-tech startup. Slides: title, problem, solution, market size, product demo placeholder, traction metrics, team, ask (funding round), contact, thank you. Arrow keys navigate, with a subtle progress bar.',
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'builder', x: 510, y: 200 }, { type: 'reviewer', x: 740, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'builder', x: 240, y: 200 },
+            { type: 'reviewer', x: 430, y: 200 },  { type: 'patcher', x: 620, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3]],
+        edges: [[0,1],[1,2],[2,3]],
     },
     {
         key: 'qs-todo-pro', icon: '✅', category: 'quickstart',
@@ -305,10 +331,10 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '✅', est_duration_sec: 150,
         goal: 'Build a to-do list web app with add/edit/complete/delete, category filters (work/personal/other), localStorage persistence, and a dark mode toggle. Use clean typography and subtle hover states.',
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'builder', x: 510, y: 200 }, { type: 'reviewer', x: 740, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'builder', x: 240, y: 200 },
+            { type: 'reviewer', x: 430, y: 200 },  { type: 'patcher', x: 620, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3]],
+        edges: [[0,1],[1,2],[2,3]],
     },
     {
         key: 'qs-particle-webgl', icon: '✨', category: 'quickstart',
@@ -319,11 +345,11 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '✨', est_duration_sec: 360,
         goal: 'Build a fullscreen WebGL particle visualization using Three.js. 2000+ particles form a slowly rotating torus. Mouse movement attracts nearby particles. Color palette: deep navy background with cyan/magenta particles. Include a small HUD with FPS counter.',
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 240, y: 200 },
-            { type: 'analyst', x: 430, y: 200 }, { type: 'builder', x: 620, y: 200 },
-            { type: 'reviewer', x: 810, y: 200 }, { type: 'debugger', x: 1000, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'analyst', x: 240, y: 200 },
+            { type: 'builder', x: 430, y: 200 },   { type: 'reviewer', x: 620, y: 200 },
+            { type: 'patcher', x: 810, y: 200 },   { type: 'debugger', x: 1000, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+        edges: [[0,1],[1,2],[2,3],[3,4],[4,5]],
     },
     {
         key: 'qs-form-contact', icon: '✉️', category: 'quickstart',
@@ -334,10 +360,10 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '✉️', est_duration_sec: 120,
         goal: 'Build a contact form with real-time field validation (name, email, message). Show inline error messages under each field. On successful submit, show a checkmark animation and clear the form. No backend call — simulate success after 1s.',
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'builder', x: 510, y: 200 }, { type: 'reviewer', x: 740, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'builder', x: 240, y: 200 },
+            { type: 'reviewer', x: 430, y: 200 },  { type: 'patcher', x: 620, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3]],
+        edges: [[0,1],[1,2],[2,3]],
     },
     {
         key: 'qs-portfolio-clone', icon: '🎨', category: 'quickstart',
@@ -348,11 +374,11 @@ export const TEMPLATES: TemplateDef[] = [
         cover_emoji: '🎨', est_duration_sec: 240,
         goal: 'Build a modern designer portfolio: bold oversized hero headline with name and tagline, scroll-triggered project grid (6 placeholder projects with hover reveal), about section with skills chips, contact strip. Use serif headlines paired with sans-serif body. Subtle parallax on hero.',
         nodes: [
-            { type: 'router', x: 50, y: 200 }, { type: 'planner', x: 280, y: 200 },
-            { type: 'uidesign', x: 510, y: 200 }, { type: 'builder', x: 740, y: 200 },
-            { type: 'polisher', x: 970, y: 200 }, { type: 'reviewer', x: 1200, y: 200 },
+            { type: 'planner', x: 50, y: 200 },    { type: 'uidesign', x: 240, y: 200 },
+            { type: 'builder', x: 430, y: 200 },   { type: 'polisher', x: 620, y: 200 },
+            { type: 'reviewer', x: 810, y: 200 },  { type: 'patcher', x: 1000, y: 200 },
         ],
-        edges: [[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]],
+        edges: [[0,1],[1,2],[2,3],[3,4],[4,5]],
     },
 ];
 
@@ -479,18 +505,32 @@ export default function TemplateGallery({ open, onClose, onLoadTemplate, lang, c
             { multiline: true, placeholder: lang === 'zh' ? '可选：简单描述这个模板的用途' : 'Optional: short description' },
         )) || '';
         // Convert canvas (typed nodes + index edges) → backend template (key/depends_on)
+        // v7.34 (maintainer 2026-04-29): the React Flow `type` field is ALWAYS the
+        // string `'agent'` (the component-type registered in nodeTypes={agent: AgentNode}).
+        // The real agent role (planner/builder/...) lives in `data.nodeType`.
+        // Reading `n.type` here always produced `'agent'`, so saved user
+        // templates ended up with key='agent' / 'agent2' / 'agent3' and the
+        // canvas reload showed all nodes labeled "agent". Read from
+        // `data.nodeType` (or `data.agent`) first; fall back to `n.type`
+        // only if both data fields are missing.
         const idxToKey: Record<number, string> = {};
         const usedKeys: Record<string, number> = {};
         const tplNodes = currentCanvas.nodes.map((n, i) => {
-            let k = String(n.type || 'agent').toLowerCase();
+            const role = String(
+                n.data?.nodeType
+                || n.data?.nodeKey
+                || n.data?.agent
+                || n.type
+                || 'agent'
+            ).toLowerCase();
             // De-duplicate keys (e.g. two builders → builder, builder2)
-            const ct = (usedKeys[k] || 0) + 1;
-            usedKeys[k] = ct;
-            const key = ct === 1 ? k : `${k}${ct}`;
+            const ct = (usedKeys[role] || 0) + 1;
+            usedKeys[role] = ct;
+            const key = ct === 1 ? role : `${role}${ct}`;
             idxToKey[i] = key;
             return {
                 key,
-                label: String(n.data?.label || n.type || key),
+                label: String(n.data?.label || role || key),
                 task: String(n.data?.task || ''),
                 depends_on: [] as string[],
             };
