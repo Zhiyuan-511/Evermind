@@ -6917,23 +6917,26 @@ class AIBridge:
 
     def _analyst_source_fetch_call_limit(self, node: Optional[Dict[str, Any]] = None) -> int:
         # v6.3 (maintainer 2026-04-20): independent per-tool cap for source_fetch.
-        # Observed run_85ef3b62fcd3 had analyst making 10 source_fetch rounds
-        # then hanging 200s before hard-ceiling — tutorial-search prompts
-        # naturally diverge. The prompt-side rule says "pick 3, cap at 5";
-        # this is the controller-side floor that enforces it independently
-        # of total tool_iterations. Soft cap means: next turn, remove
-        # source_fetch from the available tool set so the LLM is forced to
-        # synthesize from what it already has.
-        # v6.6 (maintainer 2026-04-23): cap raised 5→8. The v6.5 smoke analyst
-        # hit cap=5 three times in the first 15s and was forced into early
-        # synthesis with only ~14.6KB output. User wants richer detail.
-        # Raising to 8 gives the analyst enough budget to land both the
-        # canonical primary sources AND the implementation-reference raw
-        # files the builder now needs (post-v6.5 builder+source_fetch).
+        # v6.6 (maintainer 2026-04-23): cap raised 5→8.
+        # v7.27 (maintainer 2026-04-29): on retry, cap drops to 2 — observed
+        # run_1e0b49c06d01 analyst spent 18min because it hit cap=8 on the
+        # first attempt (~5min), got hard-gated for word-count, then on
+        # retry redid 8 more source_fetch (~5min) instead of just expanding
+        # the existing brief. v7.0 hard-gate prompt says "do NOT rewrite
+        # from scratch" but kimi ignores it. So enforce it controller-side:
+        # any retry past attempt 0 caps source_fetch at 2 (allows 1-2
+        # quick lookups for missing details, but not full re-research).
         value = self._read_int_env("EVERMIND_ANALYST_MAX_SOURCE_FETCH", 8, 1, 12)
+        retry_value = self._read_int_env("EVERMIND_ANALYST_RETRY_SOURCE_FETCH_CAP", 2, 0, 8)
         override = self._node_int_override(node, "source_fetch_call_limit", minimum=1, maximum=12)
         if override is not None:
             return override
+        try:
+            retry_count = int((node or {}).get("retry_count") or 0)
+        except Exception:
+            retry_count = 0
+        if retry_count >= 1:
+            return retry_value
         return value
 
     def _should_block_browser_call(
