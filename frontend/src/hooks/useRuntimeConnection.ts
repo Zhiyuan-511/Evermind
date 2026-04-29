@@ -1852,7 +1852,7 @@ export function useRuntimeConnection({
                         const languages = Array.isArray(msg.languages) ? (msg.languages as string[]) : [];
                         const humanActivity = buildReadableCurrentWork({
                             lang,
-                            nodeType: String(existingData.nodeType || 'builder'),
+                            nodeType: String(existingData.nodeType || ''),
                             status: 'running',
                             phase,
                             taskDescription: String(existingData.taskDescription || ''),
@@ -2152,7 +2152,7 @@ export function useRuntimeConnection({
                 const humanOutputSummary = outputSummary
                     ? buildReadableCurrentWork({
                         lang,
-                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        nodeType: String(existingData.nodeType || payload.nodeKey || ''),
                         status,
                         phase: phaseValue,
                         taskDescription: String(payload.inputSummary || existingData.taskDescription || ''),
@@ -2239,7 +2239,7 @@ export function useRuntimeConnection({
                 }
                 if (outputSummary) {
                     const outputDescriptor = describeNodeActivity(outputSummary, lang, {
-                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        nodeType: String(existingData.nodeType || payload.nodeKey || ''),
                         status,
                     });
                     if (outputDescriptor && !outputDescriptor.lowSignal) {
@@ -2355,7 +2355,7 @@ export function useRuntimeConnection({
                 if (partialOutput) {
                     update.outputSummary = buildReadableCurrentWork({
                         lang,
-                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        nodeType: String(existingData.nodeType || payload.nodeKey || ''),
                         status: String(existingData.status || 'running'),
                         phase: phase || String(existingData.phase || ''),
                         taskDescription: String(existingData.taskDescription || ''),
@@ -2410,7 +2410,7 @@ export function useRuntimeConnection({
                 }
                 if (partialOutput) {
                     const partialDescriptor = describeNodeActivity(partialOutput, lang, {
-                        nodeType: String(existingData.nodeType || payload.nodeKey || 'builder'),
+                        nodeType: String(existingData.nodeType || payload.nodeKey || ''),
                         status: String(existingData.status || 'running'),
                     });
                     if (partialDescriptor && !partialDescriptor.lowSignal) {
