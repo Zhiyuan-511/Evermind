@@ -30069,9 +30069,23 @@ class Orchestrator:
                             _sr_apply_summary = apply_search_replace(
                                 str(OUTPUT_DIR), _blocks, on_miss="log"
                             ) or {}
-                            _sr_applied_files = list(
-                                _sr_apply_summary.get("files_patched") or []
-                            )
+                            # v7.33 (maintainer 2026-04-29): bug fix — apply_search_replace
+                            # returns the patched-files map under key "files" (a dict
+                            # of {path: replacement_count}), NOT "files_patched". The
+                            # orchestrator was reading the wrong key, so even when the
+                            # parser successfully wrote to disk, _sr_applied_files
+                            # stayed empty and patcher reported files=0. Observed in
+                            # run_0fa7db140bf4 where the log read
+                            # "applied=1 missed=0 files=0" — the "applied=1" proved
+                            # the SEARCH/REPLACE block was applied to disk, but
+                            # files=0 then triggered SOFT-PASS-BLOCKED → run failed.
+                            _sr_files_dict = _sr_apply_summary.get("files") or {}
+                            if isinstance(_sr_files_dict, dict):
+                                _sr_applied_files = list(_sr_files_dict.keys())
+                            else:
+                                _sr_applied_files = list(
+                                    _sr_apply_summary.get("files_patched") or []
+                                )
                             logger.info(
                                 "[v7.1i] Patcher SEARCH/REPLACE applied: blocks=%d "
                                 "applied=%d missed=%d files=%d",
