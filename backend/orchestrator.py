@@ -31206,30 +31206,38 @@ class Orchestrator:
                     eligible_asset_tasks: List[SubTask] = []
                     eligible_polishers_for_patch: List[SubTask] = []
                     max_rejections = self._configured_max_reviewer_rejections()
-                    # v7.36 (maintainer 2026-04-29): align patcher.max_retries with
-                    # the user-configured `reviewer_max_rejections`. Previously
-                    # patcher.max_retries was hard-pinned at 1, so even when
-                    # the user set `reviewer_max_rejections=3`, the patcher
-                    # subtask's eligibility check (`retries < max_retries`)
-                    # caused `eligible_patchers_for_udiff` to be empty after
-                    # one round and the loop fell through to the
-                    # "builder retries exhausted" silent-ship path. The two
-                    # caps must agree: max_rejections is the user-visible
-                    # reviewer-loop budget, and patcher.max_retries is the
-                    # internal counter that gates eligibility for each round.
-                    # Bump patcher.max_retries to at least max_rejections so
-                    # the loop honors the user's setting end-to-end.
-                    for _pt in (plan.subtasks or []):
-                        if _pt.agent_type == "patcher" and _pt.max_retries < max_rejections:
-                            try:
-                                _pt.max_retries = max_rejections
-                            except Exception:
-                                pass
+                    # v7.38 (maintainer 2026-04-29) — REPLACES v7.36 max_retries bump.
+                    # The previous v7.36 fix bumped patcher.max_retries to
+                    # max_rejections so eligibility (retries < max_retries)
+                    # would pass after a fail. But this allowed orchestrator's
+                    # GENERIC retry loop (line ~33755) to re-execute patcher
+                    # 3× with the SAME prompt and SAME reviewer feedback —
+                    # observed in run_0b55b8bd93f4 where patcher attempt 1, 2
+                    # all produced 0 edits because input never changed.
+                    #
+                    # Correct semantics: each reviewer rejection round = ONE
+                    # fresh patcher attempt. Orchestrator self-retry of patcher
+                    # is futile (same input → same output). Force fresh input
+                    # by RESETTING `patcher.retries=0` here (in the reviewer
+                    # post-exec requeue path) so the next reviewer round
+                    # gives the patcher a clean slot. Orchestrator's standard
+                    # max_retries cap stays at 1 → patcher fails fast within a
+                    # round, falls to the post-patcher v7.10/v7.31 logic, which
+                    # resets reviewer for round N+1 (within max_rejections=3
+                    # budget). Net result: up to 3 (reviewer→patcher) cycles,
+                    # each cycle has fresh reviewer audit + 1 fresh patcher
+                    # attempt.
                     eligible_patchers_for_udiff = [
                         st for st in plan.subtasks
                         if st.agent_type == "patcher"
-                        and st.retries < st.max_retries
                     ]
+                    for _pt in eligible_patchers_for_udiff:
+                        try:
+                            _pt.retries = 0
+                            if _pt.max_retries < 1:
+                                _pt.max_retries = 1
+                        except Exception:
+                            pass
 
                     _v728b_should_softpass = False
                     try:
@@ -33602,6 +33610,139 @@ class Orchestrator:
                 "restored_files": restored_files[:12] if restored_files else [],
             })
             return True
+        # v7.38 (maintainer 2026-04-29): patcher 0-edit fail → bypass self-retry
+        # and trigger reviewer re-audit instead.
+        # Observed in run_0b55b8bd93f4: kimi LLM produced 0 file_ops edits.
+        # The orchestrator's generic retry loop re-ran patcher 3× with
+        # IDENTICAL prompt + identical reviewer feedback → identical empty
+        # result every time. v7.36 inadvertently amplified this by bumping
+        # max_retries=3.
+        #
+        # Correct flow per maintainer's design intent: each reviewer rejection
+        # round = ONE fresh patcher attempt with NEW reviewer audit/
+        # blocking_issues. Same input → same output retry is futile.
+        # Here we:
+        #   1. Skip orchestrator self-retry (same input is useless).
+        #   2. Reset the pending reviewer subtask + transitive downstream
+        #      to PENDING — same v7.10 multi-round path that fires after a
+        #      successful patcher edit. Reviewer round N+1 reaudits with a
+        #      fresh browser session and produces (hopefully) more specific
+        #      blocking_issues, giving patcher round N+1 fresh input.
+        #   3. Reset all patcher subtasks' retries=0 so they're eligible
+        #      again for the next round.
+        #   4. Cap the total cycles via `_reviewer_requeues < max_rejections`
+        #      (user setting honored end-to-end).
+        retry_error_lower_v738 = (str(retry_error or "").lower())
+        if subtask.agent_type == "patcher" and (
+            "produced no file_ops edits" in retry_error_lower_v738
+            or "patcher applied no valid hunks" in retry_error_lower_v738
+        ):
+            _v738_pending = getattr(self, "_pending_reviewer_requeue_id", None)
+            _v738_max_rej = self._configured_max_reviewer_rejections()
+            _v738_used = int(getattr(self, "_reviewer_requeues", 0) or 0)
+            _v738_budget_left = _v738_used < _v738_max_rej and bool(_v738_pending)
+            if _v738_budget_left:
+                # `plan` is the function parameter — re-engage reviewer +
+                # invalidate downstream so they wait for the new reviewer
+                # verdict.
+                if plan is not None and _v738_pending:
+                    try:
+                        _reset_ids = [_v738_pending]
+                        _ds = self._collect_transitive_downstream_ids(plan, [_v738_pending])
+                        _reset_ids.extend([d for d in _ds if d != subtask.id])
+                        _reset_ids = list(dict.fromkeys(_reset_ids))
+                        # Discard from scheduler-completed sets so reviewer
+                        # can dispatch again (same fix as v7.10 path).
+                        for _rid in _reset_ids:
+                            if hasattr(self, "_sched_completed"):
+                                self._sched_completed.discard(_rid)
+                            if hasattr(self, "_sched_succeeded"):
+                                self._sched_succeeded.discard(_rid)
+                            if hasattr(self, "_sched_failed"):
+                                self._sched_failed.discard(_rid)
+                        for _rid in _reset_ids:
+                            target = next((t for t in plan.subtasks if t.id == _rid), None)
+                            if not target:
+                                continue
+                            target.status = TaskStatus.PENDING
+                            target.output = ""
+                            target.completed_at = 0
+                            target.error = ""
+                            try:
+                                _phase = "requeued_for_reaudit" if target.agent_type == "reviewer" else "awaiting_reaudit"
+                                await self._sync_ne_status(
+                                    target.id, "queued",
+                                    progress=0, phase=_phase,
+                                    reset_started_at=True, error_message="", output_summary="",
+                                )
+                            except Exception:
+                                pass
+                        # Reset ALL patcher subtasks too (this one + any peers)
+                        # so they become eligible for the next round.
+                        for st in plan.subtasks:
+                            if st.agent_type == "patcher":
+                                st.retries = 0
+                                if st.max_retries < 1:
+                                    st.max_retries = 1
+                                st.status = TaskStatus.PENDING
+                                st.error = ""
+                                st.output = ""
+                                st.completed_at = 0
+                        # Clear stored results for re-run.
+                        if hasattr(self, "_run_results"):
+                            for _rid in _reset_ids:
+                                try:
+                                    self._run_results.pop(_rid, None)
+                                except Exception:
+                                    pass
+                        self._reviewer_requeues = _v738_used + 1
+                        logger.warning(
+                            "[v7.38] Patcher 0-edit fail — triggered reviewer re-audit "
+                            "(round %d/%d). Reviewer + downstream reset; patcher.retries=0.",
+                            self._reviewer_requeues, _v738_max_rej,
+                        )
+                        self._append_ne_activity(
+                            subtask.id,
+                            f"[v7.38] Patcher 本轮 0 改动，触发 reviewer 第 {self._reviewer_requeues}/{_v738_max_rej} 轮重审（用浏览器重新审），"
+                            f"下一轮 patcher 会拿到新的 blocking_issues。",
+                            entry_type="warn",
+                        )
+                        await self.emit("subtask_progress", {
+                            "subtask_id": subtask.id,
+                            "stage": "patcher_zero_edit_reaudit_triggered",
+                            "message": f"Reviewer 第 {self._reviewer_requeues}/{_v738_max_rej} 轮重审已触发",
+                            "round": self._reviewer_requeues,
+                            "max_rejections": _v738_max_rej,
+                            "requeue_subtasks": _reset_ids,
+                        })
+                        # Mark this patcher as completed (soft) so scheduler
+                        # doesn't treat it as a hard failure that blocks the
+                        # whole run; the reviewer reaudit owns the next decision.
+                        subtask.status = TaskStatus.COMPLETED
+                        subtask.error = ""
+                        subtask.output = (
+                            "PATCHER_NO_EDIT_REAUDIT (v7.38): produced 0 edits this round; "
+                            "triggered reviewer re-audit with fresh browser session for next round."
+                        )
+                        return True
+                    except Exception as _v738_err:
+                        logger.warning(
+                            "[v7.38] reviewer re-audit trigger failed (%s) — "
+                            "falling back to plain failure.", _v738_err
+                        )
+            # Budget exhausted OR re-audit setup failed — bubble up as failure.
+            logger.warning(
+                "[v7.38] Patcher 0-edit failure with no remaining reviewer budget "
+                "(%d/%d used) — failing patcher cleanly.",
+                _v738_used, _v738_max_rej,
+            )
+            self._append_ne_activity(
+                subtask.id,
+                f"[v7.38] Patcher 0 改动且 reviewer 重审预算已耗尽（{_v738_used}/{_v738_max_rej}），干净失败。",
+                entry_type="warn",
+            )
+            subtask.status = TaskStatus.FAILED
+            return False
         if subtask.retries >= subtask.max_retries:
             logger.warning(f"Subtask {subtask.id} exceeded max retries ({subtask.max_retries})")
             subtask.status = TaskStatus.FAILED
