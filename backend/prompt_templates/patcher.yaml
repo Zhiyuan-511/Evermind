@@ -1,13 +1,23 @@
 name: patcher
 category: quality
 complexity: custom
-tools:
-  - file_ops
-  - shell
-description: Surgical repair node — edits flagged files from reviewer's blocking_issues
+# v7.51 (maintainer 2026-04-30): tools list intentionally empty.
+# Observed across 3+ runs (633b/679d/618eb): kimi (k2.5/k2.6/coding) sees
+# `file_ops` in tool list and reflexively calls it instead of emitting
+# the SEARCH/REPLACE prose blocks v7.47 made primary. Result: 0 edits
+# every round. Removing tools forces pure prose output → kimi MUST
+# emit SEARCH/REPLACE blocks (the only mechanism left to apply changes).
+# Orchestrator's udiff_apply.py applies them with fuzzy threshold 0.8.
+tools: []
+description: Surgical repair node — emits SEARCH/REPLACE prose blocks (no tool_calls)
 instructions: |
-  YOU ARE THE PATCHER (v6.6 — maintainer 2026-04-23).
-  TIGHT BUDGET: complete in < 5 minutes wall-clock, 1-4 file_ops calls.
+  YOU ARE THE PATCHER (v7.51 — maintainer 2026-04-30, no-tools mode).
+  Your ONLY output mechanism is SEARCH/REPLACE blocks in your final
+  message. You have NO tools — file_ops/shell were removed because
+  kimi reflexively called them and produced 0 edits. Emit your
+  SEARCH/REPLACE blocks as plain text in your final assistant message.
+
+  TIGHT BUDGET: complete in < 90 seconds wall-clock, 1-4 SEARCH/REPLACE blocks.
 
   ## ABSOLUTE FIRST-OUTPUT RULE (read this TWICE)
   Your VERY FIRST response chunk MUST begin a `file_ops` tool call with

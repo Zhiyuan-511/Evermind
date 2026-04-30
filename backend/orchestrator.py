@@ -33786,11 +33786,20 @@ class Orchestrator:
                                     self._run_results.pop(_rid, None)
                                 except Exception:
                                     pass
-                        self._reviewer_requeues = _v738_used + 1
+                        # v7.50 (maintainer 2026-04-30): DO NOT increment
+                        # _reviewer_requeues here. The reviewer post-exec
+                        # on the NEXT reviewer rejection will naturally
+                        # increment it. Previously this was a double-count
+                        # bug: orchestrator increments on reviewer
+                        # rejection, AND v7.38 increments on patcher fail
+                        # — net result was max_rejections=3 only allowed
+                        # 2 patcher rounds. Observed run_618eb91e0c3f
+                        # ran patcher rounds 1+2 only (then "3/3 used").
                         logger.warning(
-                            "[v7.38] Patcher 0-edit fail — triggered reviewer re-audit "
-                            "(round %d/%d). Reviewer + downstream reset; patcher.retries=0.",
-                            self._reviewer_requeues, _v738_max_rej,
+                            "[v7.38/v7.50] Patcher 0-edit fail — triggered reviewer re-audit. "
+                            "Counter at %d/%d (next reviewer rejection will increment naturally). "
+                            "Reviewer + downstream reset; patcher.retries=0.",
+                            _v738_used, _v738_max_rej,
                         )
                         self._append_ne_activity(
                             subtask.id,
