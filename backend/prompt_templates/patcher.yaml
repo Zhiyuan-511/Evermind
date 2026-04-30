@@ -76,33 +76,53 @@ instructions: |
   prepend `./`, never synthesize a new path. The `<file_snapshot>` path
   IS the correct path.
 
-  ## EXECUTION PATTERN (the only valid pattern)
-  For each `blocking_issue` with `severity=blocker`:
-  1. Locate the `current` or `anchor` text inside the matching snapshot.
-  2. Emit ONE `file_ops` `action="edit"` tool call with:
-     - `path`: the absolute path (copied from `<file_snapshot>`).
-     - `old_string`: verbatim snippet from snapshot, ≤ 40 lines, ≤ 2000
-       chars, with enough surrounding context to be unique in the file.
-     - `new_string`: the minimally-modified version that applies
-       `suggested_fix` (follow it closely; deviate only with clear reason).
-  3. Repeat for the next blocker.
-  4. STOP after the last blocker. Optionally emit ONE ≤ 200-word summary
-     paragraph AFTER all tool_calls.
+  ## EXECUTION PATTERN (v7.47 — SEARCH/REPLACE PRIMARY)
+  v7.47 (maintainer 2026-04-30) reorder: in production we observed kimi
+  patchers fail 0/3 rounds with `file_ops edit` because old_string
+  comparison is byte-exact and any single-char drift (whitespace, quote
+  style, line ending) zeroes the match. SEARCH/REPLACE blocks parsed by
+  the orchestrator have **fuzzy-match threshold 0.8** (difflib SequenceMatcher),
+  so they tolerate trivial drift. Make this the PRIMARY format.
 
-  ## FALLBACK FOR HARD MATCHES
-  If `old_string` fails to match after ONE exact try, emit a SEARCH/REPLACE
-  block instead of retrying the same edit:
+  ### PRIMARY: SEARCH/REPLACE blocks (use these by default)
+  For each `blocking_issue` with `severity=blocker`, emit ONE block per fix:
   ```
   FILE: /tmp/evermind_output/<filename>
   <<<<<<< SEARCH
-  {verbatim ≤ 40 lines from snapshot}
+  {verbatim ≤ 40 lines from <file_snapshot> — copy EXACTLY as shown}
   =======
-  {replacement snippet}
+  {your minimally-modified replacement snippet}
   >>>>>>> REPLACE
   ```
-  The orchestrator applies these with a deterministic fuzzy-match script
-  (threshold 0.8). Do NOT retry the same failing `file_ops edit` twice —
-  loop-guard trips at 3 identical calls.
+  Rules for SEARCH/REPLACE:
+  - Use the `FILE:` line with the absolute path from `<file_snapshot path=...>`.
+  - SEARCH block: ≤ 40 lines, ≤ 2000 chars, COPY VERBATIM from snapshot
+    (no paraphrasing, no comment additions, no whitespace normalization).
+  - REPLACE block: minimally-modified version applying `suggested_fix`.
+    Same indentation style as SEARCH; same quote style; same trailing
+    newline behavior. Net char delta should typically be < ±20%.
+  - One block per blocker. Multiple blocks are emitted sequentially in
+    your final assistant message — not in tool calls.
+  - After all blocks, optionally emit ONE ≤ 200-word summary in prose.
+
+  ### SECONDARY: file_ops edit (use only when SEARCH/REPLACE is awkward)
+  For an extremely small surgical change (e.g. one attribute on one element)
+  where SEARCH/REPLACE block ceremony feels heavy, you MAY use:
+  ```
+  file_ops {
+    "action": "edit",
+    "path": "/tmp/evermind_output/<filename>",  // ABSOLUTE path from snapshot
+    "old_string": "...byte-exact from snapshot...",
+    "new_string": "...minimally modified..."
+  }
+  ```
+  ⚠ `old_string` MUST match byte-for-byte. Any drift = 0 edit. If you've
+  ever had a SEARCH/REPLACE block fail in a prior round, default to
+  SEARCH/REPLACE (they fuzzy-match) rather than file_ops edit.
+
+  ### DO NOT mix the two formats in one response.
+  Pick SEARCH/REPLACE OR file_ops for the round. SEARCH/REPLACE is
+  preferred 95% of the time.
 
   ## FORBIDDEN
   - `file_ops` with `action="read"`. The snapshot is already in your message.

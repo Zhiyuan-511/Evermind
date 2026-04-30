@@ -4554,6 +4554,43 @@ class AIBridge:
                 )
             # else: fall through to legacy default below
 
+        # v7.47 (maintainer 2026-04-30): patcher fast-path. Patcher's job is
+        # surgical SEARCH/REPLACE blocks — it does NOT need code-tier
+        # reasoning. In run_33b2b6d194e3 patcher ran 3 rounds × 0 edits
+        # because kimi-k2.6-code-preview emitted bytewise-incorrect
+        # old_string anchors and got long content_chars=0 streams that
+        # truncated. A non-thinking model (kimi-k2.5 / minimax-highspeed)
+        # tends to produce more deterministic SEARCH/REPLACE blocks
+        # because the v7.47 patcher.yaml now puts SEARCH/REPLACE PRIMARY
+        # and SEARCH/REPLACE has fuzzy-match (threshold 0.8) so byte
+        # drift is tolerated — fast model doesn't need to be precision-
+        # tier. Same fast-path activation rule as router.
+        if (
+            node_type == "patcher"
+            and not bool(explicit_chain)
+            and (
+                not configured_chain
+                or str(configured_chain[0] or "").strip().lower() in _slow_models
+            )
+        ):
+            patcher_fast_chain_raw = self._normalize_model_chain([
+                "kimi-k2.5",
+                "minimax-m2.7-highspeed",
+                "deepseek-v3.2",
+                "deepseek-v3",
+            ])
+            patcher_fast_chain = [
+                m for m in patcher_fast_chain_raw
+                if self._model_provider_has_key(m)
+            ]
+            if patcher_fast_chain:
+                _legacy_tail = [m for m in (configured_chain or []) if m not in patcher_fast_chain]
+                configured_chain = patcher_fast_chain + _legacy_tail
+                logger.info(
+                    "[v7.47] patcher fast-path activated (avoid code-thinking model for surgical edits): %s",
+                    patcher_fast_chain,
+                )
+
         candidates: List[str] = []
         seen: set[str] = set()
 
