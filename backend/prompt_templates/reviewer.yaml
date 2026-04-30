@@ -675,28 +675,111 @@ instructions: |
   </universal_checks>
 
   <static_site_checks>
-  v6.1.14h (maintainer 2026-04-20): adaptive checks by page count. Counting
-  logic: number of distinct `<a href="...">` that point to local `.html`
-  targets (not `#`, not external, not anchor-only like `#section`). If 1
-  HTML file + no cross-file nav = SINGLE PAGE; skip S1/S2 probes.
+  v7.36+ (maintainer 2026-04-29): Mandatory granular visual & asset audit.
+  Reviewer feedback so far has been too coarse ("animation 4/10") which
+  forced patcher to guess what to fix and often made things worse. Each
+  check below MUST produce specific blocking_issues with element selector,
+  approximate coordinates, and a concrete suggested_fix.
 
-  SINGLE PAGE MODE (1 html file only):
-  - Skip S1, S2 (no nav to click, no extra images expected).
-  - Focus on S3 content substance, S4 typography, S5 color, S6 copy depth.
-  - P-S1 / P-S2 probes are AUTOMATICALLY SATISFIED — no probe needed.
+  Counting: number of distinct `<a href="...">` to local `.html` (not `#`,
+  not external, not anchor-only). 1 HTML + no cross-file nav = SINGLE PAGE.
 
-  MULTI-PAGE MODE (≥ 2 html files with working cross-nav):
-  S1. Every nav link resolves to an existing local route — ALSO probed by
-      P-S1 (click each). `href="#"` or dead targets = blocking_issue.
-  S2. Images / icons render (no broken img). Prefer inline SVG. Verify via
-      P-S5 bounding-box check.
+  SINGLE PAGE MODE: skip S1/S2 link/route probes. Run S3-S11 in full.
 
-  BOTH MODES:
-  S3. Hero → features → CTA → footer flow; no zone below 80px height.
-  S4. Typography hierarchy clear (h1 > h2 > h3, line-height ≥ 1.4).
-  S5. Color palette coherent (≤ 5 distinct swatches, contrast ≥ 4.5:1).
-  S6. Content substance (P-S3): ≥ 3 sections of real copy on deepest route.
-      Lorem / TODO / placeholder = blocking_issue.
+  MULTI-PAGE MODE: run S1, S2 first then S3-S11 on each route.
+
+  S1. NAV LINKS — every `<a href>` to local route resolves; click each via
+      P-S1. Dead `href="#"` / wrong path / 404 = blocking_issue with the
+      anchor `<a class="X" href="...">` quoted verbatim.
+
+  S2. IMAGE / MEDIA RENDERING — for every `<img>`, `<video>`, `<source>`,
+      and CSS `background-image: url(...)`:
+        a. Open the network tab via `browser observe` — list any URL with
+           response status ≠ 200 (404, 403, CORS, timeout). EVERY non-200
+           is a blocking_issue with the exact url + element selector.
+        b. Verify rendered intrinsic size > 0×0 (broken images often
+           render as 0×0 placeholder). Quote naturalWidth/naturalHeight.
+        c. Every `<img>` MUST have non-empty `alt`. Empty alt = blocker
+           with "expected: alt='descriptive text'" suggested_fix.
+        d. If the page references a CDN (cdn.jsdelivr / unpkg / cdnjs),
+           verify the resource actually loaded — failed CDN = blocker.
+        e. Inline SVG icons should have `viewBox` and visible stroke/fill;
+           empty `<svg></svg>` = blocking_issue.
+
+  S3. WHITESPACE / VISUAL DENSITY — scan the rendered page top→bottom:
+        a. NO contiguous vertical zone > 200px tall with no visible
+           content (text, image, decoration). This includes empty `<div>`
+           with only padding and no children. Quote the offending block
+           and its measured height.
+        b. NO section that contains only a title with NO body content
+           ("Pricing" heading then nothing) — quote the heading.
+        c. NO `min-height` set without content filling it (e.g. hero
+           with `min-height:80vh` but only a 40px headline → blocker).
+        d. Side margins: text body should USE the available width
+           (≥ 60% on desktop); ultra-narrow columns ≤ 30vw on a 1280px
+           viewport without intent = blocking_issue.
+
+  S4. TYPOGRAPHY — measure with browser:
+        a. h1 ≥ 32px desktop / line-height 1.0–1.3.
+        b. h2 ≥ 24px / h3 ≥ 18px / body 14–18px / line-height 1.4–1.7.
+        c. Hierarchy not collapsed (h1 == h2 size = blocker).
+        d. NO web font that failed to load (FOUT/system fallback when a
+           custom font was specified) — check `document.fonts.status`.
+        e. Long-line readability: paragraph width ≤ 75ch.
+
+  S5. COLOR PALETTE — extract distinct swatches via `extract`:
+        a. ≤ 6 distinct hue families on a single page.
+        b. Text/bg contrast ≥ 4.5:1 (3:1 for ≥ 24px text). Cite each
+           failure as blocker with the (foreground hex, background hex,
+           ratio) tuple.
+        c. NO accidental near-black-on-black or near-white-on-white.
+
+  S6. CONTENT SUBSTANCE — drive scrolling and snapshot:
+        a. At LEAST 3 substantive sections per primary route (hero,
+           features/value-prop, CTA/conversion, footer minimum).
+        b. NO "Lorem ipsum", "TODO", "Placeholder", "Coming soon",
+           "Click here", "Sample text", "[Your X]" anywhere in body.
+        c. Headlines are real claims, not "Welcome to our website".
+
+  S7. INTERACTIVE STATES — for each clickable element:
+        a. `:hover` / `:focus` visible affordance (color shift, ring,
+           underline). Static buttons with NO hover = blocker for ≥ 3
+           occurrences.
+        b. Forms have inline validation, not silent failure on submit.
+        c. CTA buttons have visible primary styling distinct from
+           secondary/tertiary.
+
+  S8. RESPONSIVE — emulate 375×667 (iPhone) AND 768×1024 (iPad):
+        a. NO horizontal scroll at 375px width.
+        b. Text not cut off / images not overflowing.
+        c. Navigation collapses to hamburger or mobile pattern below
+           768px.
+
+  S9. SCRIPT / CSS LOAD HEALTH — per page:
+        a. List `failed_loads` from preflight; ANY non-favicon failure
+           is a blocker with the exact URL.
+        b. Every inline `<script>` parses without SyntaxError; check
+           `console.errors` after navigation.
+        c. Every `getElementById('X')` reference in JS has matching
+           `id="X"` in HTML (cross-file ID/class consistency).
+
+  S10. ANIMATION / MOTION — for sites that promised motion:
+        a. ≥ 1 scroll-triggered or hover-triggered transition per route.
+        b. Animations don't break layout (no jank, no element shifting
+           after animation).
+        c. `prefers-reduced-motion` respected (if specified in goal).
+
+  S11. ACCESSIBILITY — quick a11y pass:
+        a. Skip-to-content link or `<main>` landmark on each page.
+        b. Form fields have associated `<label>`.
+        c. Icon-only buttons have `aria-label`.
+        d. NO color-only state encoding (red/green difference also
+           uses icon or text).
+
+  Output discipline: cite EXACT element (selector, approx coordinates,
+  measured value) for each blocker. patcher needs to find the spot to
+  edit — vague "improve typography" is useless and will be rejected by
+  the patcher's validator.
   </static_site_checks>
 
   <web_app_checks>
