@@ -13852,6 +13852,51 @@ class AIBridge:
             )
             or auto_builder_direct_multifile
         )
+        # v7.45 (maintainer 2026-04-29): peer-builder symmetry guarantee.
+        # Observed in run_284a84a171c8 (保卫萝卜 game): builder1 took 7:38,
+        # builder2 took 14+ min before user cancelled. Reason: orchestrator
+        # set `builder_delivery_mode=direct_multifile` only for builder1; the
+        # peer (builder2) fell to `auto_direct=True` (tool_calls path) which
+        # streams HTML through JSON-escaped tool_call args at 50% the
+        # throughput of direct_multifile. Both peers in a merger topology
+        # write the same shape (one HTML shell each); they MUST take the
+        # same path or peer parallelism becomes meaningless.
+        #
+        # Defense: if this is clearly a parallel peer builder (not merger,
+        # not support_lane, not retry_patch_context, kill-switch off), and
+        # the orchestrator failed to flag it as direct_multifile, force the
+        # mode here. The orchestrator's gate is correct in principle but
+        # has subtle peer-vs-primary asymmetry per-subtask that we keep
+        # patching from this layer.
+        if (
+            not force_builder_direct_multifile
+            and normalized_node_type == "builder"
+            and isinstance(node, dict)
+            and not bool(node.get("builder_is_support_lane_node"))
+            and not bool(node.get("builder_merger_like"))
+            and not bool(node.get("single_builder_mode"))
+            and not builder_retry_patch_context
+            and not getattr(self, "_builder_direct_multifile_disabled", False)
+        ):
+            try:
+                _v745_is_game = task_classifier.classify(builder_goal_hint or "").task_type == "game"
+            except Exception:
+                _v745_is_game = False
+            try:
+                _v745_supports_stream = not bool(re.match(
+                    r"^(?:openai/|zhipu/)?glm-5(?:\.\d+)?\b",
+                    str(model_name or "").strip().lower(),
+                ))
+            except Exception:
+                _v745_supports_stream = True
+            if _v745_is_game and _v745_supports_stream:
+                force_builder_direct_multifile = True
+                logger.info(
+                    "[v7.45] peer-builder symmetry: forcing direct_multifile=True "
+                    "(node_key=%s model=%s) — orchestrator gate missed this peer.",
+                    str(node.get("node_key") or node.get("key") or "?"),
+                    model_name,
+                )
         # v6.1.11 (maintainer 2026-04-19): retry_patch_context used to kill
         # direct_multifile unconditionally. But for peer builders (can_root
         # =False) in multi-builder game runs, dropping back to tool_call
