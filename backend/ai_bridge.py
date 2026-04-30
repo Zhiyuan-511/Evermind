@@ -4504,29 +4504,53 @@ class AIBridge:
         # orchestrator auto-fills prefs with `kimi-k2.6-code-preview` even
         # when user's settings.json has `router: []`. New rule: PREPEND
         # fast models unless user explicitly set a non-thinking chain.
-        if node_type == "router" and not explicit_chain and not configured_chain:
-            # v6.2 (maintainer 2026-04-20 hotfix): Only activate fast-router override
-            # when the user has set NEITHER per-node (explicit_chain) nor
-            # Settings-level (configured_chain) router preference. Previous
-            # behaviour wasted 120s×2 per unreachable model on Kimi-only
-            # setups because it prepended minimax/deepseek (no keys) and
-            # kimi-k2.5 (wrong for coding plan) ahead of the user's explicit
-            # choice. User's settings are now authoritative.
+        # v7.44 (maintainer 2026-04-29): also activate fast-path even when the
+        # user has a `default_model` set, IF that default is a slow/code/
+        # thinking model and they have NOT explicitly configured the
+        # router slot. Observed in run_284a84a171c8: user's default was
+        # kimi-coding → router took 103s producing 11KB of trivial node
+        # descriptions; a faster non-thinking model can do the same in
+        # ~10-15s. Router doesn't need code-tier reasoning — it's a
+        # structural enumerator.
+        _explicit_router_pref = bool(explicit_chain)  # per-node-role pref
+        _slow_models = {
+            "kimi-k2.6-code-preview", "kimi-k2.6-code", "kimi-coding",
+            "kimi-k2.5-code", "kimi-thinking",
+            "claude-4-opus", "claude-3-opus",
+            "gpt-5.4", "gpt-5.4-thinking", "gpt-5.3-codex",
+            "deepseek-r1", "deepseek-thinking",
+            "qwen3-thinking", "qwen3-max-thinking",
+        }
+        _configured_first_is_slow = bool(
+            configured_chain
+            and str(configured_chain[0] or "").strip().lower() in _slow_models
+        )
+        _should_fast_path = (
+            node_type == "router"
+            and not _explicit_router_pref
+            and (not configured_chain or _configured_first_is_slow)
+        )
+        if _should_fast_path:
             _fast_thinkfree = {"kimi-k2.5", "minimax-m2.7-highspeed", "deepseek-v3", "deepseek-v3.2", "qwen3-max", "doubao-seed-2.0-pro"}
             fast_router_chain_raw = self._normalize_model_chain([
                 "kimi-k2.5",
                 "minimax-m2.7-highspeed",
                 "deepseek-v3",
+                "deepseek-v3.2",
             ])
             fast_router_chain = [
                 m for m in fast_router_chain_raw
                 if self._model_provider_has_key(m)
             ]
             if fast_router_chain:
-                configured_chain = fast_router_chain[:]
+                # Keep the user's explicit choice as final fallback so a
+                # broken fast model doesn't strand the router.
+                _legacy_tail = [m for m in (configured_chain or []) if m not in fast_router_chain]
+                configured_chain = fast_router_chain + _legacy_tail
                 logger.info(
-                    "router fast-path activated (user did not set preference): chain=%s",
-                    configured_chain,
+                    "[v7.44] router fast-path activated (default was %s, swapped for fast chain): %s",
+                    (str(configured_chain[len(fast_router_chain)] if _legacy_tail else "<empty>")),
+                    fast_router_chain,
                 )
             # else: fall through to legacy default below
 
