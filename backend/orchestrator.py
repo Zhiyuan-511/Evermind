@@ -130,13 +130,28 @@ CANONICAL_NODE_KEY_TO_AGENT: Dict[str, str] = {
     "builder": "builder",
     "builder1": "builder",
     "builder2": "builder",
-    "merger": "builder",
+    # v7.40 (maintainer 2026-04-29): merger has its OWN agent_preset in
+    # ai_bridge.py (not a builder variant). Mapping to "builder" was wrong
+    # — it caused custom canvas runs to spawn a misnamed subtask
+    # (`agent=builder node=merger`) that took the builder code path
+    # instead of the merger code path. Observed in run_f9325af53fbf where
+    # the merger subtask started at 21:42:02 and the run failed within 2
+    # seconds because builder code asserted on merger-only state.
+    "merger": "merger",
     "builder_structure": "builder",
     "builder_ui": "builder",
     "builder_copy": "builder",
     "builder_animation": "builder",
     "builder_responsive": "builder",
     "polisher": "polisher",
+    # v7.40 — patcher was MISSING from the map entirely → fell through to
+    # the default "builder", so user-placed patcher nodes ran as builder.
+    # patcher has its own preset and orchestrator post-exec — must be
+    # mapped explicitly. patcher2/patcher3 dedupe variants alias to it.
+    "patcher": "patcher",
+    "patcher1": "patcher",
+    "patcher2": "patcher",
+    "patcher3": "patcher",
     "uidesign": "uidesign",
     "scribe": "scribe",
     "imagegen": "imagegen",
@@ -149,6 +164,15 @@ CANONICAL_NODE_KEY_TO_AGENT: Dict[str, str] = {
     "deployer": "deployer",
     "debugger": "debugger",
     "scorer": "reviewer",
+    # v7.40: also map the dedupe-suffix variants for parallel agents.
+    "merger1": "merger",
+    "merger2": "merger",
+    "polisher1": "polisher",
+    "polisher2": "polisher",
+    "reviewer1": "reviewer",
+    "reviewer2": "reviewer",
+    "deployer1": "deployer",
+    "deployer2": "deployer",
 }
 # Keep the orchestrator watchdog looser than the AI-bridge pre-write timeout.
 # The bridge has a smarter fallback path (forced text-only final delivery), so
@@ -8725,7 +8749,17 @@ class Orchestrator:
         return bool(re.search(r"\b(?:merger|integrator|integration|assemble|assembly|merge)\b", str(node_label or ""), re.IGNORECASE))
 
     def _builder_is_merger_like_subtask(self, subtask: Optional[SubTask]) -> bool:
-        if not subtask or getattr(subtask, "agent_type", "") != "builder":
+        # v7.40 (maintainer 2026-04-29): accept agent_type 'merger' OR 'builder'
+        # (with merger node_key). The canonical map now sends merger nodes
+        # through agent_type='merger' so downstream merger logic activates,
+        # but we keep the legacy `agent_type == 'builder' + node_key=merger`
+        # path working for any in-flight runs / older system templates.
+        if not subtask:
+            return False
+        agent = getattr(subtask, "agent_type", "")
+        if agent == "merger":
+            return True
+        if agent != "builder":
             return False
         # v4.0 FIX: Prefer structural node_key over prose regex detection.
         # node_key is set by _annotate_subtask_node_metadata and is authoritative.
