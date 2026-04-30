@@ -5429,14 +5429,19 @@ class AIBridge:
             value = self._read_int_env("EVERMIND_PLANNER_TIMEOUT_SEC", 270, 30, 480)
         elif normalized_node_type == "analyst":
             # v3.1: Raised from 120s to 180s. Analyst with web research tools needs
-            # time to fetch references and synthesize findings. Previous timeout caused
-            # tool_iterations_exhausted → 8 critical handoff fields lost.
-            # v6.1.13 (maintainer 2026-04-20): deep mode gets 360s (was 180s same as
-            # fast). Observed real run where analyst was hard-capped at 180s with
-            # only 1 URL visited, `research shallow` warning, downstream builder
-            # had insufficient reference code. Fast mode keeps 180s.
-            _analyst_default = 360 if self._configured_thinking_depth() == "deep" else 180
-            value = self._read_int_env("EVERMIND_ANALYST_TIMEOUT_SEC", _analyst_default, 45, 480)
+            # time to fetch references and synthesize findings.
+            # v6.1.13: deep mode 360s, fast 180s.
+            # v7.46 (maintainer 2026-04-29): observed run_2dc6e934372c — analyst's
+            # synthesis stream (after source_fetch cap reached) hit the 360s
+            # timeout exactly, then litellm auto-retry kicked in, restarting
+            # from scratch (including re-running 8× source_fetch). Total
+            # 11+ min wasted because the retry can't reuse the prior fetched
+            # context. Bump deep timeout to 720s (12 min) so a single
+            # synthesis pass can complete the long brief without triggering
+            # the underlying retry. Fast mode also raised 180→360 — even fast
+            # mode hit the 180s ceiling on multi-URL research goals.
+            _analyst_default = 720 if self._configured_thinking_depth() == "deep" else 360
+            value = self._read_int_env("EVERMIND_ANALYST_TIMEOUT_SEC", _analyst_default, 45, 1200)
         elif normalized_node_type == "merger":
             # v5.1: With module-assembly architecture, Merger reads pre-built modules
             # and glues them together — much less work than full rewrite. Reduced from 720→480s.
@@ -6955,8 +6960,13 @@ class AIBridge:
         override = self._node_int_override(node, "source_fetch_call_limit", minimum=1, maximum=12)
         if override is not None:
             return override
+        # v7.46 (maintainer 2026-04-29): also accept `retry_attempt` because
+        # orchestrator.py line 27513 sets `agent_node["retry_attempt"]` —
+        # the dual-key check failed silently so v7.27's retry-cap drop
+        # (8→2) never fired in production. Read both keys; whichever is
+        # populated wins.
         try:
-            retry_count = int((node or {}).get("retry_count") or 0)
+            retry_count = int((node or {}).get("retry_count") or (node or {}).get("retry_attempt") or 0)
         except Exception:
             retry_count = 0
         if retry_count >= 1:
