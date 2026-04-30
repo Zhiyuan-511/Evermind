@@ -73,17 +73,19 @@ function userTemplateToDef(raw: any): TemplateDef | null {
         const d = depth[i] || 0;
         const col = cols[d] || [];
         const row = col.indexOf(i);
-        // v7.34 (maintainer 2026-04-29): strip the dedupe-suffix (`builder2` →
-        // `builder`) so the canvas-side NODE_TYPES lookup hits the real
-        // role and renders the correct icon/label. Backend node_roles.py
-        // aliases `builderN` to `builder` anyway; the suffix is only for
-        // depends_on graph keying.
+        // v7.34: strip dedupe-suffix (`builder2` → `builder`) for NODE_TYPES.
         const rawKey = String(n?.key || 'agent').toLowerCase();
         const role = rawKey.replace(/\d+$/, '') || rawKey;
+        // v7.39 (maintainer 2026-04-29): use the saved x/y when present so the
+        // user's exact canvas layout is restored. Fall back to auto-layout
+        // (depth × 220, row × 130) only for older templates that pre-date
+        // position persistence.
+        const savedX = (typeof n?.x === 'number' && Number.isFinite(n.x)) ? Number(n.x) : null;
+        const savedY = (typeof n?.y === 'number' && Number.isFinite(n.y)) ? Number(n.y) : null;
         return {
             type: role,
-            x: 50 + d * 220,
-            y: 100 + row * 130,
+            x: savedX !== null ? savedX : 50 + d * 220,
+            y: savedY !== null ? savedY : 100 + row * 130,
         };
     });
     // Edges from depends_on
@@ -528,11 +530,17 @@ export default function TemplateGallery({ open, onClose, onLoadTemplate, lang, c
             usedKeys[role] = ct;
             const key = ct === 1 ? role : `${role}${ct}`;
             idxToKey[i] = key;
+            // v7.39 (maintainer 2026-04-29): persist x/y so reload restores the
+            // exact canvas layout the user had when saving. Without this the
+            // backend dropped position and frontend auto-relayed by depth,
+            // making custom arrangements feel "lost" after save+reload.
             return {
                 key,
                 label: String(n.data?.label || role || key),
                 task: String(n.data?.task || ''),
                 depends_on: [] as string[],
+                x: Number(n.x ?? 0),
+                y: Number(n.y ?? 0),
             };
         });
         for (const [from, to] of currentCanvas.edges) {

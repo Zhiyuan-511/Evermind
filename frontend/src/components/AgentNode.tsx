@@ -151,14 +151,26 @@ function AgentNode({ id, data, selected }: NodeProps) {
     // giving up to "builder", so a transient nodeType drop on UI sync no
     // longer mislabels the canvas.
     const _idLower = (id || '').toLowerCase();
-    const _idHints = ['merger', 'patcher', 'reviewer', 'analyst', 'planner', 'uidesign', 'scribe', 'polisher', 'deployer', 'debugger', 'imagegen', 'spritesheet', 'assetimport', 'tester', 'router', 'builder1', 'builder2'];
+    const _idHints = ['merger', 'patcher', 'reviewer', 'analyst', 'planner', 'uidesign', 'scribe', 'polisher', 'deployer', 'debugger', 'imagegen', 'spritesheet', 'assetimport', 'tester', 'router', 'builder1', 'builder2', 'builder'];
     const _idGuess = _idHints.find((h) => _idLower.includes(h));
-    const nodeType = (data.nodeType as string)
-        || (data.nodeKey as string)
+    // v7.39 (maintainer 2026-04-29): old user templates (saved before v7.34) had
+    // every node's key stored as the React Flow wrapper-type "agent" because
+    // the save flow read n.type instead of n.data.nodeType. Reloading those
+    // templates produced data.nodeType="agent" → NODE_TYPES["agent"] is
+    // undefined → fallback default → AgentNode label silently became
+    // "builder" (the final fallback). Treat "agent" as no-data and let the
+    // chain continue. Also change the final fallback from "builder" to
+    // "unknown" so the bug becomes VISIBLE instead of misleading.
+    const _rawNodeType = (data.nodeType as string) || '';
+    const _normalizedNodeType = _rawNodeType.toLowerCase() === 'agent' ? '' : _rawNodeType;
+    const _rawNodeKey = ((data.nodeKey as string) || '');
+    const _normalizedNodeKey = _rawNodeKey.toLowerCase() === 'agent' ? '' : _rawNodeKey;
+    const nodeType = _normalizedNodeType
+        || _normalizedNodeKey
         || (data.rawNodeKey as string)
         || (data.agent as string)
         || _idGuess
-        || 'builder';
+        || 'unknown';
     const info = NODE_TYPES[nodeType] || { icon: '', color: '#666', label_en: nodeType, label_zh: nodeType, desc_en: '', desc_zh: '', inputs: [{ id: 'in', label: 'Input' }], outputs: [{ id: 'out', label: 'Output' }] };
     const rawStatus = data.status as string || 'idle';
     const progress = Math.max(0, Math.min(100, (data.progress as number) || 0));

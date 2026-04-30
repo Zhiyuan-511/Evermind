@@ -4508,12 +4508,36 @@ async def api_save_user_template(data: Dict = Body(...)):
         depends_on = raw.get("depends_on") or raw.get("dependsOn") or []
         if not isinstance(depends_on, list):
             depends_on = []
-        norm_nodes.append({
+        # v7.39 (maintainer 2026-04-29): preserve x/y position so user-saved
+        # templates load with the EXACT layout they had on canvas. Previously
+        # only key/label/task/depends_on were stored, and the frontend
+        # rebuilt positions from depend graph (depth×220, row×130) on reload,
+        # which scrambled any custom arrangement the user had.
+        try:
+            _x = raw.get("x")
+            if _x is None and isinstance(raw.get("position"), dict):
+                _x = raw["position"].get("x")
+            _x = float(_x) if _x is not None else None
+        except Exception:
+            _x = None
+        try:
+            _y = raw.get("y")
+            if _y is None and isinstance(raw.get("position"), dict):
+                _y = raw["position"].get("y")
+            _y = float(_y) if _y is not None else None
+        except Exception:
+            _y = None
+        node_record: Dict[str, Any] = {
             "key": key,
             "label": label,
             "task": task,
             "depends_on": [str(x) for x in depends_on if x],
-        })
+        }
+        if _x is not None:
+            node_record["x"] = _x
+        if _y is not None:
+            node_record["y"] = _y
+        norm_nodes.append(node_record)
     if not norm_nodes:
         return JSONResponse(status_code=400, content={"error": "no usable nodes after normalization"})
     slug = _slugify_template_name(str(payload.get("slug") or name))
