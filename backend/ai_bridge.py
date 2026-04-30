@@ -13899,6 +13899,43 @@ class AIBridge:
             )
             or auto_builder_direct_multifile
         )
+        # v7.49 (maintainer 2026-04-30): merger fast-path. Observed
+        # run_679d34ebb1b3 — merger took 10+ min and was on track for 12+
+        # because all 3 fast-path flags evaluated False:
+        #   direct_multifile=False  (merger_like blocked at orchestrator gate)
+        #   direct_text=False        (auto-text requires not merger_like)
+        #   auto_direct=False        (auto-multifile also requires not merger_like)
+        # Result: merger went through tool_calls — LLM streams the full
+        # 80KB merged HTML as JSON-escaped tool_call args (~10% overhead),
+        # at kimi relay's ~7KB/min throughput → 12+ min single iteration.
+        #
+        # Correct semantics: merger ALWAYS produces a single unified HTML
+        # file. That's exactly direct_text's use case. Force direct_text=True
+        # for merger nodes so the LLM streams plain HTML instead of escaped
+        # JSON args. Same throughput, no escape overhead = 30-40% faster.
+        if (
+            normalized_node_type == "builder"
+            and isinstance(node, dict)
+            and bool(node.get("builder_merger_like"))
+            and not safe_builder_direct_text
+        ):
+            try:
+                _v749_supports_stream = not bool(re.match(
+                    r"^(?:openai/|zhipu/)?glm-5(?:\.\d+)?\b",
+                    str(model_name or "").strip().lower(),
+                ))
+            except Exception:
+                _v749_supports_stream = True
+            if _v749_supports_stream:
+                safe_builder_direct_text = True
+                requested_builder_direct_text = True
+                logger.info(
+                    "[v7.49] merger fast-path: forcing direct_text=True "
+                    "(node_key=%s model=%s) — avoid 12-min tool_calls path.",
+                    str(node.get("node_key") or node.get("key") or "?"),
+                    model_name,
+                )
+
         # v7.45 (maintainer 2026-04-29): peer-builder symmetry guarantee.
         # Observed in run_284a84a171c8 (保卫萝卜 game): builder1 took 7:38,
         # builder2 took 14+ min before user cancelled. Reason: orchestrator
