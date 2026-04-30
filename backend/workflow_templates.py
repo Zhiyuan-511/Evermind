@@ -167,7 +167,23 @@ _PRO_ASSET_HEAVY_RE = re.compile(
     r"植物大战僵尸|pvz|plants?\s*vs\.?\s*zombies?|plants?\s*and\s*zombies?|塔防游戏|塔防|"
     r"tower\s*defense|td\s*game|wave\s*defense|"
     r"不同的怪物.*不同的植物|不同的植物.*不同的怪物|多种怪物.*多种植物|"
-    r"multiple\s*(?:distinct\s*)?(?:enemies|monsters|plants|towers|characters)\s*and\s*(?:enemies|monsters|plants|towers|characters))",
+    r"multiple\s*(?:distinct\s*)?(?:enemies|monsters|plants|towers|characters)\s*and\s*(?:enemies|monsters|plants|towers|characters)|"
+    # v7.43 (maintainer 2026-04-29): observed in run_4f4e5f0766b0 — user goal
+    # "2D版的保卫萝卜手游...怪物的种类...防御塔的种类...升级...关卡...金币
+    # 皮肤" got asset_heavy=False because none of these classic Chinese
+    # tower-defense terms were in the regex. Result: pipeline picked
+    # uidesign+scribe (website nodes) instead of imagegen+spritesheet+
+    # assetimport (game asset nodes), so the game had no real sprites.
+    r"保卫萝卜|carrot\s*fantasy|carrot\s*defense|"
+    r"防御塔|防御.*塔|tower\b|"
+    r"怪物.*(?:种类|类型|皮肤|升级)|(?:种类|类型|皮肤|升级).*怪物|"
+    r"(?:升级|关卡|金币|皮肤|宝石|装备|武器).*(?:升级|关卡|金币|皮肤|宝石|装备|武器)|"
+    r"loot\s*system|level\s*up|skin\s*system|gacha|"
+    # 2D platformer / arcade / shooter staples that need sprites
+    r"2d\s*platformer|2d\s*shooter|2d\s*arcade|street\s*fighter|fighting\s*game|"
+    r"横版游戏|横版动作|动作游戏|射击游戏|fps\b|tps\b|"
+    # Roguelike / dungeon / bullet-hell — sprite-heavy
+    r"roguelike|rogue\s*lite|dungeon\s*crawler|bullet\s*hell|地下城)",
     re.IGNORECASE,
 )
 _OPTIMIZE_SMALL_PATCH_RE = re.compile(
