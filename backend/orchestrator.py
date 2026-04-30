@@ -24017,6 +24017,53 @@ class Orchestrator:
                         node_label=node_label,
                         depends_on=deps,
                     ))
+                # v7.41 (maintainer 2026-04-29): cycle-break for custom canvas DAGs.
+                # User-drawn graphs frequently include `reviewer ← patcher` AND
+                # `patcher ← reviewer` simultaneously (semantically: "patcher
+                # fixes what reviewer flagged, then reviewer re-audits"). In a
+                # static DAG that's a deadlock — observed in run_ebd7504baa17
+                # where 4 nodes (reviewer/patcher/debugger/deployer) sat
+                # `Stuck` because neither reviewer nor patcher could start.
+                #
+                # Resolution: the orchestrator's v7.10 multi-round logic
+                # already handles dynamic reviewer→patcher→reviewer loops at
+                # runtime, so the static plan only needs ONE direction.
+                # Conventionally, patcher depends on reviewer (it activates
+                # when reviewer rejects). When we detect the cycle, drop the
+                # `reviewer.depends_on = patcher` edge — the dynamic loop
+                # owns that handshake.
+                # Also handle reviewer↔debugger / reviewer↔polisher (less
+                # common but same shape).
+                _id_to_subtask = {st.id: st for st in custom_subtasks}
+                _conditional_followups = {"patcher", "debugger", "polisher"}
+                _cycles_broken: List[str] = []
+                for _st in custom_subtasks:
+                    if _st.agent_type != "reviewer":
+                        continue
+                    _cleaned_deps = []
+                    for _dep_id in (_st.depends_on or []):
+                        _dep_st = _id_to_subtask.get(_dep_id)
+                        if not _dep_st:
+                            _cleaned_deps.append(_dep_id)
+                            continue
+                        if _dep_st.agent_type not in _conditional_followups:
+                            _cleaned_deps.append(_dep_id)
+                            continue
+                        # Check the reverse edge: does _dep_st depend on this reviewer?
+                        if _st.id in (_dep_st.depends_on or []):
+                            _cycles_broken.append(
+                                f"reviewer({_st.id}) ↔ {_dep_st.agent_type}({_dep_st.id})"
+                            )
+                            continue  # drop this dep
+                        _cleaned_deps.append(_dep_id)
+                    _st.depends_on = _cleaned_deps
+                if _cycles_broken:
+                    logger.warning(
+                        "[v7.41] Custom canvas had %d reviewer↔follower cycle(s): %s. "
+                        "Dropped reviewer→follower edges; orchestrator's dynamic "
+                        "v7.10 multi-round loop owns the re-audit handshake.",
+                        len(_cycles_broken), _cycles_broken,
+                    )
                 self._annotate_subtask_node_metadata(custom_subtasks)
                 plan = Plan(goal=goal, subtasks=custom_subtasks, difficulty=difficulty)
                 logger.info(
