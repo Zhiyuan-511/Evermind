@@ -24839,11 +24839,20 @@ class Orchestrator:
             _enrich_cooldown = max(60, min(3600, int(os.getenv("EVERMIND_ENRICHMENT_COOLDOWN_SEC", "600"))))
             _last_fail = float(getattr(type(self), "_enrichment_last_failure_ts", 0.0) or 0.0)
             _cooldown_left = _enrich_cooldown - (time.time() - _last_fail) if _last_fail else 0
-            _v723a_skip_for_long_goal = len(str(goal or "")) >= 280
+            # v7.42 (maintainer 2026-04-29): drop enrichment skip threshold from
+            # 280 → 120 chars. Observed in run_4f4e5f0766b0 — 156-char Chinese
+            # goal triggered enrichment, kimi relay returned 35s later (well
+            # past the 8s wait_for), wasting 8s of startup. Chinese characters
+            # carry ~3-5× the information density of English, so 120 chars of
+            # Chinese is roughly 600 chars of English — plenty for the planner
+            # to work with raw. The original 280 was tuned for English short
+            # phrases like "build pvz" which truly are too thin.
+            _enrich_skip_threshold = int(os.getenv("EVERMIND_ENRICHMENT_SKIP_CHARS", "120"))
+            _v723a_skip_for_long_goal = len(str(goal or "")) >= _enrich_skip_threshold
             if _v723a_skip_for_long_goal:
                 logger.info(
-                    "[v7.23a] Goal enrichment skipped: raw_goal already %d chars (>=280) — saves ~8s on planning startup.",
-                    len(goal),
+                    "[v7.42] Goal enrichment skipped: raw_goal already %d chars (>=%d) — saves ~8s on planning startup.",
+                    len(goal), _enrich_skip_threshold,
                 )
                 enriched_goal = goal
             elif _cooldown_left > 0:
