@@ -1,15 +1,15 @@
 # Premium Typography System
 
-> Evermind 自研排版引擎，融合现代 CJK 排版最佳实践与西方设计体系。
+> Evermind's in-house typography spec — modern CJK best practices fused with Western design systems.
 
-## 适用节点
+## Applies to
 - Builder
 - Polisher
 
-## 核心规范
+## Core spec
 
-### 1. 容器内边距（Content Guard Rails）
-所有主要内容块必须遵守：
+### 1. Container padding (content guard rails)
+Every major content block must obey:
 ```css
 .section-content {
   max-width: 1200px;
@@ -18,12 +18,12 @@
 }
 ```
 
-### 2. 中文排版基线
+### 2. Chinese typography baseline
 ```css
 body {
   font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
-  line-height: 1.8;           /* CJK 需要更大行高 */
-  letter-spacing: 0.04em;     /* 微调字间距 */
+  line-height: 1.8;           /* CJK requires more line-height */
+  letter-spacing: 0.04em;     /* fine-tune letter spacing */
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -35,13 +35,13 @@ h1, h2, h3, h4 {
 }
 
 p {
-  max-width: 68ch;     /* 阅读舒适度 */
+  max-width: 68ch;     /* reading comfort */
   margin-bottom: 1.5em;
-  color: rgba(255,255,255,0.85);    /* 深色主题柔和白 */
+  color: rgba(255,255,255,0.85);    /* soft white on dark theme */
 }
 ```
 
-### 3. 标题层级系统
+### 3. Heading hierarchy system
 ```css
 .section-number {
   display: inline-block;
@@ -72,7 +72,7 @@ h2.section-title {
 }
 ```
 
-### 4. 列表视觉层级
+### 4. List visual hierarchy
 ```css
 .feature-list {
   list-style: none;
@@ -100,11 +100,11 @@ h2.section-title {
 }
 ```
 
-### 5. 强制检查清单
-构建网页时必须验证：
-- [ ] 所有文字内容不贴左边缘（min padding 1.5rem）
-- [ ] 中文正文 line-height >= 1.7
-- [ ] 标题文字使用渐变或强调色
-- [ ] 序号使用装饰框/badge 而非裸数字
-- [ ] body 文字颜色不是纯白（使用 rgba 降低亮度）
-- [ ] max-width 限制防止单行过长
+### 5. Hard checklist
+When building a page, you must verify:
+- [ ] No text touches the left edge (min padding 1.5rem)
+- [ ] Chinese body copy uses line-height >= 1.7
+- [ ] Heading text uses a gradient or accent colour
+- [ ] Section numbers use a decorative frame/badge, not a bare digit
+- [ ] Body text colour is not pure white (use rgba to soften brightness)
+- [ ] `max-width` is set to prevent overly long lines

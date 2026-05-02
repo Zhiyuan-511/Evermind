@@ -17,7 +17,7 @@ This is the inaugural public release. The release combines hardening from v7.5/v
 - `INSTALL.md` (end-user installation, permission popups, troubleshooting)
 - `BUILD.md` (build-from-source steps, dev stack, env vars)
 - `CHANGELOG.md` (this file)
-- Settings → 节点模型 tab now exposes **审查员退回上限** (Reviewer Reject Budget). v7.7 ships with single-loop closure (1) as the only effective option; multi-round budgets (2/3/5) are placeholders pending v7.8 scheduler work.
+- Settings → Node Models tab now exposes **Reviewer Reject Budget**. v7.7 ships with single-loop closure (1) as the only effective option; multi-round budgets (2/3/5) are placeholders pending v7.8 scheduler work.
 - Code-stats badge on planner/analyst canvas nodes — falls back to `len(full_output)` when no code files were written, so non-builder roles surface real produce volume instead of `0 lines`.
 
 ### Fixed
@@ -27,7 +27,7 @@ This is the inaugural public release. The release combines hardening from v7.5/v
 - **Pipeline header `0/12` even with 8 NEs passed**: removed the `selectedRun?.id === activeRun.id` gate from `summaryCompletedNodes`. Counter now reflects actual store state across re-renders.
 - **`max_retries` user setting now drives reviewer reject default**: setting "Max Retries: 3" makes the reviewer budget default to 3 rounds (still capped to scheduler-supported single-loop in v7.7 — see Known Issues).
 - **Canvas blank after task click**: removed the `runtimeConnected` gate from the editor's data-fetch effects (`fetchTasks`, `fetchRuns`, run selection, NE fetch). HTTP fetches no longer wait for the WebSocket handshake; the canvas hydrates immediately from REST.
-- **Chat session title shows `会话 14` instead of task title**: `handleSelectSession` now overrides the stored title with the caller-supplied `fallbackTitle` whenever the stored title is empty or matches the auto-generated counter pattern. User-renamed sessions are preserved.
+- **Chat session title shows the auto-generated counter (e.g. `Session 14`) instead of the task title**: `handleSelectSession` now overrides the stored title with the caller-supplied `fallbackTitle` whenever the stored title is empty or matches the auto-generated counter pattern. User-renamed sessions are preserved.
 - **Pipeline node count regression**: `summaryCompletedNodes` now scopes to `activeRun.id` only (was double-gated on `selectedRun.id`).
 
 ### Internal

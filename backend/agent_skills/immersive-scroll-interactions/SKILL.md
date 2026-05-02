@@ -1,14 +1,14 @@
 # Immersive Scroll Interactions
 
-> Evermind 自研沉浸式滚动交互引擎 — 无依赖、纯 CSS + Vanilla JS 实现电影级滚动体验。
+> Evermind's in-house immersive scroll-interaction engine — dependency-free, pure CSS + vanilla JS, delivering a cinematic scroll experience.
 
-## 适用节点
+## Applies to
 - Builder
 - Polisher
 
-## 核心交互系统
+## Core interaction systems
 
-### 1. Scroll-Driven 进度指示器
+### 1. Scroll-driven progress indicator
 ```css
 .scroll-progress {
   position: fixed;
@@ -32,7 +32,7 @@
 }
 ```
 
-### 2. 交错式卡片入场
+### 2. Staggered card entrance
 ```css
 .stagger-grid > * {
   opacity: 0;
@@ -41,7 +41,7 @@
 }
 .stagger-grid > *.visible { opacity: 1; transform: translateY(0); }
 
-/* 延迟序列 */
+/* delay sequence */
 .stagger-grid > *:nth-child(1) { transition-delay: 0.0s; }
 .stagger-grid > *:nth-child(2) { transition-delay: 0.1s; }
 .stagger-grid > *:nth-child(3) { transition-delay: 0.2s; }
@@ -61,7 +61,7 @@ const staggerObserver = new IntersectionObserver((entries) => {
 document.querySelectorAll('.stagger-grid > *').forEach(el => staggerObserver.observe(el));
 ```
 
-### 3. 数字计数器动画
+### 3. Numeric counter animation
 ```javascript
 function animateCounter(element, target, duration = 2000) {
   let start = 0;
@@ -77,7 +77,7 @@ function animateCounter(element, target, duration = 2000) {
   requestAnimationFrame(update);
 }
 
-// 触发（仅在可见时开始）
+// trigger (only start when visible)
 const counterObserver = new IntersectionObserver((entries) => {
   entries.forEach(entry => {
     if (entry.isIntersecting) {
@@ -91,7 +91,7 @@ const counterObserver = new IntersectionObserver((entries) => {
 document.querySelectorAll('[data-count]').forEach(el => counterObserver.observe(el));
 ```
 
-### 4. 顺滑锚点导航
+### 4. Smooth anchor navigation
 ```css
 html { scroll-behavior: smooth; }
 
@@ -115,7 +115,7 @@ html { scroll-behavior: smooth; }
 }
 ```
 
-### 5. 吸附式导航栏
+### 5. Sticky navigation bar
 ```css
 .sticky-nav {
   position: sticky;
@@ -140,10 +140,10 @@ if (nav) {
 }
 ```
 
-### 6. 检查清单
-- [ ] 使用 IntersectionObserver 而非 scroll 事件（性能更好）
-- [ ] 所有动画使用 GPU 友好属性（transform, opacity）
-- [ ] 滚动监听器使用 `{ passive: true }`
-- [ ] 计数器动画使用 requestAnimationFrame
-- [ ] 导航栏使用 backdrop-filter 半透明效果
-- [ ] CSS Scroll-Driven Animations 作渐进增强（@supports 检测）
+### 6. Checklist
+- [ ] Use IntersectionObserver instead of scroll events (better performance)
+- [ ] All animations use GPU-friendly properties (transform, opacity)
+- [ ] Scroll listeners use `{ passive: true }`
+- [ ] Counter animation uses requestAnimationFrame
+- [ ] Nav bar uses backdrop-filter for the translucent effect
+- [ ] CSS scroll-driven animations are progressive enhancement (gated with `@supports`)

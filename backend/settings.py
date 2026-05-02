@@ -87,18 +87,18 @@ DEFAULT_SETTINGS = {
         "customPatterns": [],
     },
     "relay_endpoints": [],
-    # v7.1i (2026-04-25): CLI 中转 key 配置
-    # 区分订阅类 vs 中转类 CLI：
-    #   - claude / gemini = 官方订阅，CLI 内部 OAuth，不需要 key（留空即可）
-    #   - codex / kimi / qwen = 走中转或 API key，必须填 key 否则 401
-    # 启动时 apply_api_keys() 会把这些 key 注入对应的 env 变量
-    # （codex → GMN_OPENAI_API_KEY，kimi → KIMI_API_KEY，qwen → DASHSCOPE_API_KEY），
-    # cli_backend.py 的 _build_*_cmd 读 env 决定走中转还是订阅。
+    # v7.1i (2026-04-25): CLI relay key configuration
+    # Distinguish subscription CLIs from relay CLIs:
+    #   - claude / gemini = first-party subscriptions, CLI does OAuth internally, no key needed (leave blank)
+    #   - codex / kimi / qwen = use relay or API key, must fill in or you get 401
+    # On startup, apply_api_keys() injects these keys into the corresponding env vars
+    # (codex → GMN_OPENAI_API_KEY, kimi → KIMI_API_KEY, qwen → DASHSCOPE_API_KEY).
+    # cli_backend.py's _build_*_cmd reads the env to decide between relay vs subscription.
     "cli_relay_keys": {
         "codex": {
             "api_key": "",
             "base_url": "https://relay",
-            "subscription_mode": False,  # True = 走 ChatGPT 官方 OAuth (codex auth login)
+            "subscription_mode": False,  # True = use first-party ChatGPT OAuth (codex auth login)
         },
         "kimi": {
             "api_key": "",
@@ -110,8 +110,8 @@ DEFAULT_SETTINGS = {
             "base_url": "",
             "subscription_mode": False,
         },
-        "claude": {"subscription_mode": True},  # 官方订阅，不需要 key
-        "gemini": {"subscription_mode": True},  # 官方订阅，不需要 key
+        "claude": {"subscription_mode": True},  # first-party subscription, no key needed
+        "gemini": {"subscription_mode": True},  # first-party subscription, no key needed
     },
     "control": {
         "mouseEnabled": True,
@@ -168,17 +168,17 @@ DEFAULT_SETTINGS = {
         "enable_query_search": True,
     },
     "image_generation": {
-        # v6.1.15 (maintainer): 独立图片生成 API 配置.
-        # 用户填了 provider + api_key 就启用真图片生成；否则 imagegen 节点
-        # 降级为 SVG/CSS 占位符（不产生 broken <img src> 链接）.
+        # v6.1.15 (maintainer): standalone image-generation API configuration.
+        # If the user fills provider + api_key, real image generation is enabled; otherwise the imagegen
+        # node degrades to SVG/CSS placeholders (no broken <img src> links).
         "provider": "",              # "tongyi" | "doubao-image" | "wenxin" | "seedream" | "flux-fal" | "dalle-3" | "openai-compat"
-        "api_key": "",               # provider 专用 key
-        "base_url": "",              # 仅当 provider="openai-compat" 或自定义中转站时填
+        "api_key": "",               # provider-specific key
+        "base_url": "",              # fill only when provider="openai-compat" or pointing to a custom relay
         "default_size": "1024x1024", # 1024x1024 / 1536x1024 / 1024x1536 / 2048x2048
-        "default_model": "",         # 留空 → provider 默认；如 wanx2.1-t2i-turbo / doubao-seedream-3-0-t2i-250428
-        "max_images_per_run": 10,    # 限量防炸
-        "auto_crop": True,           # 生成后是否自动 rembg + PIL 裁剪 4 种比例
-        # 旧 ComfyUI 字段保留兼容
+        "default_model": "",         # blank → provider default; e.g. wanx2.1-t2i-turbo / doubao-seedream-3-0-t2i-250428
+        "max_images_per_run": 10,    # cap to prevent runaway costs
+        "auto_crop": True,           # auto rembg + PIL crop into 4 aspect ratios after generation
+        # Legacy ComfyUI fields kept for compatibility
         "comfyui_url": "",
         "workflow_template": "",
     },
@@ -188,10 +188,10 @@ DEFAULT_SETTINGS = {
         "preferred_model": "",         # "" = use CLI's default model
         "detected_clis": {},           # Populated by /api/cli/detect
         "node_cli_overrides": {},      # {"builder": {"cli": "claude", "model": "sonnet"}, ...}
-        # v7.1 (maintainer) ULTRA MODE — 顶级玩家"一次到位"长任务模式
-        # 启用后：所有 timeout ×10，iter cap ×4，max_rejections=5，
-        # builder 并行 ×4，支持多文件项目脚手架 + 图片生成/爬取 + 打包部署。
-        # 任务时长预期 3-4 小时到 1 天。质量 > 速度。
+        # v7.1 (maintainer) ULTRA MODE — long-running, "ship-quality-on-first-try" mode
+        # When enabled: all timeouts ×10, iter caps ×4, max_rejections=5,
+        # builder parallelism ×4, multi-file project scaffolding + image generation/crawling + packaging/deploy.
+        # Expected task duration: 3-4 hours up to a day. Quality over speed.
         "ultra_mode": False,
         "ultra_parallel_builders": 4,     # 默认 4 个 builder 并行
         "ultra_max_rejections": 5,        # reviewer 可打回 5 次
@@ -510,7 +510,7 @@ def apply_api_keys(settings: Dict):
         else:
             os.environ.pop(env_key, None)
     # v7.1i: CLI relay keys → env vars consumed by cli_backend._build_*_cmd
-    # codex/kimi/qwen 走中转时要这些 env，订阅模式（claude/gemini）不需要。
+    # codex/kimi/qwen need these envs when going via relay; subscription mode (claude/gemini) doesn't.
     cli_relay = settings.get("cli_relay_keys", {}) or {}
     cli_env_map = {
         "codex": "GMN_OPENAI_API_KEY",
@@ -520,7 +520,7 @@ def apply_api_keys(settings: Dict):
     cli_count = 0
     for cli_name, env_key in cli_env_map.items():
         cli_cfg = cli_relay.get(cli_name, {}) or {}
-        # subscription_mode=True → 主动清掉 env，确保 cli_backend 走订阅路径
+        # subscription_mode=True → proactively clear the env to ensure cli_backend takes the subscription path
         if cli_cfg.get("subscription_mode"):
             os.environ.pop(env_key, None)
             continue

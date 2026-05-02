@@ -1,15 +1,15 @@
 # Cinematic Visual Narrative
 
-> Evermind 自研电影级视觉叙事引擎 — 全屏沉浸式页面设计指导。
+> Evermind's in-house cinematic-visual-narrative engine — guidance for full-screen immersive page design.
 
-## 适用节点
+## Applies to
 - Builder
 - Analyst
 - UIDesign
 
-## 核心设计原则
+## Core design principles
 
-### 1. 全屏英雄区（Hero Section）
+### 1. Full-screen hero section
 ```css
 .hero {
   position: relative;
@@ -48,7 +48,7 @@
 }
 ```
 
-### 2. 视差层设计
+### 2. Parallax layer design
 ```css
 @supports (animation-timeline: scroll()) {
   .parallax-section {
@@ -67,7 +67,7 @@
 }
 ```
 
-### 3. 渐进式内容揭示
+### 3. Progressive content reveal
 ```css
 .reveal-section {
   opacity: 0;
@@ -80,7 +80,7 @@
 }
 ```
 ```javascript
-// Intersection Observer 自动揭示
+// Auto reveal via Intersection Observer
 const observer = new IntersectionObserver((entries) => {
   entries.forEach(entry => {
     if (entry.isIntersecting) {
@@ -92,7 +92,7 @@ const observer = new IntersectionObserver((entries) => {
 document.querySelectorAll('.reveal-section').forEach(el => observer.observe(el));
 ```
 
-### 4. 电影级色彩系统
+### 4. Cinematic color system
 ```css
 :root {
   --bg-primary: #0a0a0f;
@@ -109,7 +109,7 @@ document.querySelectorAll('.reveal-section').forEach(el => observer.observe(el))
 }
 ```
 
-### 5. 高品质卡片组件
+### 5. Premium card component
 ```css
 .premium-card {
   background: var(--glass);
@@ -126,11 +126,11 @@ document.querySelectorAll('.reveal-section').forEach(el => observer.observe(el))
 }
 ```
 
-### 6. 设计检查清单
-- [ ] 首屏必须全屏（min-height: 100vh）
-- [ ] 背景图使用 brightness + overlay 处理
-- [ ] 每个 section 之间有结构性分隔（渐变过渡或差异背景）
-- [ ] 使用 Intersection Observer 实现渐入动效
-- [ ] 卡片元素使用 glassmorphism 效果
-- [ ] 图片使用 CSS 构图（渐变 + SVG 组合）而非外部链接
-- [ ] 整体色调统一，不使用鲜艳纯色
+### 6. Design checklist
+- [ ] Hero must fill the viewport (min-height: 100vh)
+- [ ] Background images go through brightness + overlay treatment
+- [ ] Sections are visually separated by gradient transitions or distinct backgrounds
+- [ ] Reveal animations use Intersection Observer
+- [ ] Card elements use a glassmorphism effect
+- [ ] Imagery uses CSS composition (gradients + SVG) rather than external image links
+- [ ] Overall palette is unified — avoid bright pure-saturation colours

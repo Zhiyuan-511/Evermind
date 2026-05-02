@@ -341,8 +341,8 @@ def _log_timestamp_epoch(line: str) -> float:
 # prompt caching (88-95% cached on repeated paths) these cuts remove the
 # remaining long tail. Each cap can be individually bumped via env var.
 
-# v6.5 #1 — 全局 httpx AsyncClient (http2 + keepalive). 避免每次 new Client,
-# 复用 TCP + TLS 连接。h2 库缺失时 try/except fallback 到 http1.
+# v6.5 #1 — global httpx AsyncClient (http2 + keepalive). Avoid creating a new Client every call;
+# reuse TCP + TLS connections. If the h2 library is missing, try/except falls back to http1.
 _LIMITS = httpx.Limits(max_keepalive_connections=20, max_connections=100, keepalive_expiry=30)
 _TIMEOUT = httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=5.0)
 _GLOBAL_HTTPX: Optional[httpx.AsyncClient] = None
@@ -364,7 +364,7 @@ async def get_httpx_client() -> httpx.AsyncClient:
     return _GLOBAL_HTTPX
 
 
-# v6.5 #2 — 错误归一 + 每 endpoint 的断路器
+# v6.5 #2 — error normalization + per-endpoint circuit breaker
 def classify_error(exc, status, body) -> str:
     text = ((body or "") + " " + (str(exc) if exc else "")).lower()
     if exc is not None:
@@ -437,7 +437,7 @@ class EndpointBreaker:
 BREAKER = EndpointBreaker()
 
 
-# v6.5 #3 — 通用 coding-plan 路由: kimi/deepseek/qwen/glm/doubao + 中转站 probe
+# v6.5 #3 — generic coding-plan routing: kimi/deepseek/qwen/glm/doubao + relay probe
 PROVIDER_CODING_ROUTES: Dict[str, Dict[str, Any]] = {
     "kimi": {
         "key_prefix": ("sk-kimi-",),
@@ -722,7 +722,7 @@ MODEL_REGISTRY = {
                                "supports_tools": True, "supports_cua": False,
                                "api_base": "https://api.minimax.io/v1",
                                "fallback_api_bases": ["https://api.minimax.chat/v1"]},
-    # ── AiGate (relay) — 中转池,单 key 访问多家 ──
+    # ── AiGate (relay) — relay pool, single key accesses multiple vendors ──
     # v5.8.6: user onboarded relay — one key (sk-ag-*) fronts 12 models
     # across minimax/glm/doubao/qwen/deepseek/kimi. TTFB 1.4-7.6s (vs Kimi For
     # Coding's 40-90s at peak), making it ideal as a stable fallback when the
@@ -5207,8 +5207,8 @@ class AIBridge:
             cli_mode = cfg.get("cli_mode") or {}
             if not isinstance(cli_mode, dict):
                 return False
-            # ultra 必须同时有 cli_mode.enabled 和 cli_mode.ultra_mode 才生效
-            # （避免不熟悉 CLI 的用户误开 ULTRA 导致 API 模式 timeout 爆炸）
+            # ULTRA only takes effect when both cli_mode.enabled and cli_mode.ultra_mode are set
+            # (prevents users unfamiliar with CLI from accidentally enabling ULTRA in API mode and causing timeout blowups)
             return bool(cli_mode.get("enabled")) and bool(cli_mode.get("ultra_mode"))
         except Exception:
             return False
@@ -15036,8 +15036,8 @@ class AIBridge:
                             )
 
                 # v7.1g (maintainer): STRICT CLI MODE.
-                # Per the user's directive: "确保 cli 模式下调用的是 cli 不是
-                # 用户配置的 api". When cli_mode.enabled = true and the node
+                # Per the user's directive: "in CLI mode the call must come from CLI,
+                # not from the user-configured API". When cli_mode.enabled = true and the node
                 # is in _CLI_ALLOWED_NODES, the result MUST come from CLI.
                 # No silent API fallback (which would charge user's API key
                 # without their knowledge).
@@ -15047,10 +15047,10 @@ class AIBridge:
                 #    to API path EARLIER (see _CLI_BROWSER_REQUIRED check)
                 #    via _cli_enabled = False — those won't reach this code.
                 # 2. Strict mode can be relaxed via cli_mode.allow_api_fallback.
-                # v7.1i (maintainer): router/classifier 节点天生短输出
-                # （返回 "tool" / "code" 这种分类标签），100 字节阈值会把
-                # 它误判成 unusable → 整个 ultra plan 退化成 4 节点
-                # deterministic fallback。给短输出节点单独宽松阈值。
+                # v7.1i (maintainer): router/classifier nodes inherently produce short output
+                # (they return classification labels like "tool" / "code"). The 100-byte threshold
+                # would mis-flag these as unusable → the whole ultra plan degrades to a 4-node
+                # deterministic fallback. Give short-output nodes their own relaxed threshold.
                 _SHORT_OUTPUT_NODES = {"router"}
                 _min_ok_chars = 3 if node_type in _SHORT_OUTPUT_NODES else 100
                 _cli_ok = (

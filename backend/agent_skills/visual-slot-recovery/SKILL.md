@@ -7,7 +7,7 @@ Never ship blank media zones.
   - a real image with a meaningful `src` and `alt`
   - a polished inline SVG / illustration / data-visual scene
   - a finished map or location card, embed, or branded info panel
-- Remove fake placeholder copy such as `[Collection Image]`, `[品牌视觉图]`, `[Map]`, `placeholder`, `replace me`, or empty caption shells inside visual modules.
+- Remove fake placeholder copy such as `[Collection Image]`, `[Brand Visual]`, `[Map]`, `placeholder`, `replace me`, or empty caption shells inside visual modules.
 - Gradient-only rectangles do NOT count as finished imagery unless they are part of a richer composition with overlays, labels, texture, SVG, or real media.
 - If browsing is unavailable, do not stall waiting for assets. Build premium SVG/CSS compositions locally and keep the layout visually full.
 - Keep aspect ratios, overlays, focal crops, captions, and hover states intentional so the media feels designed rather than pasted in.
