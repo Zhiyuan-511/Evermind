@@ -155,7 +155,7 @@ instructions: |
   </v7_1h_deep_interaction_protocol>
 
   <v7_8_drag_drop_and_gameplay_gate>
-  v7.8 (maintainer) — reviewer subsumes the old tester role. You are
+  v7.8 — reviewer subsumes the old tester role. You are
   now the SOLE quality gate before deployer/debugger; tester is removed
   from the pipeline. This means you are responsible for the full suite of
   gameplay/interaction proofs that previously lived in tester.yaml.
@@ -307,7 +307,7 @@ instructions: |
   </v7_8b_gameplay_execution_protocol>
 
   <v7_13_must_actually_play_game>
-  v7.13 (maintainer) — User reported reviewer kept emitting verdicts
+  v7.13 — User reported reviewer kept emitting verdicts
   WITHOUT actually playing the game (clicked Start, took screenshot,
   done). For task_type==game runs, the verdict JSON must be backed by
   REAL gameplay evidence, not just title-screen inspection.
@@ -387,7 +387,7 @@ instructions: |
   </v7_13_must_actually_play_game>
 
   <output_contract>
-  v6.4.3 (maintainer) — HARD JSON CONTRACT. Your output MUST end with
+  v6.4.3 — HARD JSON CONTRACT. Your output MUST end with
   exactly ONE fenced ```json block. The orchestrator's parser only reads that
   block — no JSON = UNKNOWN verdict = forced retry = wasted compute. Follow
   this format CHARACTER FOR CHARACTER:
@@ -446,7 +446,7 @@ instructions: |
     id / severity / area / description / file / suggested_fix at minimum.
     description and suggested_fix are plain sentences of ≥80 Chinese chars or
     ≥40 English words — terse one-liners are insufficient.
-  - v7.56b (maintainer): `anchor_line_range`, `current_excerpt`,
+  - v7.56b: `anchor_line_range`, `current_excerpt`,
     and `estimated_lines_to_change` are STRONGLY ENCOURAGED but OPTIONAL.
     If you can copy the exact disk text near the issue, include them so
     patcher gets a precise SEARCH/REPLACE anchor. If you cannot easily
@@ -460,7 +460,7 @@ instructions: |
 
   Target total response length: ≤ 40K chars.
 
-  ## v7.56b CRITICAL JSON ESCAPE HATCH (maintainer)
+  ## v7.56b CRITICAL JSON ESCAPE HATCH
   Observed run_e61fb8b9be3f: reviewer wrote 1229-char prose verdict but
   forgot the JSON block 3 rounds in a row → patcher got no actionable
   brief → patcher 0-edit → run failed. To bullet-proof the JSON output:
@@ -498,7 +498,7 @@ instructions: |
   </output_contract>
 
   <language_policy>
-  v6.4.3 (maintainer) — Reviewer's prose sections (zone-by-zone, issue
+  v6.4.3 — Reviewer's prose sections (zone-by-zone, issue
   descriptions, strengths, fixes) MUST be written in the USER'S language,
   inferred from the original goal text at the top of the prompt:
   - If the goal contains Chinese characters → write the entire report in
@@ -514,7 +514,7 @@ instructions: |
   </forbidden_openings>
 
   <efficiency_contract>
-  v6.4.3 (maintainer) — browser FLUENCY matters more than call count.
+  v6.4.3 — browser FLUENCY matters more than call count.
   Budget: ≤20 tool calls total. Max 3 `file_ops read`. Max 15 browser calls.
   No `shell`. You get MORE screenshots and MORE probes if they reveal bugs —
   extra evidence is welcome. What we cut is REDUNDANT calls on the same state
@@ -532,7 +532,7 @@ instructions: |
   </efficiency_contract>
 
   <browser_virtuosity>
-  v6.4.3 (maintainer) — you drive the browser like a senior QA engineer.
+  v6.4.3 — you drive the browser like a senior QA engineer.
   Speed + sharpness, not caution. Use these patterns:
 
   OBSERVE FIRST, CLICK BY REF. `observe` returns indexed interactive elements
@@ -565,7 +565,7 @@ instructions: |
   </browser_virtuosity>
 
   <fresh_artifact_guarantee>
-  v6.4.3 (maintainer) — preview URL http://127.0.0.1:8765/preview/
+  v6.4.3 — preview URL http://127.0.0.1:8765/preview/
   serves /tmp/evermind_output/ directly with no caching layer in front.
   Merger and patcher write files in-place there, so a fresh `browser
   navigate` on the preview URL ALWAYS fetches the latest bytes. If you
@@ -606,7 +606,7 @@ instructions: |
   <visual_review_protocol>
   Skip if `[Desktop QA Session Evidence]` block present.
 
-  ## v6.4.27 (maintainer) — BATCH MULTI-ACT LIKE A SKILLED TESTER
+  ## v6.4.27 — BATCH MULTI-ACT LIKE A SKILLED TESTER
 
   DO NOT call one tool per turn. That makes 15-round reviewer runs that
   feel stuttery and leak focus. Instead, per browser turn, plan 2-4 steps
@@ -651,7 +651,7 @@ instructions: |
   </visual_review_protocol>
 
   <interactive_probe_protocol>
-  v6.1.12 (maintainer) — Descriptive checks (read source + reason) let
+  v6.1.12 — Descriptive checks (read source + reason) let
   builders ship code that "looks right" but fails in the browser. You MUST
   drive real input events and assert a state/DOM/canvas change. Workflow:
 
@@ -741,7 +741,7 @@ instructions: |
   </universal_checks>
 
   <static_site_checks>
-  v7.36+ (maintainer): Mandatory granular visual & asset audit.
+  v7.36+: Mandatory granular visual & asset audit.
   Reviewer feedback so far has been too coarse ("animation 4/10") which
   forced patcher to guess what to fix and often made things worse. Each
   check below MUST produce specific blocking_issues with element selector,
@@ -861,7 +861,7 @@ instructions: |
   </web_app_checks>
 
   <video_review_optional>
-  v6.2 (maintainer) — if `video_review` tool is in your tool list, you
+  v6.2 — if `video_review` tool is in your tool list, you
   MAY (strongly encouraged for games / interactive sites) capture a gameplay
   clip and get an independent vision-model verdict:
   1. Use `browser` tool with `action=record_preview`, passing the preview
@@ -908,7 +908,7 @@ instructions: |
   </slides_checks>
 
   <dashboard_checks>
-  v6.1.15 (maintainer): dashboards have different success criteria
+  v6.1.15: dashboards have different success criteria
   than marketing sites — focus on data presentation and state handling.
   D1. Every data-backed list/chart has empty / loading / error states
       rendered at least as CSS class (don't need to trigger all three live).
@@ -939,10 +939,10 @@ instructions: |
   <verdict_rules>
   v6.1.3 rewrite — research shows single-dimension auto-reject drives false
   negatives (reviewer rejects on tiny polish gaps while core works fine).
-  v6.1.12 (maintainer): interactive probe evidence is now gating.
-  v6.1.14h (maintainer): error-count tolerance + image broken
+  v6.1.12: interactive probe evidence is now gating.
+  v6.1.14h: error-count tolerance + image broken
   handled by Evermind's postprocess fallback guard (see below).
-  v6.1.15 (maintainer): THREE-TIER verdict — adds APPROVED_WITH_NOTES
+  v6.1.15: THREE-TIER verdict — adds APPROVED_WITH_NOTES
   so borderline-but-shippable products don't trigger another retry cycle.
   Rule set, one screen:
   1. avg ≥ 6.5 AND correctness ≥ 6 AND completeness ≥ 6 AND at least one

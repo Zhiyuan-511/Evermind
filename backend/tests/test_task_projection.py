@@ -8,7 +8,7 @@ import os
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from task_store import TaskStore, VALID_STATUSES, VALID_TRANSITIONS
+from task_store import TaskStore
 
 
 @pytest.fixture

@@ -12,7 +12,6 @@ Inspired by:
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
@@ -122,7 +121,7 @@ class HandoffPacket:
         Format the handoff packet as a readable context message
         for injection into the downstream node's prompt.
 
-        v6.1.5 (maintainer): THIN handoff. Default = ≤400 bytes rendered,
+        v6.1.5: THIN handoff. Default = ≤400 bytes rendered,
         reference to OpenHands AgentDelegateAction (4 fields) + MetaGPT Document
         .get_meta() (path-only refs) + CrewAI TaskOutput (auto summary).
         Prior renderer emitted ~1200 bytes every handoff. Pass verbose=True to

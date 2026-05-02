@@ -8,8 +8,7 @@ import hashlib
 import logging
 import re
 import threading
-import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger("evermind.privacy")
 

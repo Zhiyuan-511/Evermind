@@ -27,7 +27,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException
 
@@ -206,7 +206,7 @@ def git_status(path: Optional[str] = None) -> Dict[str, Any]:
 
 @router.get("/diff")
 def git_diff(path: Optional[str] = None, staged: bool = False, context: int = 3) -> Dict[str, Any]:
-    """v7.0 (maintainer): diff endpoint for the VSCode-style source
+    """v7.0: diff endpoint for the VSCode-style source
     control panel. Returns per-file unified diff hunks so the UI can render
     green/red coloring. If repo is not a git repo or empty, returns
     empty list without raising (UI handles gracefully).

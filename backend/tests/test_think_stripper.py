@@ -1,7 +1,6 @@
 """V6.1.1: ThinkStripper state machine — keeps <think> out of files while
 letting the model reason internally."""
 
-import pytest
 
 from ai_bridge import ThinkStripper, strip_think_tags_full
 

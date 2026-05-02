@@ -23,7 +23,6 @@ Template YAML schema:
 
 from __future__ import annotations
 
-import os
 import logging
 from pathlib import Path
 from typing import Any, Dict, Optional

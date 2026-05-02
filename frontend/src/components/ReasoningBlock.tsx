@@ -1,5 +1,5 @@
 /**
- * v6.4.29 (maintainer) — Collapsible "thinking" bubble.
+ * v6.4.29 — Collapsible "thinking" bubble.
  * Shows reasoning_content (model's internal chain-of-thought) as a small,
  * foldable block above the main answer. Pattern from:
  *   - Claude web UI: "Thinking… [spinner]" then "Thought for 8s ▸ (click to expand)"

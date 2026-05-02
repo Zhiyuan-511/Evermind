@@ -282,7 +282,7 @@ def test_builder_node_in_deep_mode_does_not_open_thinking():
 
 
 def test_builder_kimi_thinking_disabled_in_deep_v6_4_22():
-    """v6.4.22 (maintainer): kimi-family builder/merger keep thinking OFF
+    """v6.4.22: kimi-family builder/merger keep thinking OFF
     even in deep mode. Rationale: observed 2026-04-22 run — kimi builder with
     thinking=enabled spent 281s on thinking + only 46s emitting HTML before
     hitting the 16k max_tokens cap and finish=length at 12KB (truncated).
@@ -409,7 +409,7 @@ def test_fast_mode_still_off_for_exempt_nodes():
 
 
 def test_v6_4_21_builder_fast_large_project_gets_medium_effort():
-    """v6.4.21 (maintainer): fast mode builder with large project hint
+    """v6.4.21: fast mode builder with large project hint
     (task_type=game OR assigned_targets>=2 OR goal>=600 chars) maps to
     reasoning_effort=medium on relay/gpt-5.x, not minimal."""
     bridge = AIBridge(config={"thinking_depth": "fast"})

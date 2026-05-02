@@ -282,7 +282,7 @@ export default function SettingsModal({
     const [comfyUiUrl, setComfyUiUrl] = useState('');
     const [comfyWorkflowTemplate, setComfyWorkflowTemplate] = useState('');
     const [imageBackendAvailable, setImageBackendAvailable] = useState(false);
-    // v6.2 (maintainer): direct image provider (preferred over ComfyUI).
+    // v6.2: direct image provider (preferred over ComfyUI).
     const [imgProvider, setImgProvider] = useState<'' | 'doubao-image' | 'seedream' | 'tongyi' | 'flux-fal' | 'openai-compat'>('');
     const [imgApiKey, setImgApiKey] = useState('');
     const [imgBaseUrl, setImgBaseUrl] = useState('');
@@ -294,14 +294,14 @@ export default function SettingsModal({
     const [imgTestResult, setImgTestResult] = useState<{ ok: boolean; latency_ms?: number; image_base64?: string; error?: string } | null>(null);
     const [nodeModelPreferences, setNodeModelPreferences] = useState<Record<string, string[]>>({});
     const [thinkingDepth, setThinkingDepth] = useState<'fast' | 'deep'>('deep');
-    // v7.7 (maintainer): user-controlled reviewer reject budget. 1 = single-loop
+    // v7.7: user-controlled reviewer reject budget. 1 = single-loop
     // closure (v6.7 default, fastest); higher = stricter quality gate at cost of
     // longer runs. Capped at 5 in normal mode (Ultra mode goes to 10 separately).
     const [reviewerMaxRejections, setReviewerMaxRejections] = useState<number>(1);
-    // v6.1.3 (maintainer): dedicated language toggle for node walkthrough reports.
+    // v6.1.3: dedicated language toggle for node walkthrough reports.
     // "" = inherit UI language; "zh"/"en" = force that language for reports.
     const [walkthroughLang, setWalkthroughLang] = useState<'' | 'zh' | 'en'>('');
-    // v6.1.10 (maintainer): when the user configured TWO API keys for
+    // v6.1.10: when the user configured TWO API keys for
     // the primary builder provider (e.g. kimi + kimi_2), let parallel peer
     // builders share the preferred first model and round-robin the keys
     // instead of falling back to the second configured model.
@@ -1939,7 +1939,7 @@ export default function SettingsModal({
                                     <label>{t('Enable CLI Mode', '启用 CLI 模式')}</label>
                                     <input type="checkbox" checked={cliEnabled} onChange={e => setCliEnabled(e.target.checked)} />
                                 </div>
-                                {/* v7.1i (maintainer): Ultra Mode toggle.
+                                {/* v7.1i: Ultra Mode toggle.
                                     Was missing in UI — backend supports cli_mode.ultra_mode but
                                     users couldn't see/toggle it. Ultra mode routes every dispatch
                                     through 14-NE pro plan (analyst + uidesign + scribe + 4 builder

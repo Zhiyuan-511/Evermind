@@ -3,7 +3,6 @@ Evermind Backend — Plugin Base Classes & Registry
 Each plugin represents a capability that can be attached to AI agent nodes.
 """
 
-import asyncio
 import logging
 import os
 from abc import ABC, abstractmethod
@@ -102,13 +101,13 @@ NODE_DEFAULT_PLUGINS = {
     # limits; a cold goal with no hints never fires a fetch.
     "builder":   ["file_ops", "shell", "source_fetch"],
     "polisher":  ["file_ops", "shell"],
-    # v6.4 (maintainer): patcher had NO plugins registered → every run
+    # v6.4: patcher had NO plugins registered → every run
     # the patcher node was launched with zero tools. It tried to output
     # unified-diff blocks in plain text which kimi/gpt-5.4 reliably refuse
     # to do, wasting ~4 min per rejection. Giving it file_ops + shell (same
     # as polisher) lets it actually read & edit the flagged files.
     "patcher":   ["file_ops", "shell"],
-    # v6.4.6 (maintainer): merger was ALSO unregistered like patcher.
+    # v6.4.6: merger was ALSO unregistered like patcher.
     # It currently works only because orchestrator creates it with
     # agent_type="builder" so it inherits builder plugins at runtime — but
     # that's a fragile accident. Register explicitly for stability.
@@ -217,7 +216,7 @@ def get_image_generation_config(config: Optional[Dict[str, Any]] = None) -> Dict
 
 
 def is_video_review_available(config: Optional[Dict[str, Any]] = None) -> bool:
-    """v6.2 (maintainer): VideoReview adapter is usable when a vision
+    """v6.2: VideoReview adapter is usable when a vision
     model is configured (qwen-vl via DashScope, doubao-vision via Volcengine,
     or Gemini). Also triggers on explicit video_review.api_key."""
     try:
@@ -231,7 +230,7 @@ def is_video_review_available(config: Optional[Dict[str, Any]] = None) -> bool:
 
 
 def is_direct_image_provider_configured(config: Optional[Dict[str, Any]] = None) -> bool:
-    """v6.2 (maintainer): True iff image_generation has both provider AND api_key.
+    """v6.2: True iff image_generation has both provider AND api_key.
     Used to branch imagegen node defaults between the preferred direct adapter
     (ImageGenPlugin) and the legacy ComfyUI plugin."""
     enabled_override = _get_config_value(config, "image_generation.enabled", "enable_image_generation")
@@ -247,7 +246,7 @@ def is_direct_image_provider_configured(config: Optional[Dict[str, Any]] = None)
 def is_image_generation_available(config: Optional[Dict[str, Any]] = None) -> bool:
     """
     Only treat image generation as available when EITHER:
-    (1) v6.1.15 (maintainer): Direct provider+api_key configured (tongyi /
+    (1) v6.1.15: Direct provider+api_key configured (tongyi /
         doubao / flux-fal / openai-compat / ...). Path: image_generation.provider
         + image_generation.api_key.
     (2) Legacy: ComfyUI URL + workflow template configured.
@@ -411,7 +410,7 @@ def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]
     normalized_node_type = normalize_node_role(node_type)
     if normalized_node_type == "imagegen":
         defaults = ["file_ops"]
-        # v6.2 (maintainer): prefer the direct ImageGen adapter when provider+key set.
+        # v6.2: prefer the direct ImageGen adapter when provider+key set.
         # Fall back to ComfyUI for legacy users. No-image → browser research mode.
         if is_direct_image_provider_configured(config=config):
             defaults.append("image_gen")
@@ -438,7 +437,7 @@ def get_default_plugins_for_node(node_type: str, config: Optional[Dict[str, Any]
     if normalized_node_type in ("reviewer", "tester") and is_qa_computer_use_enabled(config=config):
         if "computer_use" not in defaults:
             defaults.append("computer_use")
-    # v6.2 (maintainer): reviewer/tester may opt into video review when
+    # v6.2: reviewer/tester may opt into video review when
     # a vision model is reachable. Adapter returns None on failure so the flow
     # silently falls back to screenshot-based review.
     if normalized_node_type == "reviewer" and is_video_review_available(config=config):

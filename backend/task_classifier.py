@@ -1443,7 +1443,7 @@ def classify(goal: str) -> TaskProfile:
     # Keep explicit product-shape tasks deterministic. A "website with animation"
     # is still a website and should keep the website delivery contract.
     #
-    # v7.2 (maintainer) FIX — strong website-signal pre-empts presentation.
+    # v7.2 FIX — strong website-signal pre-empts presentation.
     # Observed run_d9d45558eb79: user goal "类似淘宝的购物网站...还有动画演示等等"
     # was misclassified as presentation/slides because presentation pattern
     # contains the bare word "演示". The single character "演示" should NOT
@@ -1485,7 +1485,7 @@ def classify(goal: str) -> TaskProfile:
 
 
 # ─────────────────────────────────────────────────────────────────
-# v7.56 (maintainer) — Required Capability Extraction
+# v7.56 — Required Capability Extraction
 # ─────────────────────────────────────────────────────────────────
 # When the user's brief explicitly demands a specific technical capability
 # (WebGL 3D, 2D canvas game, GLSL shader, Web Audio, physics engine, drag-
@@ -1777,7 +1777,7 @@ def builder_system_prompt(goal: str, *, split_deferred: bool = False):
     )
     foundation_block = gameplay_foundation_contract(goal)
 
-    # v7.56 (maintainer) FIX: capability block injected into the
+    # v7.56 FIX: capability block injected into the
     # ACTUAL builder system prompt return paths (not builder_task_description).
     # Both legacy and split_deferred paths must include it so the LLM cannot
     # ship a plain website when brief explicitly asks for 3D/2D-game/shader/etc.
@@ -1971,7 +1971,7 @@ def builder_task_description(goal: str) -> str:
             "After saving, briefly describe exactly what you built and what quality checks you satisfied."
         )
 
-    # v7.56 (maintainer) NOTE: capability enforcement is injected into
+    # v7.56 NOTE: capability enforcement is injected into
     # the builder SYSTEM PROMPT (builder_system_prompt return paths), not
     # here in the task description. Task description stays short to avoid
     # double-injection and prompt bloat.

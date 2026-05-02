@@ -1,7 +1,6 @@
 """Tests for task_store module — CRUD, transitions, persistence, linking."""
 
 import json
-import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,8 +8,7 @@ from unittest.mock import patch
 
 import task_store
 from task_store import (
-    TaskStore, ReportStore, TaskRecord, RunReport,
-    VALID_TRANSITIONS, VALID_STATUSES,
+    TaskStore, ReportStore, TaskRecord, VALID_TRANSITIONS, VALID_STATUSES,
 )
 
 

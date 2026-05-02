@@ -130,7 +130,7 @@ class TestProviderAuthFailureMemory(unittest.TestCase):
 
 class TestBuilderPresetContracts(unittest.TestCase):
     def test_builder_preset_mentions_game_boot_sequence_guards(self):
-        # v6.1.5 (maintainer): game-specific rules moved to
+        # v6.1.5: game-specific rules moved to
         # agent_skills/gameplay-foundation + godogen-tps-control-sanity-lock
         # (loaded conditionally). Core builder preset now keeps only the
         # cross-domain "null-guard JS, return FULL merged file" contracts.
@@ -1595,7 +1595,7 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         self.bridge = AIBridge(config={})
 
     def test_builder_defaults_are_higher(self):
-        # v6.1.10 (maintainer): tool_call default raised 16384→24576 —
+        # v6.1.10: tool_call default raised 16384→24576 —
         # 50KB HTML ≈ 20K tokens; 16384 was consistently triggering
         # finish=length → salvage loop. 24576 covers 60KB.
         self.assertEqual(self.bridge._max_tokens_for_node("builder"), 24576)
@@ -1611,12 +1611,12 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         # EVERMIND_MAX_TOKENS=4096 / EVERMIND_TIMEOUT_SEC=120 defaults).
         self.assertEqual(self.bridge._max_tokens_for_node("tester"), 6144)
         self.assertEqual(self.bridge._timeout_for_node("tester"), 240)
-        # v6.1.3 (maintainer): tool iteration caps raised across the board
+        # v6.1.3: tool iteration caps raised across the board
         # so nodes aren't prematurely killed; no-activity watchdog remains the
         # authoritative deadlock detector.
         self.assertEqual(self.bridge._max_tool_iterations_for_node("tester"), 50)
         self.assertEqual(self.bridge._max_tool_iterations_for_node("reviewer"), 50)
-        # v6.3 (maintainer): analyst cap reduced 8→6 — tutorial-search
+        # v6.3: analyst cap reduced 8→6 — tutorial-search
         # prompts kept asking for one more source. See _max_tool_iterations_for_node.
         self.assertEqual(self.bridge._max_tool_iterations_for_node("analyst"), 6)
         self.assertEqual(self.bridge._max_tool_iterations_for_node("imagegen"), 40)
@@ -2138,7 +2138,7 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         self.assertTrue(tool_path_called, "Expected tool path via openai_compatible, litellm_tools, or litellm_chat")
 
     def test_v6410_multi_target_streaming_model_prefers_direct_multifile(self):
-        """v6.4.10 (maintainer): every streaming-capable provider (gpt-5.x,
+        """v6.4.10: every streaming-capable provider (gpt-5.x,
         claude, deepseek, qwen, minimax, ...) running a multi-target builder
         should pick the direct_multifile fast path instead of the tool_call
         loop. Regression guard against 2026-04-22 run where kimi/gpt-5.x
@@ -2362,7 +2362,7 @@ class TestNodeTokenAndTimeoutPolicy(unittest.TestCase):
         bridge._execute_openai_compatible.assert_not_called()
 
     def test_builder_should_auto_direct_multifile_for_streaming_models(self):
-        # v6.4.10 (maintainer): direct_multifile is the fast path for
+        # v6.4.10: direct_multifile is the fast path for
         # multi-target builders on every streaming-capable provider. Prior
         # gate was kimi-only + env-opt-in, which forced gpt-5.x / claude /
         # deepseek through the 10-15min tool_call loop instead of a 2-4min
@@ -5813,7 +5813,7 @@ class TestContextCompaction(unittest.TestCase):
                 )
             )
 
-        # v6.1.14f (maintainer): polisher loop-guard without writes is
+        # v6.1.14f: polisher loop-guard without writes is
         # now treated as SUCCESS ("polish skipped" — builder's artifact is
         # already high quality). Orchestrator proceeds to reviewer without
         # burning a retry on a pass-through polisher. The guard reason is

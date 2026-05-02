@@ -166,7 +166,7 @@ def inspect_html_integrity(html: str) -> Dict[str, Any]:
 
 
 def inspect_game_functional_completeness(html: str) -> List[str]:
-    """v7.21h (maintainer): catch builders that satisfy v7.19d's
+    """v7.21h: catch builders that satisfy v7.19d's
     hard listener requirements but never wire them to actual movement /
     camera mutations. Symptom from run_bb161ee37766: 100KB Three.js
     artifact had keydown('KeyW') listening but `move` vector was never
@@ -1078,7 +1078,7 @@ def inspect_inline_handler_contract(html: str, source_file: Optional[Path] = Non
                     continue
                 referenced_handlers.append(fn_name)
                 error_key = (attr_name, fn_name.lower())
-                # v7.1k (maintainer): whitelist Window/Document/timer
+                # v7.1k: whitelist Window/Document/timer
                 # builtins that work without explicit `window.` prefix.
                 # `scrollTo()` etc. were false-positive failing the validator
                 # and forcing builder to retry the entire 30KB HTML write.

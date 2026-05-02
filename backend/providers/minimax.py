@@ -24,7 +24,7 @@ import logging
 import re
 from typing import Any, Dict, Optional
 
-from .base import BaseProvider, ChatChunk, ChatRequest, OpenAICompatProvider, ProviderRetryHint
+from .base import ChatChunk, ChatRequest, OpenAICompatProvider, ProviderRetryHint
 from .registry import register_provider
 
 logger = logging.getLogger("evermind.providers.minimax")

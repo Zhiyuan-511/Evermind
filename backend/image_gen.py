@@ -9,7 +9,7 @@ Unified adapter for real image generation across 6 providers:
 - flux-fal (FLUX.1 schnell)   -> fal.run/fal-ai/flux/schnell
 - dalle-3 / openai-compat     -> any OpenAI-compatible /v1/images/generations
 
-Design rules (maintainer):
+Design rules:
 1. No-key → return None (imagegen node degrades to SVG placeholders cleanly)
 2. Hard timeout 30s per call — never block the pipeline
 3. Save to /tmp/evermind_output/assets/<slug>.webp for deterministic path
@@ -34,12 +34,10 @@ import asyncio
 import base64
 import hashlib
 import io
-import json
 import logging
 import os
-import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 try:
     import httpx  # type: ignore

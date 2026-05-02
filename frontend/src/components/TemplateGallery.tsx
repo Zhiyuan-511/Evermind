@@ -18,7 +18,7 @@ export interface TemplateDef {
     nodes: { type: string; x: number; y: number }[];
     edges: [number, number][];
     /**
-     * v6.2 (maintainer): optional one-click goal. When set, clicking
+     * v6.2: optional one-click goal. When set, clicking
      * the card pre-fills the chat input with this goal so the user can run
      * immediately after loading the canvas. Quick-start templates rely on
      * this; classic workflow templates leave it unset.
@@ -76,7 +76,7 @@ function userTemplateToDef(raw: any): TemplateDef | null {
         // v7.34: strip dedupe-suffix (`builder2` → `builder`) for NODE_TYPES.
         const rawKey = String(n?.key || 'agent').toLowerCase();
         const role = rawKey.replace(/\d+$/, '') || rawKey;
-        // v7.39 (maintainer): use the saved x/y when present so the
+        // v7.39: use the saved x/y when present so the
         // user's exact canvas layout is restored. Fall back to auto-layout
         // (depth × 220, row × 130) only for older templates that pre-date
         // position persistence.
@@ -116,7 +116,7 @@ function userTemplateToDef(raw: any): TemplateDef | null {
     };
 }
 
-// v7.34 (maintainer): WORKFLOW TEMPLATE OVERHAUL.
+// v7.34: WORKFLOW TEMPLATE OVERHAUL.
 // Previous templates referenced node types like `screenshot`, `localshell`,
 // `gitops`, `bgremove`, `videoedit` that have NO AGENT_PRESETS entry in
 // ai_bridge.py — running them would fall through to a generic harness with
@@ -507,7 +507,7 @@ export default function TemplateGallery({ open, onClose, onLoadTemplate, lang, c
             { multiline: true, placeholder: lang === 'zh' ? '可选：简单描述这个模板的用途' : 'Optional: short description' },
         )) || '';
         // Convert canvas (typed nodes + index edges) → backend template (key/depends_on)
-        // v7.34 (maintainer): the React Flow `type` field is ALWAYS the
+        // v7.34: the React Flow `type` field is ALWAYS the
         // string `'agent'` (the component-type registered in nodeTypes={agent: AgentNode}).
         // The real agent role (planner/builder/...) lives in `data.nodeType`.
         // Reading `n.type` here always produced `'agent'`, so saved user
@@ -530,7 +530,7 @@ export default function TemplateGallery({ open, onClose, onLoadTemplate, lang, c
             usedKeys[role] = ct;
             const key = ct === 1 ? role : `${role}${ct}`;
             idxToKey[i] = key;
-            // v7.39 (maintainer): persist x/y so reload restores the
+            // v7.39: persist x/y so reload restores the
             // exact canvas layout the user had when saving. Without this the
             // backend dropped position and frontend auto-relayed by depth,
             // making custom arrangements feel "lost" after save+reload.

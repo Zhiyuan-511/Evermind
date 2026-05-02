@@ -30,7 +30,6 @@ import logging
 import os
 import threading
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Callable, List, Optional
 
 logger = logging.getLogger("evermind.stream_parser")

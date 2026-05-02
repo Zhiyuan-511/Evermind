@@ -100,7 +100,6 @@ class ScreenshotPlugin(Plugin):
     async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
         try:
             import pyautogui
-            from PIL import Image
 
             region = params.get("region")  # (x, y, w, h) or None for fullscreen
             if region:
@@ -188,7 +187,7 @@ class BrowserPlugin(Plugin):
     def _resolve_headless(self, context: Dict[str, Any] | None = None) -> bool:
         if self._force_headless_session:
             return True
-        # v7.11 (maintainer): default to HEADLESS unconditionally for
+        # v7.11: default to HEADLESS unconditionally for
         # better UX. User reported "reviewer 打开外部浏览器之前还是会先打开内部
         # 浏览器" — the second visible Chromium window was confusing. Reviewer
         # tools (screenshot/click/dom_snapshot) work identically headless.
@@ -225,7 +224,7 @@ class BrowserPlugin(Plugin):
         browser — the external Playwright window is visibly laggy and
         confusing to the user.
         """
-        # v6.4.9 (maintainer): CDP attach is OPT-IN only.
+        # v6.4.9: CDP attach is OPT-IN only.
         # Previously the backend auto-attached to port 19222 whenever Electron
         # exported the URL — result: reviewer/tester/analyst all drove the
         # user's visible browser window, yanking the tab away from whatever
@@ -286,7 +285,7 @@ class BrowserPlugin(Plugin):
         self._active_plugin_context = dict(context or {})
         requested_headless = self._resolve_headless(context)
         headless = requested_headless
-        # v6.4.14 (maintainer): capture whichever app the user was
+        # v6.4.14: capture whichever app the user was
         # actively in RIGHT BEFORE we pop up a headful Chromium. After
         # each browser action we restore focus to that app (see
         # `_restore_user_focus_nonblocking`) so AI browser operations never
@@ -307,7 +306,7 @@ class BrowserPlugin(Plugin):
         # raster disabled under some configs, (c) occlusion causing throttle
         # when Evermind main window overlaps it. These flags mirror what
         # browser-use / Cline / Anthropic computer-use use for headful.
-        # v6.4.27 (maintainer): do NOT open startup windows + keep
+        # v6.4.27: do NOT open startup windows + keep
         # Chromium from auto-activating on macOS. Documented on Peter
         # Beverloo's Chromium switch list — these are the exact flags
         # used by chrome-devtools-mcp + Playwright community to silence
@@ -338,7 +337,7 @@ class BrowserPlugin(Plugin):
             "--disable-sync",
             "--disable-background-networking",
             "--disable-translate",
-            # v7.1f (maintainer): force no HTTP cache so reviewer/tester
+            # v7.1f: force no HTTP cache so reviewer/tester
             # always observes the LATEST patched code. Without this, after
             # patcher edits e.g. shared/nav.js, the reviewer re-navigates
             # with a `?t=` buster on index.html but the linked nav.js URL
@@ -411,7 +410,7 @@ class BrowserPlugin(Plugin):
             )
             # Also infer from node_type if provided.
             _node_role = str(ctx_map.get("node_type") or ctx_map.get("node") or "").strip().lower()
-            # v6.4.27 (maintainer): reviewer/tester NO LONGER default to
+            # v6.4.27: reviewer/tester NO LONGER default to
             # visible. They run headless unless the user opts in via
             # EVERMIND_BROWSER_SHOW=1 env var. Reason: users reported the
             # reviewer pulling focus away every ~15s during multi-round browser
@@ -497,7 +496,7 @@ class BrowserPlugin(Plugin):
                     self._browser = await self._playwright.chromium.launch(headless=True, args=launch_args)
                     headless = True
                 await self._create_context_and_page(headless=headless)
-        # v6.4.27/28 (maintainer): bring_to_front() is the single
+        # v6.4.27/28: bring_to_front() is the single
         # biggest source of macOS focus-steal. For tester/reviewer (silent
         # QA) we NEVER call it — the window is parked offscreen anyway
         # and users don't need to see it. For chat/uidesign the user
@@ -526,7 +525,7 @@ class BrowserPlugin(Plugin):
         return self._page
 
     async def _record_preview_session(self, params: Dict[str, Any], context: Dict[str, Any]) -> PluginResult:
-        """v6.2 (maintainer): record a short gameplay/preview clip for
+        """v6.2: record a short gameplay/preview clip for
         video-based review. Uses a dedicated Playwright context so the main
         browser session (CDP-attached or otherwise) is untouched.
 
@@ -744,7 +743,7 @@ class BrowserPlugin(Plugin):
             self._launch_note = ""
             self._bound_page_identity = None
             self._active_plugin_context = {}
-            # v6.4.14 (maintainer): clear the pre-launch frontmost-app
+            # v6.4.14: clear the pre-launch frontmost-app
             # capture so the next session re-captures the user's then-current
             # app (they might switch between reviewer and tester runs).
             self._pre_launch_frontmost_app = ""
@@ -1611,13 +1610,13 @@ class BrowserPlugin(Plugin):
       100% { transform: translate(-50%, -50%) scale(3); opacity: 0; border-width: 3px; }
     }
 
-    /* v6.1.14c (maintainer): previous version used 60-90px inset
+    /* v6.1.14c: previous version used 60-90px inset
        box-shadow which bled blue/purple through the entire viewport. the maintainer
        asked for ONLY a light purple gradient on the edge frame — not a
        full-screen tint. Stripped all inset shadows; kept a narrow outer
        glow so the border still reads as "lit up" without discoloring page
        content. Gradient tuned to soft lavender → pale cyan for subtlety. */
-    /* v6.1.15 (maintainer): previous border-box conic-gradient trick
+    /* v6.1.15: previous border-box conic-gradient trick
        bled into padding-box on retina displays, washing the ENTIRE page
        in purple. Root cause: Chrome renders transparent padding-box layer
        on top of page content with ≥1px anti-alias halo on retina.
@@ -1783,7 +1782,7 @@ class BrowserPlugin(Plugin):
     __showKeyHud();
     __flashKeyChip(e.key);
   }, true);
-  /* v6.1.3 (maintainer): frame stays ACTIVE for the whole AI session.
+  /* v6.1.3: frame stays ACTIVE for the whole AI session.
      Previous 3.2s auto-hide meant the "AI is controlling" signal flickered
      between actions, giving the impression nothing was happening during
      pauses (e.g. CoVe reasoning, captcha wait). Session ends only via
@@ -1929,7 +1928,7 @@ class BrowserPlugin(Plugin):
       ripple.style.top = fromY + 'px';
       document.documentElement.appendChild(ripple);
       setTimeout(() => { try { ripple.remove(); } catch(_){} }, 960);
-      /* v6.1.15 (maintainer): also draw an SVG path line from→to
+      /* v6.1.15: also draw an SVG path line from→to
          so user can see drag trajectory (critical for 3D camera drag
          review in games). */
       try {
@@ -1965,7 +1964,7 @@ class BrowserPlugin(Plugin):
         }
       } catch(_) {}
     },
-    /* v6.1.15 (maintainer): hold/long-press — circular progress ring
+    /* v6.1.15: hold/long-press — circular progress ring
        around the cursor that fills during hold duration. Used for games
        where AI long-presses to charge attack / fire continuous bullets. */
     hold: (x, y, durationMs, label) => {
@@ -1999,7 +1998,7 @@ class BrowserPlugin(Plugin):
     hide: () => { dot.style.opacity = '0'; label.style.opacity = '0'; },
     show: () => { dot.style.opacity = '0.95'; label.style.opacity = '0.9'; },
   };
-  /* v6.1.3 (maintainer): immediately surface the AI frame after
+  /* v6.1.3: immediately surface the AI frame after
      install so the user sees the cyan-purple glow even on pages where AI
      only observes (no click/move). centerDot keeps the cursor at viewport
      centre so it's visible during hover-only / observe-only sessions. */
@@ -2326,7 +2325,7 @@ class BrowserPlugin(Plugin):
             "state_hash": data.get("state_hash", ""),
         })
         self._action_log = self._action_log[-20:]
-        # v6.4.27 (maintainer): restore focus ONLY after page-changing
+        # v6.4.27: restore focus ONLY after page-changing
         # actions. Previously this fired after EVERY action (observe /
         # snapshot / scroll / click / navigate) — 2 osascript calls per
         # action adds ~50-100ms and the focus flicker was still noticeable
@@ -2344,7 +2343,7 @@ class BrowserPlugin(Plugin):
     def _restore_user_focus_nonblocking(self) -> None:
         """Non-blocking focus restoration after a headful browser action.
 
-        v6.4.14 (maintainer) REDESIGN. The v6.4.11 version hard-coded
+        v6.4.14 REDESIGN. The v6.4.11 version hard-coded
         "activate Evermind", which just moved the focus-steal problem from
         Chromium to Evermind — if the user was working in Antigravity / a
         terminal / another app, we yanked them out of it every browser call.
@@ -2409,7 +2408,7 @@ class BrowserPlugin(Plugin):
     async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
         action = str(params.get("action", "navigate") or "navigate").strip().lower()
 
-        # v6.2 (maintainer): record_preview creates a dedicated Playwright
+        # v6.2: record_preview creates a dedicated Playwright
         # context with record_video_dir, runs task-type-specific interactions,
         # and returns the resulting webm path. Kept OFF the shared browser
         # state so the main browsing session stays untouched.
@@ -2424,7 +2423,7 @@ class BrowserPlugin(Plugin):
             if url and url.strip():
                 if action == "navigate":
                     self._clear_diagnostics()
-                # v7.11 (maintainer): cache-bust /preview/ navigations.
+                # v7.11: cache-bust /preview/ navigations.
                 # User reported reviewer testing OLD artifact while latest
                 # patcher edits sat on disk. Browser disk cache + Service
                 # Worker can serve a stale HTML even when the server sends
@@ -3378,7 +3377,7 @@ class BrowserPlugin(Plugin):
                 )
 
             if action == "mouse_delta":
-                # v7.15 (maintainer) — Pointer Lock mouselook simulation.
+                # v7.15 — Pointer Lock mouselook simulation.
                 # Playwright `page.mouse.move(x, y)` does NOT generate non-zero
                 # `movementX/movementY` when Pointer Lock is engaged (the FPS
                 # camera receives 0 deltas, camera doesn't rotate). Per web.dev
@@ -3641,7 +3640,7 @@ class BrowserPlugin(Plugin):
                     data["capture_path"] = str(capture_path)
                 return PluginResult(success=True, data=data, artifacts=artifacts)
 
-            # v6.4.52 (maintainer): 'screenshot' is a natural name
+            # v6.4.52: 'screenshot' is a natural name
             # chat-agent models expect — alias it to a full-viewport grab.
             # Previously we only had 'snapshot' / 'screenshot_region' and
             # kimi's "action=screenshot" kept returning Unknown action,
@@ -4742,7 +4741,7 @@ class FileOpsPlugin(Plugin):
                 return None
         except (ValueError, RuntimeError):
             pass
-        # v6.4.28 (maintainer) — AGGRESSIVE basename re-map.
+        # v6.4.28 — AGGRESSIVE basename re-map.
         # Observed bug: kimi patcher resolves "index.html" against Python's
         # CWD (Evermind.app/Contents/Resources/backend) producing an absolute
         # path INSIDE the app bundle. The sandbox correctly rejected the
@@ -5060,7 +5059,7 @@ class FileOpsPlugin(Plugin):
                 ),
             )
 
-        # v6.1.7 (maintainer): 3D vs 2D contract validation. If the
+        # v6.1.7: 3D vs 2D contract validation. If the
         # task brief explicitly demanded 3D / Three.js / WebGL and the
         # writer produced a 2D Canvas game, reject so the model retries.
         goal_hint = str((context or {}).get("goal") or (context or {}).get("task_description") or "").lower()
@@ -5353,7 +5352,7 @@ class FileOpsPlugin(Plugin):
                     success=False,
                     error=f"file_ops is read-only for {node_type}; action '{action}' is blocked",
                 )
-            # v6.1.3 (maintainer): patch-only mode for reviewer-rejection
+            # v6.1.3: patch-only mode for reviewer-rejection
             # retries. When the orchestrator sets
             # `file_ops_patch_only_mode=True`, `action=write` is REJECTED with
             # an instructional error telling the model to use `action=edit`
@@ -5627,7 +5626,7 @@ class FileOpsPlugin(Plugin):
                     "path": path, "size": len(patched), "patched": True,
                     "created": creates_new_file and original == "",
                     "bytes_changed": abs(len(patched) - len(original)),
-                    # v7.30 (maintainer): mark patch as a write so
+                    # v7.30: mark patch as a write so
                     # _tool_result_has_write detects it (parallel to edit fix).
                     "written": True,
                     "bytes_written": len(patched.encode("utf-8")),
@@ -5644,7 +5643,7 @@ class FileOpsPlugin(Plugin):
                     content = f.read()
                 count = content.count(old_string)
                 if count == 0:
-                    # v7.31 (maintainer): instead of bare "not found",
+                    # v7.31: instead of bare "not found",
                     # find the closest matching line + emit a 6-line context
                     # window so the LLM can correct the anchor on the next
                     # turn. Without this hint, patcher LLMs (esp. kimi) tend
@@ -5693,7 +5692,7 @@ class FileOpsPlugin(Plugin):
                     new_content = content.replace(old_string, new_string, 1)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(new_content)
-                # v7.30 (maintainer): include written/bytes_written so
+                # v7.30: include written/bytes_written so
                 # _tool_result_has_write recognizes edits as writes. Without
                 # these fields, patcher's `file_ops edit` calls registered as
                 # 0 writes — the orchestrator counted 6 successful tool_calls

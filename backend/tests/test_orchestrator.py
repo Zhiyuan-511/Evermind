@@ -3437,7 +3437,7 @@ class TestV6_4_26_DeclarativeQualityGates(unittest.TestCase):
         self.assertEqual(blocked, set(), f"unexpected failures: {fails}")
 
     def test_assetimport_manifest_classifies_md_as_text(self):
-        import orchestrator as _o, pathlib, json
+        import orchestrator as _o, json
         asset_dir = _o.OUTPUT_DIR / "assets"
         asset_dir.mkdir(parents=True, exist_ok=True)
         (asset_dir / "brief.md").write_text("# hi")
@@ -3468,7 +3468,7 @@ class TestV6_4_26_DeclarativeQualityGates(unittest.TestCase):
         index.html' should auto-redirect to output_root/index.html, not reject.
         This is the core fix for the 20-round empty-retry patcher bug."""
         from plugins.implementations import FileOpsPlugin
-        import orchestrator as _o, pathlib
+        import orchestrator as _o
         plugin = FileOpsPlugin()
         output_root = _o.OUTPUT_DIR
         output_root.mkdir(parents=True, exist_ok=True)
@@ -3586,7 +3586,7 @@ class TestV6_4_25_AssetFastPath(unittest.TestCase):
 
     def test_assetimport_fast_path_scans_existing_assets(self):
         # Prepopulate assets/ with a pretend image + audio
-        import pathlib, orchestrator as _o
+        import orchestrator as _o
         asset_dir = _o.OUTPUT_DIR / "assets"
         asset_dir.mkdir(parents=True, exist_ok=True)
         (asset_dir / "hero.png").write_bytes(b"\x89PNG")
@@ -16083,7 +16083,7 @@ class TestReviewerNonRetryableRejection(unittest.TestCase):
             finally:
                 orchestrator_module.OUTPUT_DIR = original_output
 
-        # v6.1.3 (maintainer): premium 3D game rejection budget exhaustion
+        # v6.1.3: premium 3D game rejection budget exhaustion
         # now SOFT-PASSES (keeps pipeline alive) rather than hard-failing. The
         # rejection details must remain visible via output_summary so the user
         # sees what was flagged without losing the downstream deployer/tester.
@@ -16318,7 +16318,7 @@ class TestReviewerNonRetryableRejection(unittest.TestCase):
 
         self.assertFalse(result.get("success"))
         self.assertTrue(result.get("requeue_requested"))
-        # v6.1.14h (maintainer): on ROUND 1 reject, Evermind routes to
+        # v6.1.14h: on ROUND 1 reject, Evermind routes to
         # polisher-patch branch (surgical file_ops edit) instead of the
         # expensive builder rewrite. Polisher (id=2) + reviewer (id=3) are
         # requeued, builder (id=1) stays COMPLETED. On round 2+ the builder

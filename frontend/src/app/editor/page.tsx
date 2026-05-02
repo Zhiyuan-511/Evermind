@@ -854,7 +854,7 @@ function EditorPageInner() {
     // ── Modal states ──
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [githubOpen, setGithubOpen] = useState(false);
-    // v7.1i (maintainer): CLI mode toggle status — drives whether
+    // v7.1i: CLI mode toggle status — drives whether
     // the "Ultra" difficulty button is enabled or dimmed/disabled.
     const [cliEnabled, setCliEnabled] = useState(false);
     useEffect(() => {
@@ -879,7 +879,7 @@ function EditorPageInner() {
             setDifficulty('pro');
         }
     }, [cliEnabled, difficulty]);
-    // v6.2 (maintainer): welcome wizard shown on first run, guarded by
+    // v6.2: welcome wizard shown on first run, guarded by
     // localStorage.evermind_onboarded_v62. Skip button marks seen.
     const [wizardOpen, setWizardOpen] = useState(false);
     useEffect(() => {
@@ -947,7 +947,7 @@ function EditorPageInner() {
         urlTaskOverrideRef.current = taskParam;
         try { selectTask(taskParam); } catch { /* selectTask hydrates async */ }
     }, [taskParam, selectTask]);
-    // v7.3 (maintainer) — per-task workspace banner. When the selected
+    // v7.3 — per-task workspace banner. When the selected
     // task has zero files in its isolated workspace, show a non-blocking
     // banner inviting the user to add input files. Uses sessionStorage to
     // remember dismissals so we don't pester users on every tab return.
@@ -968,7 +968,7 @@ function EditorPageInner() {
         const probe = async () => {
             if (cancelled) return;
             try {
-                // v7.3.3 (maintainer) — banner detection now correctly
+                // v7.3.3 — banner detection now correctly
                 // queries both stores:
                 //   1. task-scoped: GET /api/tasks/<id>/workspace (file_count)
                 //   2. global FileExplorer: GET /api/workspace/roots → resolve
@@ -989,7 +989,7 @@ function EditorPageInner() {
                     taskFileCount = Number(tj?.stats?.file_count || 0);
                     taskPath = String(tj?.path || '');
                 }
-                // v7.3.5 (maintainer) — banner now also recognises the
+                // v7.3.5 — banner now also recognises the
                 // `artifact_sync_dir` (Delivery Folder) configured via
                 // FileExplorerPanel's "添加文件夹". Earlier code only walked
                 // `output_dir` which is the runtime build directory, NOT the

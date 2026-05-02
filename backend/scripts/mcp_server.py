@@ -33,7 +33,7 @@ import json
 import socket
 import sys
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 from urllib import request as _urllib_request
 from urllib import error as _urllib_error
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 import pytest
 
 from providers import (
-    BaseProvider,
     ChatChunk,
     ChatRequest,
     known_providers,

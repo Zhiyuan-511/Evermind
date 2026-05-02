@@ -183,7 +183,7 @@ class TestCondensation(unittest.TestCase):
     """v6.1.6 — agentic_runtime._try_condensation regression tests."""
 
     def _make_loop(self):
-        from agentic_runtime import AgenticLoop, LoopConfig, ContextWindow
+        from agentic_runtime import AgenticLoop, LoopConfig
 
         class _FakeTools:
             def get_tool_definitions(self, *a, **k):

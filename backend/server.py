@@ -40,7 +40,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from plugins.base import (
     PluginRegistry,
-    get_default_plugins_for_node,
     get_effective_default_plugins,
     is_builder_browser_enabled,
     is_image_generation_available,
@@ -51,7 +50,7 @@ from ai_bridge import AIBridge, MODEL_REGISTRY, PROVIDER_ENV_KEY_MAP
 from config_utils import coerce_bool, coerce_int
 from executor import NodeExecutor
 from orchestrator import Orchestrator
-from workflow_templates import get_template, list_templates, template_nodes
+from workflow_templates import get_template, list_templates
 from task_store import (
     get_task_store, get_report_store,
     get_run_store, get_node_execution_store, get_artifact_store,
@@ -147,7 +146,7 @@ ORPHANED_RUNNING_RUN_STALE_S = max(15, coerce_int(os.getenv("EVERMIND_ORPHANED_R
 
 app = FastAPI(title="Evermind Backend", version=APP_VERSION)
 
-# v6.4.4 (maintainer): GitHub integration router
+# v6.4.4: GitHub integration router
 try:
     from git_routes import router as _git_router
     app.include_router(_git_router)
@@ -1166,7 +1165,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         # We skip X-Frame-Options entirely for preview routes only.
         path = request.url.path
         if path.startswith("/preview"):
-            # v7.1f (maintainer): NO cache for /preview — reviewer/
+            # v7.1f: NO cache for /preview — reviewer/
             # tester must always observe the LATEST patched code. Old
             # `max-age=5` allowed Playwright to serve stale JS/CSS for 5s,
             # which is exactly long enough for a fast patcher edit to be
@@ -1222,7 +1221,7 @@ MAX_WS_CONNECTIONS = 10
 connected_clients: Set[WebSocket] = set()
 _active_tasks: Dict[int, list] = {}  # client_id → [asyncio.Task, ...]
 _detached_tasks: Set[asyncio.Task] = set()  # long-lived tasks that survive sender WS disconnect
-# v6.4.34 (maintainer): cross-handler references so chat_stop can
+# v6.4.34: cross-handler references so chat_stop can
 # interrupt an in-flight chat turn. Keyed by client_id → handle.
 _chat_cancel_handles: Dict[int, Dict[str, bool]] = {}
 _chat_queue_handles: Dict[int, Any] = {}
@@ -1341,7 +1340,7 @@ def _compress_chat_messages(mem: Dict[str, list]) -> None:
 
 
 def _detect_workspace_tech_stack(index_path: Path) -> str:
-    """v6.4.30 (maintainer) — peek at index.html head to identify
+    """v6.4.30 — peek at index.html head to identify
     the tech stack so chat agent proposes stack-appropriate edits.
     Returns a short one-liner like 'Three.js r164 (3D game)' or empty."""
     try:
@@ -1416,11 +1415,11 @@ def _recent_focused_files_from_session(session_id: str) -> list[str]:
 
 
 def _build_active_project_context(*, compact: bool = False, session_id: str = "") -> str:
-    """v6.4.29 (maintainer) — inject "where the user's current
+    """v6.4.29 — inject "where the user's current
     project lives" so the chat agent never replies "我没看到你的游戏前端源码".
     The pipeline's most recent output is always at OUTPUT_DIR/index.html.
 
-    v6.4.30 (maintainer) — also injects:
+    v6.4.30 — also injects:
       - detected tech stack ("Three.js (3D/WebGL)")
       - CLAUDE.md / AGENTS.md conventions
       - recently focused files from session memory
@@ -1538,9 +1537,9 @@ def _build_active_project_context(*, compact: bool = False, session_id: str = ""
 
 
 def _chat_auto_pre_read_snapshot(user_message: str, session_id: str, *, kimi_compact: bool = False) -> str:
-    """v6.4.31 (maintainer) — smart auto pre-read.
+    """v6.4.31 — smart auto pre-read.
 
-    v6.4.36 (maintainer): `kimi_compact=True` caps the snippet at
+    v6.4.36: `kimi_compact=True` caps the snippet at
     2500 chars (vs 18000 default) because Kimi k2.6-code-preview stops
     emitting standard tool_calls and degenerates into prose
     (observed: "to=file_ops.read 体育彩票天天json") once system prompt
@@ -1604,8 +1603,8 @@ def _chat_auto_pre_read_snapshot(user_message: str, session_id: str, *, kimi_com
         "\n\n## Auto-Attached Source (v6.4.31)\n"
         f"The user's message suggests they want you to modify the current artifact. "
         f"To save you a tool round-trip, Evermind has pre-read the primary file:\n\n"
-        f"<current_artifact path=\"{index}\" size=\"{size}B\" lines=\"{lines_total}\""
-        f"{' truncated=\"true\"' if truncated else ''}>\n"
+        f'<current_artifact path="{index}" size="{size}B" lines="{lines_total}"'
+        + (' truncated="true"' if truncated else '') + '>\n'
         f"{snippet}\n"
         f"</current_artifact>\n"
         f"\nShowing the first {lines_shown} of {lines_total} lines. "
@@ -1699,7 +1698,7 @@ OPENCLAW_DISPATCH_ACK_TIMEOUT_S = coerce_int(
 OUTPUT_DIR = resolve_output_dir()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# v7.3 (maintainer) — per-task workspaces for session isolation.
+# v7.3 — per-task workspaces for session isolation.
 # Each task gets its own folder under ~/.evermind/workspaces/<task_id>/
 # so files added in one task are never visible in another. Inspired by
 # Claude Code worktrees (~/.claude/worktrees/<session>/) and Claude Cowork
@@ -2896,7 +2895,7 @@ def _save_connector_artifact(
 app.mount("/uploads", StaticFiles(directory=str(CHAT_UPLOADS_DIR), html=False), name="uploads")
 
 
-# v7.1f (maintainer): NO-CACHE wrapper for /preview.
+# v7.1f: NO-CACHE wrapper for /preview.
 # Without explicit Cache-Control, Starlette's StaticFiles only sends
 # ETag + Last-Modified. Browsers (incl. Playwright used by reviewer/
 # tester) heuristically cache linked sub-resources (`src/shared/*.js`,
@@ -4301,7 +4300,7 @@ async def get_report(report_id: str):
 
 @app.delete("/api/reports/{report_id}")
 async def delete_report_ep(report_id: str):
-    """v7.0 (maintainer): delete a single report by id."""
+    """v7.0: delete a single report by id."""
     store = get_report_store()
     ok = store.delete_report(report_id)
     if not ok:
@@ -4311,7 +4310,7 @@ async def delete_report_ep(report_id: str):
 
 @app.delete("/api/reports")
 async def delete_reports_bulk(keep_latest: int = 0):
-    """v7.0 (maintainer): bulk-delete reports.
+    """v7.0: bulk-delete reports.
     Use ?keep_latest=N to retain the N most-recent entries, or
     ?keep_latest=0 (default) to wipe all.
     """
@@ -4426,7 +4425,7 @@ async def api_list_workflow_templates():
     return {"templates": system + _load_user_templates()}
 
 
-# ── v7.2 (maintainer): User-defined custom templates ──────────────
+# ── v7.2: User-defined custom templates ──────────────
 # Storage: ~/.evermind/user_templates/{slug}.json
 # JSON schema:
 #   {
@@ -4510,7 +4509,7 @@ async def api_save_user_template(data: Dict = Body(...)):
         depends_on = raw.get("depends_on") or raw.get("dependsOn") or []
         if not isinstance(depends_on, list):
             depends_on = []
-        # v7.39 (maintainer): preserve x/y position so user-saved
+        # v7.39: preserve x/y position so user-saved
         # templates load with the EXACT layout they had on canvas. Previously
         # only key/label/task/depends_on were stored, and the frontend
         # rebuilt positions from depend graph (depth×220, row×130) on reload,
@@ -5377,7 +5376,7 @@ async def save_user_settings(data: Dict = Body(...)):
         patch.pop("builder_enable_browser", None)
     if "image_generation" in patch and isinstance(patch.get("image_generation"), dict):
         image_patch = dict(patch.get("image_generation") or {})
-        # v6.2 (maintainer): direct provider fields alongside legacy ComfyUI
+        # v6.2: direct provider fields alongside legacy ComfyUI
         _max_images_raw = image_patch.get("max_images_per_run", 10)
         try:
             _max_images = max(1, min(40, int(_max_images_raw)))
@@ -5411,7 +5410,7 @@ async def save_user_settings(data: Dict = Body(...)):
     success = save_settings(merged)
     if success:
         count = apply_api_keys(merged)
-        # v6.3 (maintainer): hot-reload EVERY live AIBridge so a UI key
+        # v6.3: hot-reload EVERY live AIBridge so a UI key
         # change goes live WITHOUT restarting the backend. Previously the
         # flow updated env vars + disk but AIBridge instances held on to
         # cached OpenAI clients + compat-gateway health against the OLD
@@ -5527,7 +5526,7 @@ async def validate_keys(data: Dict = Body(...)):
 
 @app.post("/api/settings/image_gen/test")
 async def image_gen_test(data: Dict = Body(...)):
-    """v6.2 (maintainer): Test-drive an image_generation config.
+    """v6.2: Test-drive an image_generation config.
 
     Accepts an ephemeral config (not persisted), hits the provider once with
     a built-in or user-provided prompt, and returns timing + preview.
@@ -5753,12 +5752,12 @@ async def apply_stable_signing(data: Dict = Body(default={})):
 # ─────────────────────────────────────────────
 # CLI Backend Endpoints
 # ─────────────────────────────────────────────
-from cli_backend import get_detector, get_executor, is_cli_mode_enabled, CLI_PROFILES
+from cli_backend import get_detector, CLI_PROFILES
 
 
 @app.post("/api/cli/toggle")
 async def cli_toggle(data: Dict = Body(...)):
-    """v7.0 (maintainer): one-call CLI-mode on/off.
+    """v7.0: one-call CLI-mode on/off.
     Body: {"enabled": true, "preferred_cli": "claude", "preferred_model": "sonnet"}
     Persists to ~/.evermind/config.json + applies to in-memory settings.
     Also runs auto-detection so `detected_clis` is fresh.
@@ -5911,7 +5910,7 @@ async def model_speed_test(data: Dict = Body(default={})):
     Only tests models whose provider has an API key configured.
     """
     import asyncio as _asyncio
-    from ai_bridge import AIBridge, MODEL_REGISTRY, PROVIDER_ENV_KEY_MAP
+    from ai_bridge import AIBridge, MODEL_REGISTRY
 
     settings = load_settings()
     api_keys = settings.get("api_keys", {})
@@ -6207,7 +6206,7 @@ _ROLE_TIMEOUT_HINTS: Dict[str, int] = {
 
 
 def _ultra_mode_is_on() -> bool:
-    """v7.1d (maintainer): read cli_mode.ultra_mode from settings.
+    """v7.1d: read cli_mode.ultra_mode from settings.
     Used by the watchdog to multiply per-role timeouts so commercial-grade
     long tasks (Analyst 15KB+ research, planner 15-subtask blueprint,
     Claude CLI writing a 20-file Electron app) don't get axed at 180s.
@@ -6250,7 +6249,7 @@ def _get_chat_browser_plugin():
     return _CHAT_BROWSER_PLUGIN if _CHAT_BROWSER_PLUGIN is not False else None
 
 
-# v6.4.42 (maintainer): inflight future tracker. If a previous
+# v6.4.42: inflight future tracker. If a previous
 # browser action timed out at the worker level, the Playwright coroutine
 # may still be scheduled in the main asyncio loop, blocking future
 # navigate/click calls behind a zombie task. Before submitting a new
@@ -6726,7 +6725,7 @@ async def lifespan(application):
         _MAIN_ASYNCIO_LOOP = None
     _watchdog_task = asyncio.create_task(_timeout_watchdog())
     logger.info("[Watchdog] Timeout watchdog started")
-    # v7.1g (maintainer): bootstrap user CLI configs on every server
+    # v7.1g: bootstrap user CLI configs on every server
     # startup. Idempotent — only writes files that don't exist or merges
     # missing keys. Lets a fresh user install Evermind.app and immediately
     # benefit from Codex profiles, Claude skills, sub-agents, MCP servers,
@@ -6743,7 +6742,6 @@ async def lifespan(application):
     # to multi-GB sizes after weeks of use.
     try:
         import time as _t
-        from os import walk as _walk
         # Prune `_stable_previews` to most-recent 8 runs (each ~5-30 MB)
         sp_root = OUTPUT_DIR / "_stable_previews"
         if sp_root.exists() and sp_root.is_dir():
@@ -6802,7 +6800,6 @@ async def lifespan(application):
     # session tickets so the first real LLM call shaves ~80-150ms off its
     # handshake. Non-blocking, failures are ignored.
     try:
-        import socket
         from urllib.parse import urlparse
         from ai_bridge import MODEL_REGISTRY
         _hosts: set[tuple[str, int]] = set()
@@ -7185,7 +7182,7 @@ async def websocket_endpoint(ws: WebSocket):
                 if new_config.get("privacy"):
                     from privacy import update_masker_settings
                     update_masker_settings(new_config["privacy"])
-                # v6.3 (maintainer): also accept nested api_keys /
+                # v6.3: also accept nested api_keys /
                 # api_bases (the UI-side shape) so a settings change via WS
                 # propagates the same as /api/settings/save. Previously this
                 # handler only consumed flat `openai_api_key` style fields.
@@ -7198,7 +7195,7 @@ async def websocket_endpoint(ws: WebSocket):
                     for _p, _val in (new_config.get("api_bases") or {}).items():
                         config["api_bases"][_p] = str(_val or "")
                 ai_bridge.config = config
-                # v6.3 (maintainer): full live reload for EVERY bridge.
+                # v6.3: full live reload for EVERY bridge.
                 # Earlier version only reloaded the current ws-handler's
                 # ai_bridge, but multiple concurrent WS clients each hold
                 # their own AIBridge instance (see line ~5774) — a config
@@ -7313,7 +7310,7 @@ async def websocket_endpoint(ws: WebSocket):
                 # (pro = 7-10 nodes, matches typical custom workflows).
                 if difficulty == "custom":
                     difficulty = "pro"
-                # v7.1 (maintainer): accept ultra aliases
+                # v7.1: accept ultra aliases
                 elif difficulty in ("ultra", "product", "long_task", "ultra_mode"):
                     difficulty = "ultra"
                 elif difficulty not in ("simple", "standard", "pro", "ultra"):
@@ -7610,7 +7607,7 @@ async def websocket_endpoint(ws: WebSocket):
                         except Exception:
                             effective_node_model = effective_node_model or requested_node_model or model
                             preferred_provider = ""
-                        # v7.1g (maintainer): if CLI mode is enabled and
+                        # v7.1g: if CLI mode is enabled and
                         # the node is CLI-eligible, replace the API model name
                         # with `cli:<choice>` so the UI shows the actual route
                         # from the moment the NE is created — not the stale
@@ -8725,7 +8722,7 @@ async def websocket_endpoint(ws: WebSocket):
 
                 # Build messages for LLM
                 pipeline_ctx = _build_pipeline_context_for_chat(session_id)
-                # v6.4.29 (maintainer): Active Project injection.
+                # v6.4.29: Active Project injection.
                 # Without this, users report the chat saying "我没看到你的
                 # 游戏前端源码" even though the pipeline just wrote a complete
                 # index.html to OUTPUT_DIR. The block tells the agent exactly
@@ -8733,7 +8730,7 @@ async def websocket_endpoint(ws: WebSocket):
                 # directly instead of asking the user to "mount" a directory.
                 # Compact version (≤ 250 chars) for OpenAI-family to avoid
                 # relay 403 on large system prompts.
-                # v6.3 (maintainer): detect OpenAI-family provider so we
+                # v6.3: detect OpenAI-family provider so we
                 # can skip the extended "Browser Virtuosity" macro / WASD /
                 # mouse_click script section — those automation-style phrases
                 # trip OpenAI-route content filters (observed 403 "Your
@@ -8913,7 +8910,7 @@ async def websocket_endpoint(ws: WebSocket):
                     )
                     )
 
-                # v6.4.56 ROI-1 (maintainer) — STICKY PROJECT INVARIANTS.
+                # v6.4.56 ROI-1 — STICKY PROJECT INVARIANTS.
                 # Append auto-extracted invariants (3D/第三人称/怪物 etc.) to
                 # the very last user message. Inspired by Cline's
                 # environment_details pattern + Anthropic long-context tips
@@ -9008,7 +9005,7 @@ async def websocket_endpoint(ws: WebSocket):
                 import queue as queue_mod
 
                 token_queue: queue_mod.Queue = queue_mod.Queue()
-                # v6.4.43 (maintainer): HOIST _cancel_requested so
+                # v6.4.43: HOIST _cancel_requested so
                 # the nested _chat_worker can see it via closure. Before
                 # this, the flag was created AFTER worker.start(), so
                 # chat_stop could flip it but the worker's tight stream
@@ -9043,7 +9040,7 @@ async def websocket_endpoint(ws: WebSocket):
                         _env_key = PROVIDER_ENV_KEY_MAP.get(_provider, "OPENAI_API_KEY")
                         api_key = os.getenv(_env_key, "")
 
-                        # v6.3 (maintainer) HOTFIX: resolve base URL with
+                        # v6.3 HOTFIX: resolve base URL with
                         # env PRIORITY over MODEL_REGISTRY.api_base — previously
                         # it was the opposite, so a user setting a new
                         # OPENAI_API_BASE via UI got silently overridden by the
@@ -9062,7 +9059,7 @@ async def websocket_endpoint(ws: WebSocket):
                         }
                         _env_base = os.getenv(_base_env_map.get(_provider, ""), "").strip()
                         base_url = _env_base or str(_model_info.get("api_base") or "").strip()
-                        # v6.3 (maintainer): diagnostic log so a failed
+                        # v6.3: diagnostic log so a failed
                         # chat turn can always be traced to the exact base_url
                         # that was used. Previous chat errors were swallowed
                         # inside _chat_worker's bare except, leaving no trail.
@@ -9099,7 +9096,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 return
 
                         # ── OpenAI-compatible path (covers openai/kimi/deepseek/qwen/etc) ──
-                        # v6.4.47 (maintainer): force httpx-level
+                        # v6.4.47: force httpx-level
                         # timeouts by constructing our OWN httpx.Client.
                         # The openai SDK's per-call `timeout=` parameter and
                         # our external watchdog both failed to break out of
@@ -9132,7 +9129,7 @@ async def websocket_endpoint(ws: WebSocket):
                         _extra_headers = _model_info.get("extra_headers")
                         if _extra_headers:
                             client_kwargs["default_headers"] = _extra_headers
-                        # v6.3 (maintainer) HOTFIX: some Chinese relays
+                        # v6.3 HOTFIX: some Chinese relays
                         # (relay, likely others) do anti-passthrough
                         # fingerprinting on the exact string "User-Agent:
                         # OpenAI/Python" and return 403 "Your request was
@@ -9238,7 +9235,7 @@ async def websocket_endpoint(ws: WebSocket):
                         # and bailed silently, which users experienced as "it just
                         # stopped doing anything". Also exposed as env var so power
                         # users can crank higher for long browse sessions.
-                        # v6.1.3 (maintainer): Chat agent ceiling raised
+                        # v6.1.3: Chat agent ceiling raised
                         # 15→80. Google-search-retry-with-Bing style flows need
                         # 15+ rounds easily; users were hitting the cap and
                         # seeing "Google search blocked, let me try Bing" cut
@@ -9253,7 +9250,7 @@ async def websocket_endpoint(ws: WebSocket):
                         _MAX_TOOL_ITERATIONS = max(3, min(200, _MAX_TOOL_ITERATIONS))
                         _iter = 0
                         full_content = ""
-                        # v6.4.35 (maintainer) — DISABLE thinking for chat
+                        # v6.4.35 — DISABLE thinking for chat
                         # on kimi. Kimi k2.6-code-preview defaults to
                         # thinking=enabled which requires every assistant
                         # tool_call message in history to carry
@@ -9279,7 +9276,7 @@ async def websocket_endpoint(ws: WebSocket):
                         # messages (older turns may have it; kimi-disabled
                         # mode doesn't care, and dropping it avoids any
                         # accidental re-enable of the strict validator).
-                        # v6.4.38 (maintainer): message sanitizer. The
+                        # v6.4.38: message sanitizer. The
                         # OpenAI SDK 1.x does deep equality/length checks on
                         # message fields and will crash with opaque errors
                         # like "'<' not supported between instances of 'map'
@@ -9332,7 +9329,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 # Other providers silently ignore the field.
                                 out.append(clean)
                             return out
-                        # v6.4.44-A (maintainer): ENTRY POISON FILTER.
+                        # v6.4.44-A: ENTRY POISON FILTER.
                         # Kimi/GPT sometimes output "让我尝试读取..." /
                         # "让我继续读取..." / "代码被截断了..." as PROSE —
                         # no real tool_calls fired. That prose lands in
@@ -9406,7 +9403,7 @@ async def websocket_endpoint(ws: WebSocket):
                             if _last_user and any(_k in _last_user for _k in _exec_kw):
                                 _v644_force_required_first = True
                                 logger.info("chat_worker: kimi first-turn tool_choice=required")
-                        # v6.4.41 (maintainer) — PROVIDER-AGNOSTIC
+                        # v6.4.41 — PROVIDER-AGNOSTIC
                         # chat hardening. Previous fixes targeted specific
                         # failure modes (kimi thinking, map/int leaks, search
                         # rename). This layer catches the GENERIC pathologies
@@ -9515,7 +9512,7 @@ async def websocket_endpoint(ws: WebSocket):
                         _v642_turn_budget_sec = max(60.0, min(_v642_turn_budget_sec, 3600.0))
                         import time as _time_v642
                         _v642_turn_started = _time_v642.monotonic()
-                        # v6.4.48-C (maintainer) — behavioural guardrail.
+                        # v6.4.48-C — behavioural guardrail.
                         # Observed: kimi/gpt-5.4 sometimes spend 12+ iterations
                         # just reading files, never moving to write/edit,
                         # ending with content_len=0. This is a model-level
@@ -9566,7 +9563,7 @@ async def websocket_endpoint(ws: WebSocket):
                             if _total < 50000 and len(msgs) < 32:
                                 return msgs  # no need
                             _head = msgs[:1]  # system
-                            # v6.4.56 ROI-2 (maintainer): pin FIRST user
+                            # v6.4.56 ROI-2: pin FIRST user
                             # msg as the original goal — NEVER compact it
                             # away. Observed in Apr 23 13:xx session: after 3
                             # compactions, user's "3D 第三人称 怪物" goal was
@@ -9678,7 +9675,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 _adaptive_tool_choice = "none"
                                 _v648_force_no_tools_next = False
                                 logger.info("chat_worker: forcing tool_choice=none this iter to break read-loop")
-                            # v6.4.39 (maintainer): don't shadow the
+                            # v6.4.39: don't shadow the
                             # outer-scope `llm_messages` — use a separate
                             # name. Assigning to `llm_messages` inside this
                             # nested `_chat_worker` turns it into a local,
@@ -9688,7 +9685,7 @@ async def websocket_endpoint(ws: WebSocket):
                             # call; the mutable llm_messages list is
                             # appended to directly (line ~8371 still works).
                             _sanitized_messages = _sanitize_chat_messages(llm_messages)
-                            # v6.4.51 (maintainer) — max_tokens ROOT FIX.
+                            # v6.4.51 — max_tokens ROOT FIX.
                             # Previously 4096 → any file_ops.write of a
                             # full HTML file (our test case is ~37KB ≈
                             # 10000+ tokens) got truncated. The tool_call
@@ -9725,7 +9722,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 # of hallucinating prose-style tool syntax
                                 # ("to=file_ops.read 体育彩票天天json").
                                 "tool_choice": _adaptive_tool_choice,
-                                # v6.4.45 (maintainer) — ROOT FIX.
+                                # v6.4.45 — ROOT FIX.
                                 # The v6.4.43-A chunk-gap watchdog NEVER
                                 # fires when relay hangs BEFORE any
                                 # chunk arrives, because
@@ -9745,7 +9742,7 @@ async def websocket_endpoint(ws: WebSocket):
                             }
                             if _extra_body:
                                 _create_kwargs["extra_body"] = _extra_body
-                            # v6.4.46 (maintainer) — PRE-CREATE WATCHDOG.
+                            # v6.4.46 — PRE-CREATE WATCHDOG.
                             # The openai SDK 1.x `timeout` parameter is NOT
                             # reliably enforced in stream=True mode — we saw
                             # relay hang 5+ minutes with timeout=90s set.
@@ -9799,7 +9796,7 @@ async def websocket_endpoint(ws: WebSocket):
                                         return
                             _v646_wd = threading.Thread(target=_v646_create_watchdog, daemon=True)
                             _v646_wd.start()
-                            # v6.4.53-G (maintainer) — ROOT FIX for
+                            # v6.4.53-G — ROOT FIX for
                             # create() blocking. Three previous layers all
                             # failed to interrupt a hung
                             # `client.chat.completions.create(stream=True)`:
@@ -9860,7 +9857,7 @@ async def websocket_endpoint(ws: WebSocket):
                             _assistant_content = ""
                             _tool_calls_acc: Dict[int, Dict[str, Any]] = {}
                             _finish = None
-                            # v6.4.48-A (maintainer) — QUEUE-PUMP SSE
+                            # v6.4.48-A — QUEUE-PUMP SSE
                             # idle watchdog. Replaces v6.4.43-A's background
                             # thread + timestamp polling, which had two
                             # problems confirmed by the GitHub research
@@ -9885,7 +9882,7 @@ async def websocket_endpoint(ws: WebSocket):
                             _V648_CHUNK_IDLE_LIMIT = 45.0  # matches httpx read=45
                             _chunk_q: "_queue_v648.Queue" = _queue_v648.Queue(maxsize=1024)
                             def _v648_stream_pump():
-                                """v6.4.54 (maintainer) — FILTER empty chunks.
+                                """v6.4.54 — FILTER empty chunks.
                                 Previously we put EVERY chunk (including SSE
                                 keep-alive noise / empty deltas) into the
                                 queue. Consumer's queue.get(timeout=45) then
@@ -9983,7 +9980,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 # v6.1.1: capture reasoning_content into stripper
                                 # log buffer so the model can think internally
                                 # without its CoT reaching the user.
-                                # v6.4.29 (maintainer): ALSO stream
+                                # v6.4.29: ALSO stream
                                 # reasoning_content to the UI as a separate
                                 # event type so the frontend can show it in a
                                 # collapsible "thinking" bubble (Claude Web /
@@ -10058,7 +10055,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 _chat_think_stripper = ThinkStripper()  # reset for next turn
                             if _assistant_content:
                                 full_content += _assistant_content
-                            # v6.4.53-E (maintainer): detect max_tokens
+                            # v6.4.53-E: detect max_tokens
                             # truncation. If the LLM call ended with
                             # finish_reason="length" AND we have an incomplete
                             # tool_call (args mid-string), inject a system
@@ -10131,7 +10128,7 @@ async def websocket_endpoint(ws: WebSocket):
                                         token_queue.put(("token", "\n[检测到散文形式的工具调用,已自动转为结构化调用]"))
                             # No tool calls → done (or nudge and retry)
                             if not _tool_calls_acc:
-                                # v6.4.55-A (maintainer) — CLINE NUDGE.
+                                # v6.4.55-A — CLINE NUDGE.
                                 # Observed Apr 23 13:23: kimi read 2 files,
                                 # output "让我先完整读取代码..." (50 chars),
                                 # finish=stop, worker complete content_len=50
@@ -10148,7 +10145,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 # above near _v648 / _v648_nudge_count init.
                                 # Detect "execution task" keywords (same logic
                                 # as v6.4.44-C).
-                                # v6.7e (maintainer): tightened keyword list
+                                # v6.7e: tightened keyword list
                                 # to avoid false-positive triggers on conversational
                                 # questions ("请介绍" contained "介" → matched).
                                 # Require an explicit action verb targeting file
@@ -10194,7 +10191,7 @@ async def websocket_endpoint(ws: WebSocket):
                                         "(content_len=%d, retry %d/2)",
                                         len(full_content), _v655_no_tool_retry,
                                     )
-                                    # v6.7e (maintainer): do NOT leak the
+                                    # v6.7e: do NOT leak the
                                     # nudge signal to the user-visible token
                                     # stream. Observed 2026-04-24 chat_smoke:
                                     # "[系统提示:请执行实际代码修改...]" was appearing
@@ -10251,7 +10248,7 @@ async def websocket_endpoint(ws: WebSocket):
                             for tc in tool_calls_list:
                                 fn_name = tc["function"]["name"]
                                 fn_args = tc["function"]["arguments"]
-                                # v6.4.32 (maintainer): stream tool
+                                # v6.4.32: stream tool
                                 # trace as a DEDICATED event so the UI can
                                 # fold the raw args/result into a compact
                                 # "[file_ops read index.html]" badge instead
@@ -10324,7 +10321,7 @@ async def websocket_endpoint(ws: WebSocket):
                                     if _v651_truncated:
                                         # skip tool execution entirely; tool_output already
                                         # contains the v6.4.51 truncation error message
-                                        # v6.4.53-A (maintainer): explicitly reset
+                                        # v6.4.53-A: explicitly reset
                                         # _result to None so the downstream preview
                                         # builder doesn't pick up stale _result from the
                                         # previous iter's successful read (causing
@@ -10487,7 +10484,7 @@ async def websocket_endpoint(ws: WebSocket):
                                                 _new = str(args.get("new_string", ""))
                                                 with open(_p, "r", encoding="utf-8", errors="replace") as _fh:
                                                     _c = _fh.read()
-                                                # v6.4.53-F (maintainer): lenient
+                                                # v6.4.53-F: lenient
                                                 # matching. Exact substring match is the
                                                 # fast path. If that fails, try a small
                                                 # set of safe normalisations before
@@ -10527,7 +10524,7 @@ async def websocket_endpoint(ws: WebSocket):
                                                             _old = _cand
                                                             _edit_lenient_hit = True
                                                             break
-                                                # v6.4.55-B (maintainer) — Aider-style
+                                                # v6.4.55-B — Aider-style
                                                 # SequenceMatcher fallback. If exact match
                                                 # AND lenient-normalization (v6.4.53-F) BOTH
                                                 # failed, try fuzzy matching: split the file
@@ -10590,7 +10587,7 @@ async def websocket_endpoint(ws: WebSocket):
                                                     }
                                                     _record_focused_file_in_session(session_id, _p)
                                                 else:
-                                                    # v6.4.53-B (maintainer): fuzzy
+                                                    # v6.4.53-B: fuzzy
                                                     # suggestion. 3+ consecutive "old_string
                                                     # not found" iters was the dominant
                                                     # failure mode in the Apr 23 12:48
@@ -10656,7 +10653,7 @@ async def websocket_endpoint(ws: WebSocket):
                                             except Exception as _e:
                                                 _result = {"success": False, "error": str(_e)}
                                         elif _a == "search":
-                                            # v6.4.37 (maintainer) — real
+                                            # v6.4.37 — real
                                             # search. Previously chat mode
                                             # returned "unknown action: search"
                                             # even though the system prompt told
@@ -10688,7 +10685,7 @@ async def websocket_endpoint(ws: WebSocket):
                                                                 _result = {"success": False, "error": f"invalid regex: {_re_e}"}
                                                                 _pat_re = "error"
                                                         if _pat_re != "error":
-                                                            # v6.4.40 (maintainer) RENAMED
+                                                            # v6.4.40 RENAMED
                                                             # from _iter → _search_paths. The old
                                                             # name shadowed the outer while-loop
                                                             # counter, making `while _iter <
@@ -10698,7 +10695,7 @@ async def websocket_endpoint(ws: WebSocket):
                                                             # supported between instances of
                                                             # 'list' and 'int'" after the first
                                                             # search call.
-                                                            # v6.4.42 (maintainer): accept
+                                                            # v6.4.42: accept
                                                             # absolute globs. Path.glob() rejects
                                                             # absolute patterns in 3.13+ with
                                                             # "Non-relative patterns are
@@ -10868,7 +10865,7 @@ async def websocket_endpoint(ws: WebSocket):
                                     "preview": _preview,
                                     "result_truncated": tool_output[:2000],
                                 }))
-                                # v7.7 (maintainer): some relays (kimi
+                                # v7.7: some relays (kimi
                                 # /coding/v1) occasionally return tool_call
                                 # objects with empty `id`. Reuse the same
                                 # `_tc_id` synthesised earlier (line ~10234)
@@ -10970,7 +10967,7 @@ async def websocket_endpoint(ws: WebSocket):
                             )
                             token_queue.put(("token", _hit_msg))
                             full_content += _hit_msg
-                        # v6.4.49-A (maintainer) — SILENT COMPLETION
+                        # v6.4.49-A — SILENT COMPLETION
                         # RESCUE. Root cause of the "12 iter content_len=0"
                         # we kept seeing: kimi (and sometimes gpt-5.x)
                         # finishes a long tool_call chain with
@@ -11058,12 +11055,12 @@ async def websocket_endpoint(ws: WebSocket):
                         )
                         token_queue.put(("done", full_content))
                     except Exception as e:
-                        # v6.3 (maintainer): log chat errors with FULL
+                        # v6.3: log chat errors with FULL
                         # detail (http status + response body + message count
                         # + tool count) so a "Your request was blocked"
                         # mystery error from the upstream relay can be
                         # correlated with what we actually sent.
-                        # v6.4.38 (maintainer): also log the FULL
+                        # v6.4.38: also log the FULL
                         # Python traceback to the backend log — we had a
                         # TypeError "'<' not supported between instances of
                         # 'map' and 'int'" from deep in the OpenAI SDK with
@@ -11108,7 +11105,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 len(_chat_tools) if isinstance(_chat_tools, list) else 0,
                                 str(e)[:200], _err_body[:400],
                             )
-                            # v6.3 (maintainer): dump full request body
+                            # v6.3: dump full request body
                             # to /tmp so mystery content-filter blocks can be
                             # inspected without adding 50KB to the log.
                             try:
@@ -11141,7 +11138,7 @@ async def websocket_endpoint(ws: WebSocket):
                                 "请在左上角切换到 kimi-k2.6-code-preview，或在设置里更换 API key/base_url。"
                             )
                         elif _status_hint == 401:
-                            # v7.8c (maintainer): long chat sessions occasionally hit
+                            # v7.8c: long chat sessions occasionally hit
                             # 401 even when the key is valid — relay session timeout / cached
                             # auth in the httpx client. Close the cached client + clear the
                             # OpenAI client cache so the NEXT user turn rebuilds with a fresh
@@ -11152,16 +11149,18 @@ async def websocket_endpoint(ws: WebSocket):
                                 pass
                             try:
                                 # Clear AIBridge's openai_compat client cache; rebuilds on next call.
-                                if ai_bridge_instance is not None and hasattr(ai_bridge_instance, "_openai_clients"):
-                                    ai_bridge_instance._openai_clients.clear()
+                                import ai_bridge as _ab_clear
+                                _ab_inst = getattr(_ab_clear, "ai_bridge", None) or getattr(_ab_clear, "_ai_bridge", None)
+                                if _ab_inst is not None and hasattr(_ab_inst, "_openai_clients"):
+                                    _ab_inst._openai_clients.clear()
                             except Exception:
                                 pass
                             _user_err = (
-                                f"模型 {chat_model} 鉴权失败（401）。已自动清空连接缓存——下次发送消息时会用新连接重试。"
-                                "如果仍然 401，请到设置里检查/更新 API key。"
+                                f"Model {chat_model} authentication failed (401). Connection cache has been cleared — "
+                                "next message will use a fresh connection. If you still see 401, check or update the API key in Settings."
                             )
                         elif _status_hint in (404, 400) and ("model" in _low or "not found" in _low):
-                            _user_err = f"模型 {chat_model} 在当前中转不存在（{_status_hint}）：请切换其他模型。"
+                            _user_err = f"Model {chat_model} not available on the current provider ({_status_hint}): try switching to a different model."
                         elif ("timeout" in _low or "timed out" in _low
                               or "read timeout" in _low
                               or "apitimeout" in _low):
@@ -11180,7 +11179,7 @@ async def websocket_endpoint(ws: WebSocket):
                 # Drain queue and send tokens via WS
                 import asyncio as _aio
                 full_response = ""
-                # v6.4.34 (maintainer) — NO fixed timeout on chat.
+                # v6.4.34 — NO fixed timeout on chat.
                 # Chat is user-driven; if the model takes 20 min to finish
                 # a complex /fix task, that's fine. User clicks Stop to
                 # cancel. We still use a large sanity ceiling (1 hour) so

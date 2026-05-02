@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
 
 /**
- * v7.0 (maintainer) — Source Control panel.
+ * v7.0 — Source Control panel.
  * Shows per-file git diff with red (deleted) / green (added) hunks,
  * Cursor/VSCode style. Auto-refreshes every 5s while the panel is open
  * so Chat Agent edits surface live.

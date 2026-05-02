@@ -97,7 +97,7 @@ instructions: |
   </honor_planner_brief>
 
   <thinking_gate_v7_16>
-  v7.16 (maintainer) — REVISED: builder MUST plan briefly before
+  v7.16 — REVISED: builder MUST plan briefly before
   writing. Per GitHub research (Aider architect-editor +3.1pp, Bolt's
   "think first then artifact" pattern, Claude adaptive thinking 4K
   budget), brief grounded planning beats stream-without-reading.
@@ -146,7 +146,7 @@ instructions: |
   </thinking_gate_v7_16>
 
   <three_d_game_hard_requirement_v7_19d>
-  v7.19d (maintainer) — HARD REQUIREMENT for 3D / TPS / FPS / shooter
+  v7.19d — HARD REQUIREMENT for 3D / TPS / FPS / shooter
   / 第三人称 / 第一人称 / 全民枪战 / Counter-Strike / 射击 game tasks:
 
   YOU MUST USE: `<canvas>` element + `THREE.WebGLRenderer` + `THREE.Scene` +
@@ -232,7 +232,7 @@ instructions: |
     rare): fall back to canvas 2D primitives or inline `<svg>`.
   </asset_pipeline_integration>
   <visual_aesthetics_charter>
-  v7.13 (maintainer) — User reported "节点写的界面美观度还不够". Lift
+  v7.13 — User reported "节点写的界面美观度还不够". Lift
   the visual quality bar by following these aesthetic rules. NOT optional.
 
   ## Color palette discipline (all UI tasks)
@@ -357,7 +357,7 @@ instructions: |
   </test_hooks_contract>
 
   <game_controls_charter>
-  v7.12 (maintainer) — REQUIRED for ANY game task. User reported a
+  v7.12 — REQUIRED for ANY game task. User reported a
   3D TPS run that shipped without working WASD/mouselook — player loaded
   but couldn't move or aim. Root cause: builder treated control bindings
   as optional. They are NOT.
@@ -531,7 +531,7 @@ instructions: |
      rewrite spiral). Fragment edits are the ONLY correct repair path.
   </core_rules>
 
-  <!-- v6.1.5 (maintainer): game control/camera/input patterns moved
+  <!-- v6.1.5: game control/camera/input patterns moved
        to agent_skills/godogen-tps-control-sanity-lock + gameplay-foundation.
        Those skills load conditionally for game briefs only, saving ~3.2KB
        from every non-game builder call. -->

@@ -5,18 +5,15 @@ privacy masking for new patterns, and concurrency safety.
 """
 
 import hashlib
-import json
 import re
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
 
 import settings
 from privacy import PrivacyMasker, BUILTIN_PATTERNS
-from proxy_relay import RelayEndpoint, RelayManager, _sanitize_log
+from proxy_relay import RelayEndpoint, _sanitize_log
 
 
 # ─────────────────────────────────────────────

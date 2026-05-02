@@ -5,7 +5,7 @@ Covers mask/unmask roundtrip, pattern detection, and excluded node types.
 
 import unittest
 
-from privacy import PrivacyMasker, BUILTIN_PATTERNS
+from privacy import PrivacyMasker
 
 
 class TestPrivacyMaskerBasics(unittest.TestCase):

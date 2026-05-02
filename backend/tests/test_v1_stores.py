@@ -12,7 +12,7 @@ from task_store import (
     ReviewDecisionRecord, ValidationResultRecord,
     VALID_RUN_STATUSES, VALID_RUN_TRANSITIONS,
     VALID_NODE_STATUSES, VALID_NODE_TRANSITIONS,
-    VALID_ARTIFACT_TYPES, MAX_NODE_RETRY_COUNT,
+    MAX_NODE_RETRY_COUNT,
 )
 
 

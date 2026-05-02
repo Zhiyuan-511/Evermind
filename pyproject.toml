@@ -1,0 +1,73 @@
+[project]
+name = "evermind"
+version = "7.62.0"
+description = "Multi-agent collaboration pipeline that turns a sentence into a complete website or web game"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "Evermind contributors" },
+]
+keywords = ["llm", "multi-agent", "code-generation", "electron", "playwright"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+[project.urls]
+Repository = "https://github.com/Zhiyuan-511/Evermind"
+Issues = "https://github.com/Zhiyuan-511/Evermind/issues"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    "backend/runtime_vendor",
+    "archive_v74_deadcode",
+    "frontend/.next",
+    "node_modules",
+    "electron/dist",
+    "**/_stable_previews",
+]
+
+[tool.ruff.lint]
+# Conservative initial config — enables real-bug detection (F = pyflakes, B = bugbear,
+# E = syntax-affecting style) while leaving room for stricter rules to be enabled later.
+# We deliberately do NOT enable UP (pyupgrade) or I (isort) project-wide yet because
+# the codebase has ~3.5K stylistic findings that would drown out real bugs. Future PRs
+# that crank up the rule set are welcome — see CONTRIBUTING.
+select = ["E", "F", "B"]
+ignore = [
+    "E501",   # line-too-long: many intentional long strings in prompts/templates
+    "E731",   # lambda-assignment: a few intentional closure patterns
+    "E402",   # module-import-not-at-top: some files genuinely need conditional imports
+    "E701",   # multiple-statements-on-one-line: a few intentional inline guards
+    "B008",   # function-call-in-default-arg: FastAPI Depends() patterns
+    "B007",   # unused-loop-variable: many idiomatic for/zip patterns
+    "B023",   # function-uses-loop-variable: closures in retry chains use this intentionally
+    "F541",   # f-string-without-placeholder: harmless
+    "F841",   # unused-variable: some intentional placeholders for future expansion
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests can use bare asserts and f-strings in raises
+"backend/tests/**/*.py" = ["B011", "F841"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = false
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+python_files = "test_*.py"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]

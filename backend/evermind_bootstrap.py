@@ -18,11 +18,10 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import shutil
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger("evermind.bootstrap")
 

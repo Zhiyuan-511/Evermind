@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from .base import BaseProvider, ChatRequest, OpenAICompatProvider, ProviderRetryHint
+from .base import ChatRequest, OpenAICompatProvider, ProviderRetryHint
 from .registry import register_provider
 
 logger = logging.getLogger("evermind.providers.deepseek")

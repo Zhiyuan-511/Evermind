@@ -25,7 +25,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 
 try:
     import websockets

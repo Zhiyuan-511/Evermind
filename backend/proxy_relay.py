@@ -5,7 +5,6 @@ References: LiteLLM Proxy, OneAPI, New API patterns.
 """
 
 import asyncio
-import json
 import logging
 import os
 import re

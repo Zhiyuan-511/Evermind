@@ -3,7 +3,6 @@ HTML Post-Processor — Auto-fix common quality issues after builder generates H
 Applied after every builder write to ensure baseline quality.
 """
 
-import os
 import re
 import logging
 import shutil
@@ -1401,7 +1400,8 @@ def _repair_common_object_literal_member_mutations(js: str) -> str:
             continue
 
         repaired_groups += 1
-        temp_name = f"__evermind_{re.sub(r'\\W+', '_', root).strip('_') or 'value'}_{repaired_groups}"
+        sanitized_root = re.sub(r'\W+', '_', root).strip('_') or 'value'
+        temp_name = f"__evermind_{sanitized_root}_{repaired_groups}"
         rebuilt.append(f"{indent}{root}: (() => {{")
         rebuilt.append(f"{indent}  const {temp_name} = {expr};")
         for member_path, member_expr in member_entries:
@@ -1490,7 +1490,7 @@ _LIBRARY_FINGERPRINTS = (
 
 
 def _dedup_library_scripts(html: str) -> str:
-    """v6.1.13 (maintainer): merger sometimes concatenates script tags
+    """v6.1.13: merger sometimes concatenates script tags
     for the same library from both builders (local + CDN). Browser loads
     both, warns `WARNING: Multiple instances of Three.js being imported`,
     and game state corrupts. Keep the FIRST occurrence per library (prefer
@@ -1566,7 +1566,7 @@ _IMG_STYLE_ATTR_RE = re.compile(r"""\bstyle\s*=\s*(?P<q>["'])(?P<val>[^"']*)(?P=
 
 
 def _inject_image_fallback_guards(html: str) -> str:
-    """v6.1.14g (maintainer): reviewer keeps rejecting over broken
+    """v6.1.14g: reviewer keeps rejecting over broken
     images (naturalWidth===0, empty src, no fallback). Builder freely invents
     Unsplash URLs and most 404 on first load. Postprocess HARDENS every
     `<img>` tag:
@@ -1688,7 +1688,7 @@ def _inject_image_fallback_guards(html: str) -> str:
 
 
 def _inject_iife_handler_exports(html: str) -> str:
-    """v6.1.13 (maintainer): REAL INCIDENT — merger shipped a 3D
+    """v6.1.13: REAL INCIDENT — merger shipped a 3D
     shooter where `onclick="startGame()"` threw `ReferenceError: startGame
     is not defined` because the 47 KB game logic sat inside `(function() {
     ... })()` but the button called through inline HTML attribute into
@@ -1970,7 +1970,7 @@ def postprocess_javascript(js: str) -> str:
     for identifier in ("nav", "overlay"):
         js = _guard_optional_js_hook_lines(js, identifier)
 
-    # v6.4.18 (maintainer): auto-balance parens/braces before handing
+    # v6.4.18: auto-balance parens/braces before handing
     # to preview_validation. Observed 2026-04-22 17:33: gpt-5.4/kimi both
     # emitted `forEach(...) => { }` with an orphan statement outside the
     # closure, leaving `)` > `(` by one or `}` > `{` by one. Node --check
@@ -2087,13 +2087,13 @@ def postprocess_stylesheet(css: str) -> str:
     original = css
     css = _strip_remote_font_resources(css)
 
-    # v7.58 (maintainer): force WebGL canvas z-index → -1 in
+    # v7.58: force WebGL canvas z-index → -1 in
     # external stylesheets too. Builder often writes
     # `#webgl-canvas { z-index: 0 }` (or 1/2) which gets buried under
     # content layers (z-index: 1+) → user sees no 3D animation.
     # Pattern: match any selector containing 'canvas' in the id/class
     # part with non-negative z-index in its rule body.
-    # v7.62 (maintainer) regex tightening: only target rules that
+    # v7.62 regex tightening: only target rules that
     # ALSO have `position: fixed` or `position: absolute` — these are
     # actual full-screen 3D background canvases. BEM-style class names
     # like `.canvas-hero` (a regular content section that happens to use
@@ -2415,12 +2415,12 @@ def postprocess_html(html: str, task_type: str = "website") -> str:
     html = _add_class_aliases(html, "page-transition-overlay", ["page-transition"])
     html = _add_class_aliases(html, "mobile-menu-toggle", ["nav-toggle"])
     html = _postprocess_inline_script_blocks(html)
-    # v6.1.13 (maintainer): universal post-merge safety — applies to
+    # v6.1.13: universal post-merge safety — applies to
     # every task type. Duplicate library scripts and IIFE-sealed handler
     # functions break games, webapps, slides, dashboards alike.
     html = _dedup_library_scripts(html)
     html = _inject_iife_handler_exports(html)
-    # v6.1.14g (maintainer): hardened image fallback — reviewer was
+    # v6.1.14g: hardened image fallback — reviewer was
     # rejecting repeatedly because builder invented Unsplash URLs that 404.
     # Every <img> now gets an onerror handler + empty-src guard + CSS
     # gradient placeholder on parent. Purely deterministic — no AI call.
@@ -2457,7 +2457,7 @@ def postprocess_html(html: str, task_type: str = "website") -> str:
     svg_open_re = re.compile(r'<svg\b[^>]*>', re.IGNORECASE)
     html = svg_open_re.sub(_fix_svg_sizing, html)
 
-    # v7.56d (maintainer): pure-string Three.js injection — NO file I/O.
+    # v7.56d: pure-string Three.js injection — NO file I/O.
     # v7.56c had `open(.js).read()` which blocked the asyncio event loop for
     # 9+ minutes when builder direct_multifile post-process ran with multi-
     # page output. Reverted to HTML-only signal: detect that HTML references
@@ -2507,7 +2507,7 @@ def postprocess_html(html: str, task_type: str = "website") -> str:
     except Exception as _three_err:
         logger.debug("[v7.56d] Three.js auto-injection skipped: %s", _three_err)
 
-    # v7.58 (maintainer): force WebGL canvas z-index <= -1.
+    # v7.58: force WebGL canvas z-index <= -1.
     # Observed run 14:46-14:50: builder wrote `#webgl-canvas { z-index: 0; }`
     # while every other section had z-index: 1+ → canvas got visually
     # buried under hero/header content → Three.js scene rendered fine but

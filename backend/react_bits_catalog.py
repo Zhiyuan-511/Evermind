@@ -142,7 +142,7 @@ def build_prompt_block(lang: str = "zh", max_per_category: int = 10) -> str:
     system prompts. Keep it compact (roughly 1-2KB) so it doesn't dominate the
     context window.
 
-    v6.4.11 (maintainer): rewrote header so the catalog doubles as a
+    v6.4.11: rewrote header so the catalog doubles as a
     design vocabulary (uidesign / analyst) AND an implementation reference
     (builder / polisher / merger). Previously the "ignore if vanilla HTML"
     instruction stripped the catalog's value for any non-React pipeline,

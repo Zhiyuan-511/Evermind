@@ -5,13 +5,11 @@
 from __future__ import annotations
 
 import sys
-import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from orchestrator import Orchestrator, Plan, SubTask
-import task_classifier
 
 
 def diagnose(goal: str) -> None:

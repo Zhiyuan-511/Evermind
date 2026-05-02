@@ -69,7 +69,7 @@ instructions: |
   Add `@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }`
   to respect user preference.
 
-  ## V7.0 ANIMATION UPGRADE (maintainer)
+  ## V7.0 ANIMATION UPGRADE
   If the builder output lacks motion (no transitions / no scroll reveals /
   no hover states), the polisher MUST add AT LEAST ONE of these in a single
   targeted edit:

@@ -8,7 +8,6 @@ import json
 import os
 import signal
 import sys
-import types
 
 import pytest
 
@@ -43,7 +42,7 @@ class TestSighupHotReload:
 
     def test_handle_sighup_tolerates_missing_modules(self, monkeypatch):
         """If a module isn't imported yet, SIGHUP handler should skip it gracefully."""
-        from server import _handle_sighup, _HOT_RELOAD_MODULES
+        from server import _handle_sighup
 
         # Remove a module from sys.modules temporarily
         saved = sys.modules.pop("html_postprocess", None)

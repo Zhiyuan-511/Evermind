@@ -1,5 +1,5 @@
 /**
- * v6.4.32 (maintainer) — Collapsible tool-call badge.
+ * v6.4.32 — Collapsible tool-call badge.
  * Renders a single file_ops / browser / shell tool invocation as a
  * compact badge "[file_ops read /tmp/.../index.html · 66KB ✓]" that
  * expands to show full args + result JSON on click.

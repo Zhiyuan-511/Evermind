@@ -14,7 +14,6 @@ import task_store
 from connector_idempotency import connector_idempotency
 from workflow_templates import (
     get_template, list_templates, template_nodes,
-    BUILT_IN_TEMPLATES,
 )
 
 

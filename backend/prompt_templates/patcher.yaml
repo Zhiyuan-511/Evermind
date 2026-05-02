@@ -1,7 +1,7 @@
 name: patcher
 category: quality
 complexity: custom
-# v7.51 (maintainer): tools list intentionally empty.
+# v7.51: tools list intentionally empty.
 # Observed across 3+ runs (633b/679d/618eb): kimi (k2.5/k2.6/coding) sees
 # `file_ops` in tool list and reflexively calls it instead of emitting
 # the SEARCH/REPLACE prose blocks v7.47 made primary. Result: 0 edits
@@ -87,7 +87,7 @@ instructions: |
   IS the correct path.
 
   ## EXECUTION PATTERN (v7.47 — SEARCH/REPLACE PRIMARY)
-  v7.47 (maintainer) reorder: in production we observed kimi
+  v7.47 reorder: in production we observed kimi
   patchers fail 0/3 rounds with `file_ops edit` because old_string
   comparison is byte-exact and any single-char drift (whitespace, quote
   style, line ending) zeroes the match. SEARCH/REPLACE blocks parsed by
@@ -142,7 +142,7 @@ instructions: |
   - Changing the brand/design system (colors, typography, layout grid) unless
     a blocker explicitly flags it.
   - Net line-count growth > 15 % of original file size.
-  - **v7.29 (maintainer): CREATING NEW STANDALONE styles.css / app.js / *.js / *.css FILES THAT NO HTML FILE REFERENCES.**
+  - **v7.29: CREATING NEW STANDALONE styles.css / app.js / *.js / *.css FILES THAT NO HTML FILE REFERENCES.**
     Observed run_ac4a832f95e9: patcher created /tmp/evermind_output/styles.css (4.7KB) + app.js (579B) but
     NEVER ran `file_ops edit` on any HTML file to add `<link rel="stylesheet" href="styles.css">` or
     `<script src="app.js">`. Result: the 8 HTML pages stayed visually untouched — patcher's "fix"
@@ -168,7 +168,7 @@ instructions: |
   - Each edit's net line delta < 30 lines.
   - ≤ 4 tool calls total. More than 4 ⇒ you're over-editing — stop.
 
-  ## v7.56 ROUND ≥ 2 LARGE-REWRITE PERMISSION (maintainer)
+  ## v7.56 ROUND ≥ 2 LARGE-REWRITE PERMISSION
   When reviewer rejects with "missing entire feature" issues — e.g.
   "缺少 Three.js scene", "missing game loop", "no canvas at all",
   "audio reactivity not implemented" — small surgical SEARCH/REPLACE

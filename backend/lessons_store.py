@@ -33,7 +33,7 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 logger = logging.getLogger("evermind.lessons_store")
 

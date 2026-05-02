@@ -21,7 +21,7 @@ interface WelcomeWizardProps {
     onSkip: () => void;
 }
 
-// v6.2b (maintainer): bumped so users who saw the prior demo-key
+// v6.2b: bumped so users who saw the prior demo-key
 // variant see the new template-based wizard again. Bump further if future
 // wizard content changes materially.
 const STORAGE_KEY = 'evermind_onboarded_v62b';

@@ -168,7 +168,7 @@ DEFAULT_SETTINGS = {
         "enable_query_search": True,
     },
     "image_generation": {
-        # v6.1.15 (maintainer): standalone image-generation API configuration.
+        # v6.1.15: standalone image-generation API configuration.
         # If the user fills provider + api_key, real image generation is enabled; otherwise the imagegen
         # node degrades to SVG/CSS placeholders (no broken <img src> links).
         "provider": "",              # "tongyi" | "doubao-image" | "wenxin" | "seedream" | "flux-fal" | "dalle-3" | "openai-compat"
@@ -188,7 +188,7 @@ DEFAULT_SETTINGS = {
         "preferred_model": "",         # "" = use CLI's default model
         "detected_clis": {},           # Populated by /api/cli/detect
         "node_cli_overrides": {},      # {"builder": {"cli": "claude", "model": "sonnet"}, ...}
-        # v7.1 (maintainer) ULTRA MODE — long-running, "ship-quality-on-first-try" mode
+        # v7.1 ULTRA MODE — long-running, "ship-quality-on-first-try" mode
         # When enabled: all timeouts ×10, iter caps ×4, max_rejections=5,
         # builder parallelism ×4, multi-file project scaffolding + image generation/crawling + packaging/deploy.
         # Expected task duration: 3-4 hours up to a day. Quality over speed.
@@ -200,12 +200,12 @@ DEFAULT_SETTINGS = {
         "ultra_asset_tools": True,        # 图片生成/爬取/favicon 多尺寸
     },
     "ui_language": "zh",
-    # v6.1.3 (maintainer): separate language toggle for node walkthrough
+    # v6.1.3: separate language toggle for node walkthrough
     # reports. "" means "inherit ui_language". When set to "zh" or "en"
     # explicitly, the walkthrough text is forced to that language regardless
     # of UI language.
     "walkthrough_language": "",
-    # v6.1.10 (maintainer): when True and user configured TWO API keys
+    # v6.1.10: when True and user configured TWO API keys
     # for the primary builder provider (e.g. kimi_api_key + kimi_api_key_2),
     # parallel peer builders all use the PREFERRED first model and round-robin
     # across both keys — avoids provider rotation to a weaker fallback model.

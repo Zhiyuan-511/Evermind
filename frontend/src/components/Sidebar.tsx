@@ -25,7 +25,7 @@ const CATEGORIES = [
 ];
 
 /**
- * v7.0 (maintainer): VSCode/Cursor-style 2-column layout.
+ * v7.0: VSCode/Cursor-style 2-column layout.
  * Column A  (48 px) = Activity Bar — Nodes / Files / Git / Reports icons.
  * Column B (240 px) = Panel content for the currently selected activity.
  * A fold toggle still collapses both columns for canvas-only mode.
