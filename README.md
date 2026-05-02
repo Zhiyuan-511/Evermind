@@ -115,7 +115,7 @@ A common alternative is "one big agent with tools" (Aider, Cursor agents, ChatGP
 Evermind's DAG explicitly:
 - Hands each role a **fresh, narrow context** (only the brief + handoff from upstream — never the full conversation).
 - Runs builders **in parallel** to get diverse implementations, then has a merger pick the best parts.
-- Forces the reviewer to use **a separate, faster, non-thinking model** (`kimi-k2.5`) precisely because thinking models forget to emit the JSON verdict (v7.62).
+- Forces the reviewer to use **a separate, faster, non-thinking model** precisely because thinking models forget to emit the JSON verdict (v7.62). The exact model is configurable in Settings — any fast OpenAI-compatible chat model works.
 - Caps the reviewer↔patcher loop at **3 rounds maximum** — past that, you're chasing perfection in a way the LLM can't deliver, so we ship the best snapshot.
 
 ---
@@ -237,29 +237,31 @@ This is the key design that separates Evermind from "single-agent one-shot gener
 A single LLM writing a complex site one-shot averages "barely-runs and stops" quality. Multi-agent collaboration plus strict gating lets each role focus on what it's best at, and the final browser verification catches what no single-agent setup can.
 
 **Why is the reviewer a fast non-thinking model?**
-Counterintuitively, top thinking models (kimi-k2.6-code-preview / o1 / opus) are *worse* reviewers — they produce 5K characters of reasoning prose and forget to emit the JSON verdict, so the patcher has nothing actionable. The fast model (kimi-k2.5) emits the JSON immediately. This was the v7.62 fix.
+Counterintuitively, top **deep-reasoning models** are *worse* reviewers — they produce 5K characters of reasoning prose and forget to emit the JSON verdict, so the patcher has nothing actionable. A **fast non-thinking chat model** emits the JSON immediately. This was the v7.62 fix. The actual model used is whatever you configure for the reviewer node in Settings → Node Models.
 
 ---
 
 ## Agent role catalogue
 
-| Agent | Lines of prompt | Default model | Output format | Typical input → output |
+| Agent | Lines of prompt | Recommended model class | Output format | Typical input → output |
 |---|---|---|---|---|
-| **planner** | ~250 | kimi-coding | Structured blueprint (markdown) | "build a 3D site" → blueprint with page list + mandatory features + risks |
-| **analyst** | ~300 | kimi-k2.6-code-preview | Technical brief + reference URLs | Blueprint → 8K char brief with Three.js patterns, similar Awwwards sites |
-| **uidesign** | ~100 | kimi-k2.5 | Design tokens (palette, type, space) | Brief → full design system + layout blueprint |
-| **scribe** | ~80 | kimi-k2.5 | Copy + content architecture | Brief → page-by-page content draft |
-| **imagegen** | ~120 | (image API, e.g. DALL-E 3) | Image files | Brief → 4–10 generated images saved to workspace |
-| **spritesheet** | ~80 | kimi-coding | Atlas image + JSON map | Image set → packed sprite atlas |
-| **assetimport** | ~60 | kimi-coding | Local files + manifest | URLs → downloaded local assets with attribution |
-| **builder1 / builder2** | ~600 each | kimi-coding | HTML/CSS/JS files (multifile) | Brief + tokens + copy → working code |
-| **merger** | ~200 | kimi-coding | Unified file set (SEARCH/REPLACE) | 2 file trees → 1 coherent file tree |
-| **polisher** | ~150 | kimi-k2.5 | Motion/spacing tweaks (SEARCH/REPLACE) | Code → polished code |
-| **reviewer** | ~500 | **kimi-k2.5** *(forced fast-path v7.62)* | JSON verdict | Code (browser-rendered) → score + blocking_issues |
-| **patcher** | ~150 | kimi-coding | SEARCH/REPLACE blocks | Verdict → surgical fixes |
-| **deployer** | ~50 | (no LLM — deterministic) | Preview URL | File tree → `http://127.0.0.1:8765/preview/...` |
-| **debugger** | ~100 | kimi-k2.5 | Console error explanation + fix | Browser console errors → suggested patches |
-| **tester** | ~120 | kimi-k2.5 | Pass/fail per interaction | Code + interaction list → result matrix |
+| **planner** | ~250 | code-reasoning | Structured blueprint (markdown) | "build a 3D site" → blueprint with page list + mandatory features + risks |
+| **analyst** | ~300 | deep-research / code-reasoning | Technical brief + reference URLs | Blueprint → 8K char brief with Three.js patterns, similar Awwwards sites |
+| **uidesign** | ~100 | fast non-thinking | Design tokens (palette, type, space) | Brief → full design system + layout blueprint |
+| **scribe** | ~80 | fast non-thinking | Copy + content architecture | Brief → page-by-page content draft |
+| **imagegen** | ~120 | image-gen API (DALL-E / SD / etc.) | Image files | Brief → 4–10 generated images saved to workspace |
+| **spritesheet** | ~80 | code-reasoning | Atlas image + JSON map | Image set → packed sprite atlas |
+| **assetimport** | ~60 | code-reasoning | Local files + manifest | URLs → downloaded local assets with attribution |
+| **builder1 / builder2** | ~600 each | code-reasoning | HTML/CSS/JS files (multifile) | Brief + tokens + copy → working code |
+| **merger** | ~200 | code-reasoning | Unified file set (SEARCH/REPLACE) | 2 file trees → 1 coherent file tree |
+| **polisher** | ~150 | fast non-thinking | Motion/spacing tweaks (SEARCH/REPLACE) | Code → polished code |
+| **reviewer** | ~500 | **fast non-thinking** *(forced fast-path v7.62)* | JSON verdict | Code (browser-rendered) → score + blocking_issues |
+| **patcher** | ~150 | code-reasoning | SEARCH/REPLACE blocks | Verdict → surgical fixes |
+| **deployer** | ~50 | no LLM (deterministic) | Preview URL | File tree → `http://127.0.0.1:8765/preview/...` |
+| **debugger** | ~100 | fast non-thinking | Console error explanation + fix | Browser console errors → suggested patches |
+| **tester** | ~120 | fast non-thinking | Pass/fail per interaction | Code + interaction list → result matrix |
+
+**Model classes are guidelines, not hard requirements.** Every node accepts any OpenAI-compatible chat model — pick whatever provider you have access to (OpenAI, Anthropic, DeepSeek, Kimi/Moonshot, Qwen, Doubao, Zhipu/GLM, MiniMax, Gemini, or your own self-hosted relay). The "code-reasoning" class refers to deeper code-aware models (e.g. GPT-5-codex, Claude Sonnet, DeepSeek Coder, Kimi-coding); the "fast non-thinking" class refers to quick chat-completion models that reliably emit structured JSON. Configure each node's preferred model in **Settings → Node Models**.
 
 All prompts are **YAML files in `backend/prompt_templates/`** — edit them, save, and the next run picks up the change (no rebuild needed).
 
@@ -289,7 +291,7 @@ Recognises 10 capability keywords (WebGL/Three.js / 2D games / canvas art / GLSL
 
 ### Reviewer fast-path (v7.62, the last critical fix)
 
-The reviewer uses a fast, non-thinking model (`kimi-k2.5`) so it always emits a JSON verdict. Thinking models tend to produce a lot of reasoning text but forget the JSON, which strands the patcher with no actionable brief and triggers a death-loop. This was the last core fix before open-sourcing.
+The reviewer uses a **fast, non-thinking model** so it always emits a JSON verdict. Thinking / deep-reasoning models tend to produce a lot of reasoning text but forget the JSON, which strands the patcher with no actionable brief and triggers a death-loop. This was the last core fix before open-sourcing. Configure the reviewer's model in Settings → Node Models — any fast OpenAI-compatible chat model works.
 
 ### Local-first networking model
 
@@ -343,10 +345,16 @@ On macOS first launch, the app will ask permission to access the Desktop folder 
 
 ### 2. Configure your API key
 
-Open Evermind → Settings → enter your LLM API key:
-- **Recommended**: Kimi (Moonshot) — `sk-...` — fastest in CN, friendly to Chinese prompts
-- Also supported: OpenAI / Anthropic / DeepSeek / Qwen / Doubao / Zhipu / MiniMax
-- If you're using a third-party relay, just fill in the corresponding base URL.
+Open Evermind → Settings → enter an LLM API key. Pick whichever provider you already have access to:
+
+- **OpenAI** (`sk-...` from `platform.openai.com`)
+- **Anthropic** (`sk-ant-...` from `console.anthropic.com`)
+- **DeepSeek** (`sk-...` from `platform.deepseek.com`)
+- **Kimi / Moonshot** (`sk-...` from `platform.moonshot.cn`)
+- **Qwen / DashScope**, **Doubao / Volcengine**, **Zhipu / GLM**, **MiniMax**, **Google Gemini**
+- **OpenAI-compatible relay** — fill the base URL field; works with any aggregator that mimics the OpenAI API
+
+There's **no preferred provider** — the pipeline is designed to work with any of them. If you're optimizing for speed in mainland China, Kimi / DeepSeek / Doubao tend to be fastest. If you're outside CN, OpenAI / Anthropic / Gemini tend to be fastest. The defaults work fine; you can also assign different models per node in **Settings → Node Models** (e.g. a thinking model for builder, a fast model for reviewer).
 
 API keys are stored Fernet-encrypted at `~/.evermind/config.json` with the symmetric key in `~/.evermind/.key` (filesystem-protected). Back up `.key` if you want to keep the same encrypted store across rebuilds.
 

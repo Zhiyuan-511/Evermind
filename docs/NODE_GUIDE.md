@@ -224,7 +224,7 @@ If your custom DAG hits a limit, the orchestrator emits a `phase=*_BUDGET_EXHAUS
   - `<builder_1_handoff>` and `<builder_2_handoff>` blocks (≤800 chars each, what each builder should do)
   - `<task_classification>` (game / website / dashboard / etc.)
 - **Special**: in v7.57+ the planner blueprint is auto-injected into every downstream code-producing node's system prompt
-- **Default model**: `kimi-coding`
+- **Recommended model class**: code-reasoning (e.g. GPT-5-codex, Claude Sonnet, DeepSeek Coder, Kimi-coding)
 
 ### analyst
 - **Input**: planner blueprint + user goal
@@ -234,18 +234,18 @@ If your custom DAG hits a limit, the orchestrator emits a `phase=*_BUDGET_EXHAUS
   - Common pitfalls for this category
   - `<node_briefs>` block — per-builder hints
 - **Special**: uses real HTTP / browser to fetch reference sites
-- **Default model**: `kimi-k2.6-code-preview` (deep mode)
+- **Recommended model class**: deep code-reasoning (slower, higher-quality) (deep mode)
 
 ### uidesign
 - **Input**: planner brief + analyst tech stack
 - **Output**: W3C Design Tokens JSON (palette, type, space, radius, shadow, motion) + layout blueprint + interaction notes
 - **Special**: picks one of 4 palette letters (A/B/C/D) deliberately to avoid generic indigo defaults
-- **Default model**: `kimi-k2.5` (fast)
+- **Recommended model class**: fast non-thinking (quick chat model that reliably emits JSON) (fast)
 
 ### scribe
 - **Input**: planner blueprint + analyst brief
 - **Output**: page-by-page copy with hierarchy (H1, H2, body, CTA copy, microtext)
-- **Default model**: `kimi-k2.5`
+- **Recommended model class**: fast non-thinking (quick chat model that reliably emits JSON)
 
 ### imagegen
 - **Input**: analyst brief + image prompts derived from blueprint
@@ -265,19 +265,19 @@ If your custom DAG hits a limit, the orchestrator emits a `phase=*_BUDGET_EXHAUS
 - **Input**: planner blueprint + analyst brief + design tokens + copy + (optional) assets
 - **Output**: complete HTML/CSS/JS files written to `workspace/`
 - **Special**: each builder gets a different `<builder_N_handoff>` slice from the planner so they don't write the same file twice
-- **Default model**: `kimi-coding` (slow but high quality for code)
+- **Recommended model class**: code-reasoning (e.g. GPT-5-codex, Claude Sonnet, DeepSeek Coder, Kimi-coding) (slow but high quality for code)
 
 ### merger
 - **Input**: outputs from builder1 + builder2
 - **Output**: unified file tree using SEARCH/REPLACE blocks (preserves common prefix, picks better implementation per file)
 - **Special**: detects NOOP cases (identical builder outputs) and short-circuits to direct copy (saves 5–10 minutes of LLM merge time)
-- **Default model**: `kimi-coding`
+- **Recommended model class**: code-reasoning (e.g. GPT-5-codex, Claude Sonnet, DeepSeek Coder, Kimi-coding)
 
 ### polisher
 - **Input**: merged file tree
 - **Output**: SEARCH/REPLACE blocks tweaking motion timing, whitespace, transitions, micro-interactions
 - **Hard rule**: must NOT restructure or remove content; only refines
-- **Default model**: `kimi-k2.5`
+- **Recommended model class**: fast non-thinking (quick chat model that reliably emits JSON)
 
 ### reviewer
 - **Input**: deployed file tree
@@ -294,13 +294,13 @@ If your custom DAG hits a limit, the orchestrator emits a `phase=*_BUDGET_EXHAUS
     "praise": [...]
   }
   ```
-- **Default model**: `kimi-k2.5` *(forced fast-path v7.62 — thinking models don't emit JSON reliably)*
+- **Recommended model class**: fast non-thinking (quick chat model that reliably emits JSON) *(forced fast-path v7.62 — thinking models don't emit JSON reliably)*
 
 ### patcher
 - **Input**: reviewer verdict + current file tree (snapshot, ≤40K chars per v7.59)
 - **Output**: SEARCH/REPLACE blocks per blocking_issue
 - **Hard rule**: NO new features, NO rewrites — must only address the listed issues
-- **Default model**: `kimi-coding` (slow code model is fine here, the prompt is structured)
+- **Recommended model class**: code-reasoning (e.g. GPT-5-codex, Claude Sonnet, DeepSeek Coder, Kimi-coding) (slow code model is fine here, the prompt is structured)
 
 ### deployer
 - **Input**: latest patched file tree
@@ -314,7 +314,7 @@ If your custom DAG hits a limit, the orchestrator emits a `phase=*_BUDGET_EXHAUS
 ### tester
 - **Input**: deployed URL + interaction list (every click, drag, form fill)
 - **Output**: pass/fail matrix per interaction
-- **Default model**: `kimi-k2.5`
+- **Recommended model class**: fast non-thinking (quick chat model that reliably emits JSON)
 
 ---
 
@@ -404,7 +404,7 @@ For the curious — what `backend/orchestrator.py` does when you click Run:
    - When reviewer emits `verdict=approve` OR `rejection_count == budget`:
      - Pipeline continues normally
 5. **Per-node timeout**: each node has a per-role timeout (planner 90s, analyst 720s deep / 360s standard, builder 480s base, etc.). On timeout: marked FAILED, retry triggers.
-6. **Model fallback**: each node has a model fallback chain (e.g. `[kimi-coding, kimi-k2.5, deepseek-v3]`). On model 5xx / 429, falls through to next.
+6. **Model fallback**: each node has a model fallback chain (e.g. `[primary-code-model, fast-fallback-model, fast-fallback-2]`). On model 5xx / 429, falls through to next. Configure each chain in `Settings → Node Models`.
 7. **Ev event stream**: every state change publishes a WS event to the frontend. The canvas updates in real-time.
 8. **End-of-run finalization**: writes summary, archives full output to `~/.evermind/workspaces/<task_id>/`, emits preview URL.
 

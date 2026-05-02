@@ -55,7 +55,7 @@ When the **Reviewer** node runs, Evermind opens a hidden Chromium window via Pla
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
 | `Connection refused 127.0.0.1:8765` | Backend didn't start | Check Console.app for `[evermind.server]` errors; usually a missing Python dep — re-run via `cd backend && python3 server.py` to see the real traceback |
-| Chat agent says `model X not found 400` | Relay doesn't host that model | Settings → switch `default_model` to `gpt-5.4-mini` / `kimi-k2.5` |
+| Chat agent says `model X not found 400` | Your provider doesn't host that model | Settings → pick any model your provider exposes (the model dropdown lists what your API key can access) |
 | TCC popup repeats | Ad-hoc signature reset | See [Permission popups](#permission-popups) above |
 | First task is very slow | LLM relay cold-start | Subsequent runs reuse caches and are 3-10× faster |
 | Builder writes 1 line of code | Stream stalled mid-flight | Cancel the run and retry; if persistent see `~/.evermind/logs/evermind-backend.log` |
