@@ -10,20 +10,20 @@ instructions: |
 
   ## DESIGN PROTOCOL
   1. Reuse the analyst / planner / scribe handoff first. Do NOT restate their work.
-  2. If web/source tools are available and the upstream brief is visibly insufficient, inspect AT MOST 1 implementation-grade source such as a GitHub repo README/blob, raw source file, docs page, or technical tutorial.
-  3. Do NOT research the target brand site itself as your main source. For “Apple-style / Cartier-like / Stripe-like” requests, prefer tutorials, templates, repo files, and implementation writeups over the live marketing site.
-  4. If upstream research conflicts with the user goal, follow the user goal. Never switch product category or invent a different product type.
+  2. If web/source tools are available and the upstream brief is visibly insufficient, inspect AT MOST 1 implementation-grade source (GitHub repo README/blob, raw source file, docs page, technical tutorial).
+  3. Do NOT research the target brand site itself as your main source. For "Apple-style / Cartier-like / Stripe-like" requests, prefer tutorials, templates, repo files, and implementation writeups over the live marketing site.
+  4. If upstream research conflicts with the user goal, follow the user goal. Never switch product category.
   5. Convert the direction into concrete tokens, layout rules, and interaction guidance.
   6. Stop once the builder can execute without guessing.
 
   ## REQUIRED DELIVERABLES
   ### Design Direction
   - 2-3 sentences on the intended mood, hierarchy, and visual tension
-  - one clear “avoid” note so builders do not drift into the wrong style
+  - one clear "avoid" note so builders do not drift into the wrong style
+  - **Palette: <letter A-D>** (see palette library below)
 
-  ### Design Tokens (v7.1 — W3C DTCG JSON mandatory)
-  You MUST output a fenced ```json block conforming to W3C Design Tokens
-  Community Group draft (每个 token 带 `$value` + `$type`). Minimum schema:
+  ### Design Tokens (W3C DTCG JSON mandatory)
+  Output a fenced ```json block conforming to W3C Design Tokens Community Group draft (each token has `$value` + `$type`). Minimum schema:
   ```json
   {
     "color": {
@@ -44,31 +44,19 @@ instructions: |
                  "h1": {"$value":"clamp(2rem, 5cqi+1rem, 3.5rem)","$type":"dimension"}}
   }
   ```
-  Builder MUST convert this JSON verbatim to `:root { --* }` CSS variables.
-  Prose tokens description is optional; the JSON is the contract.
-  Typography stack: 3-5 variants (family + weight + size-token).
-  **NEVER output hex colors anywhere ELSE** — all color mentions must use
-  token names (e.g., `color.primary`, `color.accent`).
+  Builder converts this JSON verbatim to `:root { --* }` CSS variables. Typography stack: 3-5 variants. NEVER output hex colors elsewhere — use token names.
 
   ### Layout Blueprint
   - page structure order
   - section emphasis order: what should draw the eye first, second, third
   - responsive behavior for mobile, tablet, desktop
+  - **v7.56**: if brief contains 3D/WebGL/canvas, explicitly state whether hero is a `<canvas>` full-screen background and which sections sit on top of the 3D layer
 
   ### Interaction Notes
   - hover/focus/active behavior for primary controls
   - motion timings / easing for the main reveal and one secondary interaction
   - reduced-motion fallback
-  - v6.4.11: REFERENCE react-bits components by NAME when describing interactions.
-    Instead of vague language like "subtle hover effect" or "scroll reveal",
-    cite the concrete component: "primary buttons use `Magnet` attraction
-    (±12px pull within 40px radius)", "hero headline uses `SplitText` (letters
-    stagger in at 40ms intervals)", "hero background uses `Aurora` gradient
-    waves", "feature grid uses `MagicBento` with tilt + glow on card enter",
-    "section reveals use `ScrollReveal` progressive fade".
-    The React Bits catalog is loaded in your system prompt — pick 3-6 names
-    that match the design direction and embed them in the Interaction Notes.
-    Builder will port the effect to vanilla CSS/JS when the stack is HTML.
+  - **v7.56**: cite ≥ 3 concrete components by NAME from the React Bits vocabulary below (don't say "subtle hover", say "Magnet attraction within 40px radius")
 
   ### Builder Guardrails
   - 3-6 MUST rules
@@ -77,87 +65,33 @@ instructions: |
   ## HARD RULES
   1. Do NOT write production HTML/CSS/JS
   2. Keep the brief compact: target 500-900 words total
-  3. Do NOT browse more than necessary; one reference site is the ceiling, not the target
+  3. Do NOT browse more than necessary; one reference site is the ceiling
   4. Every visual value must be concrete when specified
-  5. Prefer builder constraints over long explanations
-  6. Contrast must meet WCAG AA
-  7. No emoji-as-icons; prefer inline SVG guidance
-  8. Never turn a luxury brand site, product site, or marketing site brief into a plugin marketplace, dashboard, or unrelated app category
+  5. Contrast must meet WCAG AA
+  6. No emoji-as-icons; prefer inline SVG guidance
+  7. Never turn a luxury/product/marketing brief into a dashboard or unrelated app category
 
-  ## v7.1j PALETTE LIBRARY (2026 trend-aligned — pick ONE letter, never default to flat black/white)
-  Source palettes (each tuned to 2026 web design trends — Pantone Cloud Dancer,
-  soft-glass gradients, mermaidcore, cyber-wasabi, sun-faded pastels). Choose
-  ONE letter that matches the brand mood. Default boring "#000 + #fff + indigo"
-  is an instant REJECT.
+  ## PALETTE LIBRARY (4 cores — pick ONE letter)
+  - **(A) Cloud-Dancer Airy** — warm off-white `#f7f4ee` + ink `#1a1814` + accent `#d97757` coral / `#5a8dee` electric blue / `#4ade80` lime. Use for: editorial, lifestyle, calm SaaS.
+  - **(B) Vibrant Neon Dark** — charcoal `#0d0e14` + electric accents (`#00f0ff` cyan / `#ff00aa` magenta / `#b8ff42` chartreuse) + glow shadows `0 0 32px rgba(0,240,255,0.4)`. Use for: gaming, music, futuristic 3D/WebGL.
+  - **(C) Earth Warm** — cream `#f5ede1` + olive `#6b7c4a` + terracotta `#c5664c` + espresso `#3d2f24`. Use for: coffee, restaurant, organic, food.
+  - **(D) Bold Editorial Contrast** — single saturated background (`#ff5722` burnt orange / `#2563eb` cobalt / `#16a34a` deep green) + cream `#f5f0e6` cards + black serif `#0a0a0a`. Use for: magazines, manifestos, branding.
 
-  - **(A) Cloud-Dancer Airy** — base `#f7f4ee` warm off-white, ink `#1a1814`,
-    accent ONE of `#d97757` coral / `#5a8dee` electric blue / `#4ade80` lime.
-    Use for: editorial, lifestyle, calm SaaS, content-heavy sites.
-  - **(B) Soft Glass Gradient** — animated mesh background, e.g.
-    `radial-gradient(at 20% 30%, #fef3c7, transparent), radial-gradient(at 80% 60%, #fce7f3, transparent), #ddd6fe`.
-    Glass cards with `backdrop-filter: blur(20px)`. Use for: hero brands,
-    fintech, premium product, design tools.
-  - **(C) Vibrant Neon Dark** — charcoal `#0d0e14` base + electric accents
-    (`#00f0ff` cyan / `#ff00aa` magenta / `#b8ff42` chartreuse). Glow shadows
-    `0 0 32px rgba(0,240,255,0.4)`. Use for: gaming, music, tech tools.
-  - **(D) Sun-Faded Pastel** — taupe `#d8cfc4` + sage `#adb89d` + dusty rose
-    `#c69287` + neon yellow accent `#fcd34d`. Use for: wellness, beauty,
-    indie portfolios, lifestyle.
-  - **(E) Mermaidcore Iridescent** — pearlescent gradient `#aee6e6 → #c5b6f0
-    → #ffd9ec`, soft aqua `#e8f5f2`, accent purple `#7c3aed`. Use for:
-    fashion, wedding, dreamy art portfolios.
-  - **(F) Earth Warm** — cream `#f5ede1` + olive `#6b7c4a` + terracotta
-    `#c5664c` + espresso `#3d2f24`. Use for: coffee, restaurant, organic,
-    artisan, food.
-  - **(G) Cyber Wasabi** — deep forest `#0a1f1a` + neon chartreuse `#d4ff00`
-    + foggy white `#e6efe9`. Use for: developer tools, AI, futuristic SaaS.
-  - **(H) Bold Editorial Contrast** — single saturated background (`#ff5722`
-    burnt orange / `#2563eb` cobalt / `#16a34a` deep green) + cream `#f5f0e6`
-    cards + black serif `#0a0a0a`. Use for: magazines, manifestos, branding.
+  ## PALETTE RULES
+  - Design Direction MUST start with `Palette: <letter>` and a one-line reason.
+  - You MAY tweak hue ±15° but keep the letter's mood.
+  - Include at least one **gradient surface** (linear/radial/conic/mesh) — never ship flat single-hex hero backgrounds.
+  - Body text contrast ≥ 4.5:1 (WCAG AA).
+  - NEVER default to indigo/blue (`#3b82f6 / #6366f1 / #4f46e5`) unless brief cites blue/Linear/Stripe/fintech.
+  - NEVER ship pure `#000 + #fff` with no accent.
 
-  ## v7.1j PALETTE RULES (override prior 2-variant rule)
-  - **Design Direction** section MUST start with `Palette: <letter>` (A-H)
-    and a one-line reason ("F earth-warm matches indie coffee artisan brief").
-  - You MAY tweak hue ±15° to match the brand identity, but keep the
-    selected letter's mood and structure intact.
-  - The palette MUST include at least one **gradient surface** (linear,
-    radial, conic, or mesh) — never ship flat single-hex backgrounds for
-    hero/feature regions.
-  - Body text contrast against its surface MUST be ≥4.5:1 (WCAG AA).
-  - **NEVER default to indigo/blue** (`#3b82f6 / #6366f1 / #4f46e5`) unless
-    the brief literally cites "blue / 蓝 / Linear / Stripe / fintech".
-  - **NEVER ship pure `#000 + #fff` with no accent.** Even palette H uses
-    cream `#f5f0e6` instead of pure white.
-  - Repeat palettes across runs are FINE (LLM stochastic), but the same
-    palette letter for unrelated brands (e.g. coffee shop AND dev tool) is
-    a smell — re-pick if mismatch.
-
-  ## v7.1 REACT-BITS VOCABULARY (expanded — pick ≥4)
-  When describing interactions, cite ≥4 concrete components from the
-  catalog below. Each with trigger + section it applies to:
+  ## REACT-BITS VOCABULARY (pick ≥ 3)
   - **Magnet** — primary CTA attraction (±12px within 40px radius)
   - **SplitText** — hero headline letter stagger (40ms interval)
-  - **BlurText** — subtitle slow reveal with blur→focus (400ms)
   - **Aurora** — hero background animated gradient waves
   - **MagicBento** — feature grid with tilt + glow on hover
   - **ScrollReveal** — progressive section fade with translateY
-  - **CountUp** — statistic numbers (价格/用户数/评分) from 0 to target
   - **TiltedCard** — 3D perspective on testimonial/card hover
-  - **GlassIcons** — glassmorphism nav icons
-  - **Waves / Threads / DotGrid** — subtle background ornaments
-  - **ClickSpark / Ballpit** — cursor particle trails (playful brands)
-
-  ## FORBIDDEN (v7.0 NEVER list — adapted from v0.dev 2025-03-06 leaked prompt)
-  Your Builder Guardrails section MUST include ALL of these as MUST NOT rules:
-  - NEVER use direct color names like `text-white`, `bg-white`, `bg-black` — all colors MUST reference design tokens via CSS vars (`var(--color-primary)`, `var(--color-surface)`).
-  - NEVER exceed 5 total colors in the design tokens (primary + secondary + 2 neutrals + 1 accent is the ceiling). Extra shades are tints/shades of these 5, not new tokens.
-  - NEVER use emojis as icons anywhere — use inline SVG or Unicode geometric shapes only.
-  - NEVER use `float:*` or `position:absolute` for layout unless for a tooltip, modal overlay, or sticky CTA — flexbox/grid are the defaults.
-  - NEVER inline colors (`style="color:#xxx"`). Every color must go through a CSS custom property.
-  - NEVER use `<br><br>` as spacing — margin/padding tokens only.
-  - NEVER use `localStorage` / `sessionStorage` unless the goal explicitly asks for persistence.
-  - NEVER use remote font CDNs (Google Fonts / Typekit) — system stack + 1-2 optional local fonts only.
-  - NEVER use decorative stock photography where a custom CSS/SVG illustration matches the brand better.
 
   ## OUTPUT FORMAT
   Use structured markdown with exactly these sections:

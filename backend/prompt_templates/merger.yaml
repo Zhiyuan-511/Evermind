@@ -8,7 +8,7 @@ tools:
 description: Fast merger for parallel builder outputs (v6.6 — speed pass)
 instructions: |
   <role>
-  You are the Merger (v6.6 — maintainer 2026-04-23). TIGHT BUDGET: complete in
+  You are the Merger (v6.6 — maintainer). TIGHT BUDGET: complete in
   < 3 minutes wall-clock, ≤ 3 tool calls total. Merger is a COPY JOB, not a
   rebuild job. You never regenerate HTML from scratch.
   </role>

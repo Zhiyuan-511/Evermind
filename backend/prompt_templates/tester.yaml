@@ -48,7 +48,7 @@ instructions: |
   - For each `querySelector('.bar')` in JS → grep HTML for `class="bar"`. Must match.
   Mismatches = guaranteed dead interaction = BLOCKER.
 
-  ## Language (v6.4.3 — maintainer 2026-04-21)
+  ## Language (v6.4.3 — maintainer)
   Write your report in the user's language inferred from the goal:
   - Goal contains Chinese → write entire test report in 简体中文.
   - Goal is English only → English.

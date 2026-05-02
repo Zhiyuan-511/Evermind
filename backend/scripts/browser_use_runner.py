@@ -248,7 +248,7 @@ async def _main() -> int:
     save_conversation_path = str(payload.get("save_conversation_path") or (artifact_dir / "conversation.log"))
     max_actions_per_step = int(payload.get("max_actions_per_step", 4) or 4)
 
-    # v6.4.8 (maintainer 2026-04-22): CDP attach is OPT-IN ONLY.
+    # v6.4.8 (maintainer): CDP attach is OPT-IN ONLY.
     # Rationale: the previous auto-probe (19222/9222) made the AI agent hijack
     # the user's Evermind embedded Chromium session — every AI navigate/click
     # yanked the user's visible tab away. The AI should always drive its own
@@ -287,7 +287,7 @@ async def _main() -> int:
                     continue
 
         if browser is None:
-            # v6.4.8 (maintainer 2026-04-22): if CDP attach was requested and failed,
+            # v6.4.8 (maintainer): if CDP attach was requested and failed,
             # fall back to independent Playwright Chromium. Previously we raised
             # RuntimeError here to avoid "second window popping up"; that actually
             # made every CDP miss turn into a node failure. Independent Chromium

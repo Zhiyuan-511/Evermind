@@ -1,7 +1,7 @@
 'use client';
 
 /**
- * v7.0 (maintainer 2026-04-24) — VSCode/Cursor-style Activity Bar.
+ * v7.0 (maintainer) — VSCode/Cursor-style Activity Bar.
  * 48px-wide icon column pinned to the far left. Clicking an icon
  * switches the neighbouring Panel content. Badge numbers show
  * live counts (e.g., dirty file count on Git icon).

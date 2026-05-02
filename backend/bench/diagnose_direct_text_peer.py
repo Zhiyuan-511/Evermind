@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Variant of diagnose_direct_text.py that constructs a TWO-builder plan
-(peer builder scenario) — this is what maintainer's real run hit.
+(peer builder scenario) — this is what the user's real run hit.
 """
 from __future__ import annotations
 

@@ -11,13 +11,13 @@
 
 Evermind needs at least one LLM API key to actually plan/build. Open the app → **Settings → API Keys** and add one of:
 
-- **OpenAI** (`sk-...`) — works at `api.openai.com/v1` by default. If you use a relay (private-relay / relay / etc.) override the **API base** field.
+- **OpenAI** (`sk-...`) — works at `api.openai.com/v1` by default. If you use a relay (relay / relay / etc.) override the **API base** field.
 - **Anthropic** (`sk-ant-...`) — Claude models.
 - **Google** (Gemini API key).
 - **Kimi / Moonshot** — `sk-...` from `platform.moonshot.cn` (or `kimi-coding` plan from `api.kimi.com/coding/v1`).
 - **Zhipu (GLM)**, **Qwen**, **DeepSeek**, **MiniMax**, **Doubao** — see Settings dropdown.
 
-You can also point the whole stack at a single relay (`private-relay.example` style) — set the relay base URL in **Settings → Relays**.
+You can also point the whole stack at a single relay (`relay` style) — set the relay base URL in **Settings → Relays**.
 
 ## Build from source
 

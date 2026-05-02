@@ -391,7 +391,7 @@ export default function ChatPanel({
         }
     }, [running]);
 
-    // v6.2 (maintainer 2026-04-20): listen for template pre-fill events dispatched
+    // v6.2 (maintainer): listen for template pre-fill events dispatched
     // by WelcomeWizard / TemplateGallery. Fills the input with the template's
     // goal so the user just needs to hit Send.
     useEffect(() => {
@@ -676,7 +676,7 @@ export default function ChatPanel({
                     </button>
                 )}
 
-                {/* Difficulty selector — v7.1i (maintainer 2026-04-25): 5 modes incl. Ultra.
+                {/* Difficulty selector — v7.1i (maintainer): 5 modes incl. Ultra.
                     Ultra mode triggers 14-NE pro plan + Ultra CLI orchestration:
                     analyst + uidesign + scribe + 4 parallel builders + merger + polisher
                     + reviewer + patcher + deployer + tester + debugger. */}
@@ -691,7 +691,7 @@ export default function ChatPanel({
                             ['standard', tr('平衡', 'Balanced'), tr('3-4 个节点', '3-4 nodes')],
                             ['pro', tr('深度', 'Deep'), tr('7-10 个节点', '7-10 nodes')],
                         ];
-                        // v7.1i (maintainer 2026-04-25): Ultra 按钮只在 CLI 模式开启时显示。
+                        // v7.1i (maintainer): Ultra 按钮只在 CLI 模式开启时显示。
                         // 否则按钮根本不出现在 UI 上 —— Ultra 依赖 CLI 进程，没 CLI 这选项没意义。
                         if (cliEnabled) {
                             tiers.push(['ultra', tr('Ultra', 'Ultra'),
@@ -709,7 +709,7 @@ export default function ChatPanel({
                         // When CLI mode is OFF, Ultra is dimmed and disabled.
                         const isUltra = key === 'ultra';
                         const ultraDisabled = isUltra && !cliEnabled;
-                        // v7.2 (maintainer 2026-04-26): Custom mode is no longer a
+                        // v7.2 (maintainer): Custom mode is no longer a
                         // hard-disabled button when the canvas is empty —
                         // selecting it without ≥2 nodes simply shows an inline
                         // hint banner so users know to drag nodes in. Hard

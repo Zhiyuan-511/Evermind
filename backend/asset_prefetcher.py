@@ -202,7 +202,7 @@ async def prefetch_asl_alphabet(output_dir: Path) -> Dict[str, Any]:
                             body = body2
                             source_url = fallback
                 if body and _is_real_svg(body):
-                    # v7.1i (maintainer 2026-04-25): write BOTH naming conventions.
+                    # v7.1i (maintainer): write BOTH naming conventions.
                     # Builders inconsistently reference either `A.svg` or
                     # `letter_A.svg` — if file with prompt-named convention
                     # missing, builder writes a 293-byte placeholder fake.
@@ -297,7 +297,7 @@ def verify_assets_intact_sync(goal: str, output_dir: Path) -> Dict[str, Any]:
 
 
 async def verify_assets_intact(goal: str, output_dir: Path) -> Dict[str, Any]:
-    """v7.1i (maintainer 2026-04-25): post-run integrity check.
+    """v7.1i (maintainer): post-run integrity check.
     Builders/patchers sometimes delete prefetched assets. Re-verify the
     expected asset count is on disk; re-fetch any missing.
 

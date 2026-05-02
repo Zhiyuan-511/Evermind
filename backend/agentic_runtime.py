@@ -384,6 +384,13 @@ NODE_ROLE_TOOLS: Dict[str, List[str]] = {
     "scribe": [
         "file_read", "file_write", "file_list", "grep_search",
     ],
+    # v7.52 (maintainer): patcher must have ZERO tools so kimi cannot
+    # reflexively call file_ops and must emit SEARCH/REPLACE prose blocks
+    # (parsed by udiff_apply.py with fuzzy threshold 0.8). Without this entry
+    # the default fallback ["file_read","file_list"] kicks in for the
+    # agentic_loop path. See ai_bridge.py _CHAT_ONLY_ROLES for the parallel
+    # guard on _execute_openai_compatible / _execute_litellm_tools paths.
+    "patcher": [],
 }
 
 
@@ -442,7 +449,7 @@ class AgenticLoop:
         "web_search", "web_fetch",
     })
 
-    # v6.1.6 (maintainer 2026-04-19, OpenHands-inspired condensation)
+    # v6.1.6 (maintainer, OpenHands-inspired condensation)
     # When the loop hits a safety limit (max_iter/max_tool/loop_detected),
     # compress old tool_result bodies into short summaries before giving up.
     # If after condensation the model can still produce useful progress,
@@ -583,7 +590,7 @@ class AgenticLoop:
             return False
 
         window = self._recent_actions[-self._loop_detection_window:]
-        # v6.1.4 (maintainer 2026-04-19): research showed reviewer repeat-screenshot
+        # v6.1.4 (maintainer): research showed reviewer repeat-screenshot
         # pattern didn't trigger prior 6-identical rule. Add: 4 consecutive
         # identical tool_calls in the window is a stuck signal — matches Cursor's
         # "Loop at most 3 times then ask" contract.
@@ -796,7 +803,7 @@ class AgenticLoop:
                 # Phase 1: Run concurrent-safe tools in parallel (Claude Code
                 # partitionToolCalls + runConcurrently style). Reads like
                 # file_read / glob / grep_search all execute simultaneously.
-                # v6.1.8 Wave C (maintainer 2026-04-19): observed latency for this
+                # v6.1.8 Wave C (maintainer): observed latency for this
                 # path to confirm the concurrency win is actually happening.
                 if concurrent_batch and self.state not in (LoopState.COMPLETED, LoopState.FAILED):
                     # Pre-check: how many can we still run?

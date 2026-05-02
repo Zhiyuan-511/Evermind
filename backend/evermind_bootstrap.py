@@ -12,7 +12,7 @@ Idempotency rules:
 - File present and we need to add a key/section → merge non-destructively
 - For TOML/JSON files we patch, always back up first to <name>.bak.evermind_bootstrap.<ts>
 
-Logging is verbose so the user (or maintainer) can audit exactly what got written.
+Logging is verbose so the user (or the maintainer) can audit exactly what got written.
 """
 from __future__ import annotations
 

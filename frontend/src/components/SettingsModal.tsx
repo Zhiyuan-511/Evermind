@@ -30,7 +30,7 @@ interface ApiKeys {
     zhipu: string;
     doubao: string;
     yi: string;
-    aigate: string;   // v5.8.6: private-relay.example multi-model relay (sk-ag-*)
+    aigate: string;   // multi-model relay key (sk-ag-* format)
     // v5.8.6: optional secondary keys per provider — enable concurrent-node
     // load balancing (e.g. imagegen + spritesheet + builder1 + builder2 running
     // in parallel stop fighting for the same key's rate limit).
@@ -259,13 +259,13 @@ export default function SettingsModal({
         // every provider that has entries in MODEL_REGISTRY must be listed so
         // users can paste keys for any registered model.
         minimax: '', zhipu: '', doubao: '', yi: '',
-        aigate: '',   // v5.8.6: private-relay.example relay
+        aigate: '',   // multi-model relay key (sk-ag-*)
     });
     const [apiBases, setApiBases] = useState<Record<string, string>>({
         openai: '', claude: '', gemini: '', kimi: '', deepseek: '', qwen: '',
         // v5.8.6: add new providers
         minimax: '', zhipu: '', doubao: '', yi: '',
-        aigate: 'https://llm.private-relay.example/v1',  // default to private-relay
+        aigate: '',  // user-supplied relay base URL — no hardcoded default
     });
     const [autoL2, setAutoL2] = useState(true);
     const [l4Pass, setL4Pass] = useState('godmode');
@@ -282,7 +282,7 @@ export default function SettingsModal({
     const [comfyUiUrl, setComfyUiUrl] = useState('');
     const [comfyWorkflowTemplate, setComfyWorkflowTemplate] = useState('');
     const [imageBackendAvailable, setImageBackendAvailable] = useState(false);
-    // v6.2 (maintainer 2026-04-20): direct image provider (preferred over ComfyUI).
+    // v6.2 (maintainer): direct image provider (preferred over ComfyUI).
     const [imgProvider, setImgProvider] = useState<'' | 'doubao-image' | 'seedream' | 'tongyi' | 'flux-fal' | 'openai-compat'>('');
     const [imgApiKey, setImgApiKey] = useState('');
     const [imgBaseUrl, setImgBaseUrl] = useState('');
@@ -294,14 +294,14 @@ export default function SettingsModal({
     const [imgTestResult, setImgTestResult] = useState<{ ok: boolean; latency_ms?: number; image_base64?: string; error?: string } | null>(null);
     const [nodeModelPreferences, setNodeModelPreferences] = useState<Record<string, string[]>>({});
     const [thinkingDepth, setThinkingDepth] = useState<'fast' | 'deep'>('deep');
-    // v7.7 (maintainer 2026-04-27): user-controlled reviewer reject budget. 1 = single-loop
+    // v7.7 (maintainer): user-controlled reviewer reject budget. 1 = single-loop
     // closure (v6.7 default, fastest); higher = stricter quality gate at cost of
     // longer runs. Capped at 5 in normal mode (Ultra mode goes to 10 separately).
     const [reviewerMaxRejections, setReviewerMaxRejections] = useState<number>(1);
-    // v6.1.3 (maintainer 2026-04-18): dedicated language toggle for node walkthrough reports.
+    // v6.1.3 (maintainer): dedicated language toggle for node walkthrough reports.
     // "" = inherit UI language; "zh"/"en" = force that language for reports.
     const [walkthroughLang, setWalkthroughLang] = useState<'' | 'zh' | 'en'>('');
-    // v6.1.10 (maintainer 2026-04-19): when the user configured TWO API keys for
+    // v6.1.10 (maintainer): when the user configured TWO API keys for
     // the primary builder provider (e.g. kimi + kimi_2), let parallel peer
     // builders share the preferred first model and round-robin the keys
     // instead of falling back to the second configured model.
@@ -716,7 +716,7 @@ export default function SettingsModal({
             ['zhipu', 'zhipu', 'zhipu_api_key'],
             ['doubao', 'doubao', 'doubao_api_key'],
             ['yi', 'yi', 'yi_api_key'],
-            ['aigate', 'aigate', 'aigate_api_key'],  // v5.8.6: private-relay.example
+            ['aigate', 'aigate', 'aigate_api_key'],  // v5.8.6: relay
         ];
         for (const [uiKey, restKey, wsKey] of mapping) {
             const primary = apiKeys[uiKey];
@@ -754,7 +754,7 @@ export default function SettingsModal({
                         zhipu: apiBases.zhipu || '',
                         doubao: apiBases.doubao || '',
                         yi: apiBases.yi || '',
-                        aigate: apiBases.aigate || 'https://llm.private-relay.example/v1',  // v5.8.6
+                        aigate: apiBases.aigate || 'https://llm.relay/v1',  // v5.8.6
                     },
                     builder_enable_browser: browserResearch,
                     tester_run_smoke: smokeEnabled,
@@ -1005,7 +1005,7 @@ export default function SettingsModal({
                                         zhipu: 'Zhipu / GLM',
                                         doubao: 'Doubao (豆包)',
                                         yi: 'Yi / 01.AI',
-                                        aigate: 'AiGate (private-relay 中转)',
+                                        aigate: 'AiGate (relay 中转)',
                                     };
                                     return (
                                         <div key={k} style={{ marginBottom: 6 }}>
@@ -1939,7 +1939,7 @@ export default function SettingsModal({
                                     <label>{t('Enable CLI Mode', '启用 CLI 模式')}</label>
                                     <input type="checkbox" checked={cliEnabled} onChange={e => setCliEnabled(e.target.checked)} />
                                 </div>
-                                {/* v7.1i (maintainer 2026-04-25): Ultra Mode toggle.
+                                {/* v7.1i (maintainer): Ultra Mode toggle.
                                     Was missing in UI — backend supports cli_mode.ultra_mode but
                                     users couldn't see/toggle it. Ultra mode routes every dispatch
                                     through 14-NE pro plan (analyst + uidesign + scribe + 4 builder

@@ -1,220 +1,223 @@
-<div align="center">
-  <h1>Evermind</h1>
+# Evermind
 
-  <p><strong>An open-source multi-agent orchestration desktop app, with a built-in AI browser and native support for every major LLM — local or cloud, Chinese or Western.</strong></p>
+> 一个把"一句需求"自动变成"完整可交付网站/网页游戏"的多智能体协作流水线。
+> 本地优先 · 桌面端 · 8-12 节点 DAG · Pro 模式自动跑 30-50 分钟，输出生产级 HTML/CSS/JS 工程。
 
-  <p>
-    <a href="LICENSE"><img alt="License: Apache 2.0" src="https://img.shields.io/badge/License-Apache%202.0-blue.svg"></a>
-    <a href="https://github.com/Zhiyuan-511/Evermind/releases"><img alt="Release" src="https://img.shields.io/github/v/release/Zhiyuan-511/Evermind?include_prereleases"></a>
-    <a href="https://github.com/Zhiyuan-511/Evermind/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/Zhiyuan-511/Evermind?style=social"></a>
-  </p>
-
-  <p>
-    <a href="https://github.com/Zhiyuan-511/Evermind/releases/latest">Download</a> ·
-    <a href="INSTALL.md">Install guide</a> ·
-    <a href="BUILD.md">Build from source</a> ·
-    <a href="CHANGELOG.md">Changelog</a>
-  </p>
-</div>
+![Status](https://img.shields.io/badge/status-alpha-orange)
+![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
 
-## What is Evermind?
+## 关于作者（重要）
 
-Evermind is a desktop app that runs **multiple AI agents as a DAG pipeline** on your Mac.
-Compose a router + planner + analyst + parallel builders + reviewer + tester as a graph — not a chain — and watch them collaborate live.
+我是一名 **17 岁的高中生**，**不会写代码**，但对 AI 特别着迷。
 
-It ships with:
+Evermind 是我利用各种 AI 工具反复试错、迭代出来的项目。它的核心思路、架构决策、所有 bug 修复轮次（从 v6.x 一路到 v7.62），都是我反复推敲、形成方案、然后落地实现的——每一行代码我都尽力理解过它在做什么。
 
-- A **built-in Chromium browser** agents can drive, with a visible AI cursor, click ripples, scroll glow and typing overlays so you can see what the AI is doing.
-- A **Monaco code editor** side-by-side with chat.
-- **Provider plugins for 12 LLM vendors** — Kimi, Qwen, DeepSeek, Zhipu GLM, Doubao, MiniMax, OpenAI, Anthropic, Gemini, xAI Grok, Mistral, Meta Llama.
-- A **quality-guard runtime** that detects narration-only output, empty batches, reasoning-mode leaks and auto-falls-back to tool-call mode.
-- **Streaming-everything** WebSocket runtime (port 8765), live trace viewer, persistent session memory.
-- **BYOK** — your API keys stay on disk (AES-encrypted) and requests go directly to the provider you configured. No Evermind cloud. No proxy.
+**老实说**：项目里还有很多功能我目前的知识水平优化不了。比如：
+- 多模型路由 / token 缓存调度的更深入优化
+- 浏览器自动化交互层的稳定性
+- Three.js / WebGL 内容生成的进一步质量提升
+- Python asyncio 的复杂死锁排查
 
-> This whole project was written by a human and Claude, together, with zero lines of hand-written code from the author. It's an experiment in what two people — one silicon, one not — can ship in a living codebase.
+我会**持续学习**，慢慢把这些短板补上。如果你是有经验的开发者，发现哪里写得不够好或有更好的做法，我特别欢迎你提 Issue 或直接 PR——你的每一条建议对我都是免费的"老师"。
 
-## Key features
+**联系我**：可以通过 GitHub Issue 提建议，或在 Discussions 区聊聊。
 
-- 🧩 **Multi-agent DAG pipelines** — router / planner / analyst / imagegen / spritesheet / assetimport / builder×N / merger / reviewer / tester / debugger / deployer
-- 🌐 **Built-in agent browser** — AX + paint-order snapshot, 13 atomic mouse/keyboard actions, AI cursor overlay, click ripples, scroll edge-glow, typed-char float-up, element highlight boxes
-- 📝 **YAML harness templates** — 16-node prompts externalized; hot-swap without rebuild
-- 🔌 **12 LLM providers** — one plugin per vendor, not one size fits all
-- 🇨🇳 **Kimi / Qwen / DeepSeek / GLM / Doubao / MiniMax** — first-class Chinese LLM support with per-vendor thinking-disable, prompt-cache, retry policy
-- 🤖 **OpenAI / Anthropic / Gemini / Grok / Mistral / Llama** — native Responses / Messages / generateContent protocol shaping
-- 🖥️ **Monaco editor** — same engine as VS Code, side-by-side with chat
-- 🧠 **Session memory** — cross-conversation local SQLite
-- 🛡️ **Quality guard** — narration-guard, empty-batch detection (10 KB threshold), kill-switch override — see [V5.8.7](CHANGELOG.md#580-2026-04-18)
-- 🎯 **Speculative execution** — parallel peer agents for 2–4× faster pipelines
-- 📊 **Live trace viewer** — every tool call, every token, real time
-- 🔑 **BYOK + encrypted key storage** — AES-256 on disk
-- 🔄 **WebSocket streaming everything** — no 30s stalls
+---
 
-## Quick start
+## 这个项目能做什么
 
-```bash
-# macOS Apple Silicon
-curl -LO https://github.com/Zhiyuan-511/Evermind/releases/latest/download/Evermind-3.0.0-arm64.dmg
-open Evermind-3.0.0-arm64.dmg
-# drag Evermind.app to Applications, then right-click → Open on first launch
-```
+你给一句话或一段提示词，比如：
 
-Set at least one API key on first launch (Settings → API keys). See [INSTALL.md](INSTALL.md) for a full walk-through.
+> "做一个未来科技 3D 网站，要 WebGL 三维背景、滚动驱动动画、暗色霓虹配色、首页+功能+定价三页、Awwwards 获奖级动效"
 
-## How agents work — node reference
+Evermind 的 12 个智能体角色 (按任务类型激活 8-12 个)会**协作**完成：
 
-Each agent has a single fixed role. Drag any subset onto the canvas and connect
-them with arrows; downstream agents only run after all upstream agents pass.
+1. **Planner**（规划师）拆解需求成精确的执行蓝图——哪些页、每页要什么、哪些是必须、哪些是可选
+2. **Analyst**（分析师）上网研究参考实现：Three.js 写法、相似 Awwwards 网站的技术栈
+3. **UI Design**（UI 设计师）给出 Design Tokens（配色、字号、间距）+ 布局蓝图
+4. **Scribe**（文案）写文案 + 内容架构
+5. **Builder 1+2 并行**（构建者）写 HTML/CSS/JS 代码（按蓝图，主页 + 子页）
+6. **Merger**（合并器）把两个 builder 的产出合并成统一项目
+7. **Polisher**（抛光师）抛光：动效、留白、过渡（不改结构）
+8. **Reviewer**（审查员）用 Playwright 浏览器实地审查质量并打分（0-10）
+9. **Patcher**（补丁师）当 reviewer 不通过时，根据具体反馈做精确的 SEARCH/REPLACE 修复
+10. **Deployer**（部署器）给出本地预览 URL
+11. **Debugger**（调试器）修运行时报错
+12. **Tester**（测试员）跑交互测试（点击/拖拽/键盘）
 
-| Node          | Role | Typical input | Typical output | Best paired with |
-|---------------|------|---------------|----------------|------------------|
-| **planner**   | Decompose the goal into 4-12 numbered subtasks; emit ownership boundaries (`builder_1` owns X, `builder_2` owns Y) | The user goal | JSON blueprint + per-agent briefs | always first |
-| **analyst**   | Research the problem domain; gather 5-30 reference repos / docs; produce per-builder handoff sections | planner blueprint | XML-tagged dossier (~20-40 KB) with `<builder_N_handoff>`, `<reference_sites>`, `<deliverables_contract>` | game / website / dashboard |
-| **imagegen**  | Plan visual assets — when no image backend is configured, produces a `manifest.json` + sprite atlas spec; when configured, generates real PNGs | analyst handoff | `assets/manifest.json` + `sprites.js` + `loader.js` | game / creative |
-| **spritesheet** | Sprite atlas planner (offline / fast-path) | imagegen output | atlas coordinates spec | game (when 2D sprite-heavy) |
-| **assetimport** | Asset pipeline coordinator — Wikimedia / Kenney prefetch | analyst preferred sites | local SVGs / PNGs in `assets/` | game / accessibility-critical sites |
-| **builder×N** | Write the actual code (`/tmp/evermind_output/index.html` for primary; `module_b{N}.js` for peers) | analyst dossier | full HTML / JS / CSS | always — at least 1 |
-| **merger**    | Integrate peer builders' modules into root index.html — uses HARD-SKIP fast-path when peers ship modules instead of duplicate index.html | builder outputs | merged single-page app | when builder count ≥ 2 |
-| **reviewer**  | Run real Chromium against the live preview, take screenshots, audit interaction / responsive / completeness; emit accept / reject verdict | merged HTML | rejection list (or pass) | every shipped task |
-| **patcher**   | Apply targeted SEARCH/REPLACE patches based on reviewer rejections — does NOT rebuild from scratch | reviewer verdict | patched HTML | reject path only |
-| **tester**    | Headless browser smoke test — clicks the primary surface, watches console, fails if console errors > tolerance | deployed HTML | pass / fail + console log | every shipped task |
-| **debugger**  | Surgical fixer for runtime errors tester caught | tester error log | debug-patch | reject + retry path |
-| **deployer**  | List artifacts + emit preview URL (single-file → `/tmp/evermind_output/index.html`) | shipped HTML | preview URL + manifest | always last |
+最终输出的是一个**真能在浏览器打开**的完整网站工程，含 index.html、styles.css、app.js、可能还有 about.html / pricing.html 等多页。
 
-### Pre-built canvases
+---
 
-- **Simple** (`builder → tester → deployer`): smallest viable run, ~4-6 minutes, good for quick experiments
-- **Standard** (`planner → analyst → builder → reviewer → patcher → tester → deployer`): default for most goals, ~12-18 minutes
-- **Pro** (the full DAG above with imagegen / spritesheet / assetimport in parallel): asset-heavy games, polished landing pages, ~25-35 minutes
-- **Ultra** (Pro × 4 + 24h budget + multi-file scaffolding): commercial-grade products
+## 节点编排详解
 
-Pick a preset from the **Templates** button on the launchpad, or click **+ New Task** and arrange your own canvas.
-
-### Building a custom DAG (5 steps)
-
-1. **Click `+ New Task`** on the launchpad → Editor opens
-2. **Drag agents** from the left sidebar onto the canvas
-3. **Connect** by dragging from one agent's right edge to another's left edge — only forward edges allowed (no cycles, the planner can't depend on the deployer)
-4. **Click an agent** to edit its task description (overrides the auto-generated one)
-5. **Click `Run`** — every connected node runs in topological order; siblings without edges run in parallel automatically
-
-**Common patterns:**
-
-- *Three parallel builders:* connect `analyst → builder1`, `analyst → builder2`, `analyst → builder3`, then all three → `merger`. They start within 1s of each other and write to non-overlapping module files.
-- *Quality-loop:* connect `reviewer → patcher → reviewer` (yes, a back-edge to itself is allowed once — capped at 1 rejection cycle to prevent infinite loops).
-- *Speculative branch:* the runtime auto-spawns a "peer" speculatively for slow tool-using nodes — you don't have to wire this manually.
-
-## Real-world usage
-
-| Task type | Goal example | Recommended template | Typical duration |
-|-----------|--------------|----------------------|------------------|
-| 2D game (tower defense / arcade / puzzle) | "做一个2d植物大战僵尸，建模精致" | Pro | 25 min |
-| 3D game (FPS / TPS / racing) | "Build a 3D first-person shooter with WASD + mouse look" | Pro / Ultra | 35 min |
-| Single-page website | "Build a SaaS landing page for an AI startup" | Standard | 12 min |
-| Multi-page website | "5-page ASL learning site with 26 letter cards" | Pro | 22 min |
-| Data dashboard | "Sales analytics dashboard with 4 charts + filter sidebar" | Pro | 18 min |
-| Tool / utility | "Unit converter, currency / length / weight, dark mode" | Simple | 5 min |
-| Slides / presentation | "10-slide pitch deck for a fintech product" | Standard | 10 min |
-| Creative / experimental | "Interactive generative-art canvas, mouse follow, particle field" | Standard | 12 min |
-| Long task / commercial product | "End-to-end shop with cart, checkout, admin panel" | Ultra | 4-12 hours |
-
-### Tips for great results
-
-- **Be specific about the technology family.** "2d 塔防" routes to Phaser / Canvas2D; "3d shooter" routes to Three.js. Mixing both ("2d 但建模精致") is now correctly understood (since v7.4.2).
-- **Mention the audience.** "for kids" → simpler colors, larger text. "commercial-grade" → polish + variety.
-- **Pin specific page names.** For multi-page sites, list the exact filenames (`learn.html`, `progress.html`) and they will be honored.
-- **Provide reference URLs.** Drop a GitHub link in the task description; analyst will fetch it as a reference.
-- **For long tasks, switch to Ultra mode.** Standard / Pro have a 1-hour wall-time cap; Ultra extends to 24 hours and uses 4-builder parallelism.
-
-## Troubleshooting
-
-- **"Can't open Evermind because Apple cannot check it for malicious software"** → right-click the app → **Open** → confirm. macOS only asks once.
-- **The launchpad asks for Files-and-Folders permission** → only on first launch under v7.3 or earlier. v7.4+ defaults workspace to `~/.evermind/workspace` (sandboxed).
-- **Run is stuck at planner / analyst for 5+ minutes** → check Settings → API keys; relay endpoint may be unreachable. The trace viewer at the bottom of the editor shows the actual error.
-- **Reviewer keeps rejecting the same issue** → click the agent on the canvas, expand its task description, paste the specific fix the reviewer wants. Patcher will apply it next iteration.
-- **Need to cancel a stuck run** → click the red **stop** button in the toolbar; cancel releases the orchestrator immediately (since v7.4).
-
-## Architecture
+### Pipeline 结构（pro 模式）
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Electron main (Node)                                    │
-│  ├── Next.js renderer (React + Monaco + Chromium view)   │
-│  └── Spawns Python sidecar ──────────────┐               │
-└──────────────────────────────────────────┼───────────────┘
-                                           │
-                        WebSocket / HTTP :8765
-                                           │
-┌──────────────────────────────────────────▼───────────────┐
-│  Python FastAPI backend                                  │
-│  ├── Pipeline engine (DAG executor, YAML harness)        │
-│  ├── Agent router (planner/analyst/builder/reviewer)     │
-│  ├── Quality guard (narration / empty-batch / kill)      │
-│  ├── Provider plugins (Kimi / Qwen / DeepSeek / GLM /    │
-│  │                     Doubao / MiniMax / OpenAI /       │
-│  │                     Anthropic / Gemini / xAI /        │
-│  │                     Mistral / Meta Llama)             │
-│  └── Browser plugin (Playwright + AI cursor overlay)     │
-└──────────────────────────────────────────────────────────┘
+                                    ┌─→ imagegen ─┐
+planner → analyst ──────────────────┼─→ spritesheet ──┐    (asset_heavy 任务)
+                                    └─→ assetimport ──┘
+                  │                                    │
+                  └─→ uidesign + scribe ──┐            │
+                                          ↓            ↓
+                              ┌── builder 1 ──→ merger
+                              └── builder 2 ──→
+                                                │
+                                                ↓
+                              polisher (可选)
+                                                │
+                                                ↓
+                                          reviewer ←──┐
+                                                │     │
+                                          ┌─────┤     │ (reject)
+                                          │     ↓     │
+                                       (pass)  patcher ┘ (最多 3 轮闭环)
+                                          │
+                                          ↓
+                                       deployer → debugger → tester
 ```
 
-## Screenshots
+### Reviewer ↔ Patcher 闭环（核心质量保证）
 
-| Pipeline canvas | Chat + editor |
-|-----------------|---------------|
-| ![pipeline](docs/assets/ss-pipeline.png) | ![chat](docs/assets/ss-chat.png) |
+这是 Evermind 区别于"单 Agent 一次写完"的关键设计：
 
-| Agent browser | Live trace |
-|---------------|------------|
-| ![browser](docs/assets/ss-browser.png) | ![trace](docs/assets/ss-trace.png) |
+1. **Reviewer** 用真实浏览器打开 builder 产出，跑交互测试，输出结构化 JSON verdict（含 `blocking_issues` 数组，每条带 `file` / `anchor_line_range` / `suggested_fix`）
+2. 如果 reject，**Patcher** 拿到这些精确指令，做 SEARCH/REPLACE 块级修复
+3. 修完后 **Reviewer 重新审一遍**（不是简单接受 patcher 输出）
+4. 这个闭环最多 3 轮，强制保证产出质量
 
-*(Add the screenshots under `docs/assets/` before tagging a release.)*
+**为什么不让一个 Agent 直接写到完美？**
+LLM 一次性写复杂网站，平均质量是"能跑就停"。多 Agent 协作 + 严格门控让每个角色都聚焦自己擅长的事，最后再用浏览器实地验证。这是单 Agent 做不到的。
 
-## Install
+---
 
-- **Users**: [INSTALL.md](INSTALL.md) — download .dmg and run
-- **Developers**: [BUILD.md](BUILD.md) — build from source + Apple signing guide
+## 怎么用
 
-## Contributing
+### 1. 安装（macOS 桌面端）
 
-PRs welcome. Before opening one:
+下载 [Releases](https://github.com/Zhiyuan-511/Evermind/releases) 最新 DMG，拖进 Applications 即可。
 
-```bash
-python3 -m pytest backend/tests -q        # backend
-cd frontend && npx tsc --noEmit           # types
+首次启动会要求授权访问 Desktop 文件夹（用来保存生成的网站）。
+
+### 2. 配置 API Key
+
+打开 Evermind → Settings → 填入你的 LLM API key：
+- **推荐**：Kimi (Moonshot) — `sk-...` — 国内速度最快、对中文 prompt 友好
+- 也支持：OpenAI / Anthropic / DeepSeek / 通义千问等
+- 如果用第三方中转站，填对应的 base URL 即可
+
+### 3. 写提示词，开跑
+
+**Simple 模式**（4 节点，3-5 分钟）：
+适合简单页面，比如"一个计数器网页"、"咖啡店企业站三页"。
+
+**Standard 模式**（6-8 节点，8-15 分钟）：
+适合中等复杂度，含 reviewer 但没有 patcher 闭环。
+
+**Pro 模式**（11 节点，30-50 分钟）：
+完整流水线，含 reviewer↔patcher 闭环 + asset 管线。
+适合：3D WebGL 网站、多页商业站、网页游戏、复杂 dashboard。
+
+**Ultra 模式**：实验性，长任务（24h 上限）。
+
+### 4. 提示词写得越详细，产出越好
+
+Evermind 的 planner + builder 都会**严格按你的提示词执行**。建议参考：
+
+```
+角色：你是一位拥有 10 年经验的顶尖 WebGL 创意开发者
+任务：未来科技 3D 网站
+要求：
+1. 用 Three.js 实现 hero 区 3D WebGL 背景
+2. 滚动驱动的章节进入动画（IntersectionObserver / GSAP ScrollTrigger）
+3. 至少三页：首页 / 功能 / 联系
+4. 配色：暗色霓虹（charcoal + cyan #00f0ff + magenta #ff00aa）
+5. Awwwards 获奖级丝滑过渡 + 微交互
 ```
 
-Add an entry to `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md). Sign your commit with `git commit -s`. Open with a description of the intent and a short test plan.
+提示词越具体，节点越听话——这是项目核心机制（v7.57 PLANNER BLUEPRINT 注入）的设计意图。
 
-## Safety
+### 5. 自定义画布
 
-Every agent action that writes files, executes shell, or navigates the browser is logged in the live trace. Support-lane builders cannot write to the root `index.html`. The browser plugin defaults to headless; overlays are on so the user always sees what's happening. See [docs/safety.md](docs/safety.md) for the full model.
+也可以从空白画布开始，用 n8n 风格拖拽节点搭建你自己的 DAG。详见 [docs/NODE_GUIDE.md](./docs/NODE_GUIDE.md)。
+
+---
+
+## 架构亮点
+
+### 12 个智能体 + 1 个动态调度器
+
+每个智能体的 prompt 模板放在 `backend/prompt_templates/*.yaml`，可独立编辑+热重载。
+
+调度器 (`backend/orchestrator.py`，~25K 行) 处理：
+- DAG 拓扑排序 + 拓扑 reset（reviewer 触发后下游全部回到 PENDING）
+- 节点超时 + 重试 + 模型 fallback 链
+- 上下文传递（v7.57 主动注入 planner blueprint 给所有下游 code-producing 节点）
+- 浏览器自动化 (Playwright) 给 reviewer 用
+
+### Capability-Aware Builder（v7.56）
+
+识别 10 类技术能力词（WebGL/Three.js / 2D 游戏 / Canvas 艺术 / GLSL Shader / Web Audio / 物理引擎 / Drag-Drop / 实时图表 / 视频嵌入 / 滚动驱动），自动给 builder system prompt 注入对应的"必须实现"契约。LLM 看到任务里有"3D 沉浸式"就会 inline 加载 Three.js 库 + 写真实 scene/camera/animate() 代码。
+
+### Auto Post-Process（v7.56d / v7.58）
+
+- 自动检测 HTML 含 `<canvas>` 但缺 Three.js library 标签 → 自动注入 `<script src=>`
+- 自动把 `#canvas { z-index: 0 }` 改成 `z-index: -1`（防被 hero 内容遮挡）
+- Three.js render call 自动加 null-guard
+
+### Reviewer Fast-Path（v7.62 关键修复）
+
+Reviewer 用 fast 非思考模型（kimi-k2.5）保证一定输出 JSON verdict。Thinking model 会写大量推理但忘记 JSON，导致 patcher 没 actionable brief 死循环。这是开源前最后一个核心修复。
+
+---
+
+## 已知限制（开源前如实告知）
+
+- **平台**：目前只测过 macOS（arm64 + x64）。Windows/Linux 没测过，理论上 Python 后端可跑，但 Electron 前端要重打包。
+- **3D 网站质量**：v7.62 后 builder 真会写 Three.js 代码了，但效果到 "Awwwards 中等" 水平。没到顶级 award-winning（这需要融合 lygia GLSL 库 + GSAP ScrollTrigger，开源后下一版做）。
+- **Polisher 偶尔 timeout**：deterministic gap gate 检测不通过会 fail，但 pipeline 会跳过继续，不影响最终交付。
+- **某些 LLM 的 JSON 输出稳定性**：尽管做了多重兜底（v7.56b ESCAPE HATCH + v7.59 顶部强约束 + forced-synthesis fallback），偶尔还是会遇到 LLM 不输出 JSON 的情况。
+- **Token 消耗**：Pro 模式跑一轮大约消耗 200K-500K tokens（含 reviewer browser QA 多轮）。建议先用 Simple 模式打磨提示词，再上 Pro。
+
+---
+
+## 我会持续优化的方向
+
+1. **多模型 ensemble** — 让 builder1 和 builder2 用不同模型（GPT/Kimi/Claude）然后让 merger 选最好的
+2. **3D 资源库融合** — 集成 lygia GLSL + GSAP ScrollTrigger + Lenis 平滑滚动作为 first-class 砖块
+3. **本地化 LLM 路由** — 国内用户直连 Kimi/Doubao/Qwen 不走中转
+4. **更细的 reviewer rubric** — 把当前 6 维度评分扩展为 12 维度
+5. **更稳的 Three.js / Canvas 后处理** — Bloom / FilmGrain / 后处理 EffectComposer 默认开
+
+---
+
+## 反馈渠道
+
+- **GitHub Issues**：报 bug、提建议、聊架构
+- **GitHub Discussions**：聊使用心得、贡献提示词模板
+- **Pull Requests**：超级欢迎，尤其是 prompt 工程优化、新 capability 识别正则、postprocess 修复
+
+我是新手，PR 我会**慢慢学着 review**——可能比经验丰富的项目慢一点，但我会认真看每一行你提的改动并向你请教。
+
+---
+
+## 致谢
+
+- 各家 LLM 提供商让这一切可能（用户在 Settings 里自由切换）
+- Three.js / GSAP / Playwright 等开源项目
+- 所有提交 Issue 和 PR 的朋友——你们让一个高中生不孤单
+
+---
 
 ## License
 
-[Apache 2.0](LICENSE). Commercial, modification, distribution all allowed — the license only asks you to state the changes you made, keep the license text, and not use the "Evermind" trademark as your own product name.
+MIT — 自由使用、改造、分发。
 
-## Credits
+---
 
-Evermind learns from the best in class:
-
-- [Aider](https://github.com/Aider-AI/aider) — editblock / whole / udiff output formats
-- [Cline](https://github.com/cline/cline) — BYOK + safety model
-- [OpenHands](https://github.com/All-Hands-AI/OpenHands) — agent runtime concepts
-- [bolt.diy](https://github.com/stackblitz-labs/bolt.diy) — multi-provider UX
-- [browser-use](https://github.com/browser-use/browser-use) — AX-tree snapshot + element highlight
-- [rrweb](https://github.com/rrweb-io/rrweb) — mouse replay cursor animation
-- [ghost-cursor](https://github.com/Xetera/ghost-cursor) — Bezier mouse movement
-- [Monaco Editor](https://github.com/microsoft/monaco-editor)
-- [FastAPI](https://github.com/tiangolo/fastapi)
-
-## Project philosophy
-
-Evermind is built on three beliefs:
-
-1. **LLM vendors are not interchangeable.** Kimi, Qwen, DeepSeek, Doubao, MiniMax, OpenAI, Anthropic, Gemini each have different reasoning fields, tool schemas, retry rules. The right abstraction is one plugin per vendor — not one OpenAI-compat middleman for all of them.
-
-2. **Weak models can be made strong with better plumbing.** The difference between a model that works and one that doesn't is often a single `enable_thinking=False` or a `<think>` tag that nobody stripped. Evermind's quality guard closes those gaps.
-
-3. **Agents must be visible.** When the AI drives your browser, you should see a cursor, a ripple, a scroll glow, a highlighted target — not a frozen screen with a status string.
+> **如果你觉得这个项目有意思，star 一下让我知道**
+> **如果你愿意指点一下哪里写得不对，我感激不尽**

@@ -5,7 +5,7 @@ Applies LLM-generated unified-diff patches with Aider-style fuzzy matching.
 Works across project types: website (.html/.css/.js), game (same + assets),
 slides (.md/.html), software (.py/.ts/.go/etc).
 
-Design rules (maintainer 2026-04-20):
+Design rules (maintainer):
 1. Accept LLM-generated udiff even if hunk headers are wrong
 2. Match by context lines (not line numbers)
 3. Three-tier fallback: exact → whitespace-loose → drop-context

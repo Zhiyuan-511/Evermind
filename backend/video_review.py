@@ -10,7 +10,7 @@ Supports Chinese relay-friendly models:
 Graceful fallback: if no vision model configured, returns None → reviewer
 falls back to screenshot-only path.
 
-Design rules (maintainer 2026-04-20):
+Design rules (maintainer):
 1. Probe order: tongyi → doubao-vl → gemini → None (no fallback to frame-sample)
 2. Hard timeout 60s
 3. Expected output: JSON {pass:bool, issues:[str], confidence:0-100}

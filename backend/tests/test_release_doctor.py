@@ -426,7 +426,7 @@ class TestReleaseDoctor(unittest.TestCase):
             log_file.write_text(
                 "\n".join(
                     [
-                        "2026-04-03 11:04:32,585 [evermind.ai_bridge] WARNING: Compatible gateway rejection cooldown: provider=openai host=relay.cn cooldown=180s error=Your request was blocked.",
+                        "2026-04-03 11:04:32,585 [evermind.ai_bridge] WARNING: Compatible gateway rejection cooldown: provider=openai host=relay cooldown=180s error=Your request was blocked.",
                         "2026-04-03 11:04:32,585 [evermind.ai_bridge] WARNING: Model fallback: node=builder from=gpt-5.4 to=kimi-coding error=Your request was blocked.",
                     ]
                 ),
@@ -442,7 +442,7 @@ class TestReleaseDoctor(unittest.TestCase):
 
             settings_data = {
                 "api_keys": {"openai": "sk-test", "kimi": "sk-kimi"},
-                "api_bases": {"openai": "https://relay.cn/v1"},
+                "api_bases": {"openai": "<your-relay-url>"},
                 "default_model": "gpt-5.4",
                 "node_model_preferences": {
                     "builder": ["gpt-5.4", "kimi-coding"],

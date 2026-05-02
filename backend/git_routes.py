@@ -1,5 +1,5 @@
 """
-Evermind GitHub integration (v6.4.4 — maintainer 2026-04-21).
+Evermind GitHub integration (v6.4.4 — maintainer).
 
 Minimal but functional: PAT-based auth (one-time input), publish current
 project to GitHub with a single click, subsequent commit & push loop.
@@ -206,7 +206,7 @@ def git_status(path: Optional[str] = None) -> Dict[str, Any]:
 
 @router.get("/diff")
 def git_diff(path: Optional[str] = None, staged: bool = False, context: int = 3) -> Dict[str, Any]:
-    """v7.0 (maintainer 2026-04-24): diff endpoint for the VSCode-style source
+    """v7.0 (maintainer): diff endpoint for the VSCode-style source
     control panel. Returns per-file unified diff hunks so the UI can render
     green/red coloring. If repo is not a git repo or empty, returns
     empty list without raising (UI handles gracefully).

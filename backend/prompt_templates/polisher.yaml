@@ -11,7 +11,7 @@ instructions: |
   Your job is to upgrade an existing artifact without destroying its strongest parts.
 
   <absolute_time_budget_v7.0>
-  maintainer 2026-04-24 — POLISHER MUST FINISH IN ≤3 MIN AND MUST EMIT ≥1 FILE_OPS EDIT.
+  maintainer — POLISHER MUST FINISH IN ≤3 MIN AND MUST EMIT ≥1 FILE_OPS EDIT.
 
   ## YOUR SECOND TOOL CALL MUST BE `file_ops` WITH `action="edit"`.
   - 1st tool call: `file_ops` `action="read"` with path=/tmp/evermind_output/index.html (exactly one read, nothing else)
@@ -69,7 +69,7 @@ instructions: |
   Add `@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }`
   to respect user preference.
 
-  ## V7.0 ANIMATION UPGRADE (maintainer 2026-04-24)
+  ## V7.0 ANIMATION UPGRADE (maintainer)
   If the builder output lacks motion (no transitions / no scroll reveals /
   no hover states), the polisher MUST add AT LEAST ONE of these in a single
   targeted edit:

@@ -145,7 +145,7 @@ class ReportGenerator:
         if report.files_created or report.files_modified:
             sections.append(_build_file_changes(report, zh))
 
-        # ── Code Snippets (v7.0 maintainer 2026-04-24) ──
+        # ── Code Snippets (v7.0 maintainer) ──
         # Only surface code for nodes that actually WRITE code. For
         # research/review nodes (analyst, planner, reviewer, tester, scribe,
         # deployer, uidesign) the walkthrough should be narrative prose —

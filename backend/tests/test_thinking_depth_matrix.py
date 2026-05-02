@@ -187,8 +187,8 @@ def test_env_override_forces_enabled_even_in_fast(monkeypatch):
 
 
 def test_is_relay_endpoint_known_hosts():
-    assert AIBridge._is_relay_endpoint("", "https://api.private-relay.com/v1") is True
-    assert AIBridge._is_relay_endpoint("", "https://llm.private-relay.example/v1") is True
+    assert AIBridge._is_relay_endpoint("", "https://api.relay.com/v1") is True
+    assert AIBridge._is_relay_endpoint("", "https://llm.relay/v1") is True
     assert AIBridge._is_relay_endpoint("", "https://openrouter.ai/api/v1") is True
     assert AIBridge._is_relay_endpoint("", "https://api.aihubmix.com/v1") is True
     assert AIBridge._is_relay_endpoint("", "https://api.laozhang.ai/v1") is True
@@ -241,7 +241,7 @@ def test_relay_fast_unions_every_disable_flag():
         "fast",
         provider="",
         model="some-custom-model",
-        info_extra={"api_base": "https://api.private-relay.com/v1"},
+        info_extra={"api_base": "https://api.relay.com/v1"},
     )
     eb = kw["extra_body"]
     assert eb["thinking"] == {"type": "disabled"}
@@ -264,8 +264,8 @@ def test_relay_with_kimi_model_keeps_cache_key():
     kw = _apply(
         "deep",
         provider="relay",
-        model="kimi-k2.5-private-relay",
-        info_extra={"api_base": "https://llm.private-relay.example/v1"},
+        model="kimi-k2.5-relay",
+        info_extra={"api_base": "https://llm.relay/v1"},
     )
     assert kw["extra_body"]["prompt_cache_key"] == "run1-builder-ne1"
 
@@ -282,7 +282,7 @@ def test_builder_node_in_deep_mode_does_not_open_thinking():
 
 
 def test_builder_kimi_thinking_disabled_in_deep_v6_4_22():
-    """v6.4.22 (maintainer 2026-04-22): kimi-family builder/merger keep thinking OFF
+    """v6.4.22 (maintainer): kimi-family builder/merger keep thinking OFF
     even in deep mode. Rationale: observed 2026-04-22 run — kimi builder with
     thinking=enabled spent 281s on thinking + only 46s emitting HTML before
     hitting the 16k max_tokens cap and finish=length at 12KB (truncated).
@@ -318,7 +318,7 @@ def test_router_planner_exempt_in_deep_mode():
     for role in ("router", "planner", "planner_degraded"):
         kw: dict = {}
         bridge._apply_thinking_config_to_kwargs(
-            kw, {"provider": "aigate", "api_base": "https://llm.private-relay.example/v1"},
+            kw, {"provider": "aigate", "api_base": "https://llm.relay/v1"},
             "deepseek-v3.2", node_type=role,
         )
         eb = kw.get("extra_body", {})
@@ -379,7 +379,7 @@ def test_exempt_nodes_keep_high_effort_in_deep_v6_4_22():
         kw: dict = {}
         bridge._apply_thinking_config_to_kwargs(
             kw,
-            {"provider": "relay", "supports_reasoning_effort": True, "api_base": "https://relay.cn/v1"},
+            {"provider": "relay", "supports_reasoning_effort": True, "api_base": "<your-relay-url>"},
             "gpt-5.4",
             node_type=role,
         )
@@ -409,7 +409,7 @@ def test_fast_mode_still_off_for_exempt_nodes():
 
 
 def test_v6_4_21_builder_fast_large_project_gets_medium_effort():
-    """v6.4.21 (maintainer 2026-04-22): fast mode builder with large project hint
+    """v6.4.21 (maintainer): fast mode builder with large project hint
     (task_type=game OR assigned_targets>=2 OR goal>=600 chars) maps to
     reasoning_effort=medium on relay/gpt-5.x, not minimal."""
     bridge = AIBridge(config={"thinking_depth": "fast"})
@@ -458,7 +458,7 @@ def test_v6_4_21_merger_deep_gets_high_effort_on_relay():
     kw: dict = {}
     bridge._apply_thinking_config_to_kwargs(
         kw,
-        {"provider": "relay", "supports_reasoning_effort": True, "api_base": "https://relay.cn/v1"},
+        {"provider": "relay", "supports_reasoning_effort": True, "api_base": "<your-relay-url>"},
         "gpt-5.4",
         node_type="merger",
         input_data={"task_type": "website"},

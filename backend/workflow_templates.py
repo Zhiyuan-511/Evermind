@@ -21,7 +21,7 @@ BUILT_IN_TEMPLATES: Dict[str, Dict] = {
     "simple": {
         "id": "simple",
         "label": "Simple (2 nodes)",
-        # v7.8 (maintainer 2026-04-28): tester removed; reviewer (when present)
+        # v7.8 (maintainer): tester removed; reviewer (when present)
         # subsumes interaction/runtime-error testing duties.
         "description": "Fast mode: builder → deployer",
         "nodes": [
@@ -122,7 +122,7 @@ _DIFFICULTY_ALIAS: Dict[str, str] = {
     "simple": "simple",
     "standard": "standard",
     "pro": "pro",
-    "ultra": "ultra",        # v7.1 (maintainer 2026-04-24) 顶级玩家长任务模式
+    "ultra": "ultra",        # v7.1 (maintainer) 顶级玩家长任务模式
     "fast": "simple",
     "balanced": "standard",
     "advanced": "pro",
@@ -144,7 +144,7 @@ _PRO_CONTENT_COMPLEXITY_RE = re.compile(
 _PRO_ASSET_HEAVY_RE = re.compile(
     r"(插画|illustration|hero image|lookbook|封面|海报|poster|concept art|concept sheet|turnaround|storyboard|"
     r"素材包|asset pack|概念资产包|概念包|概念图包|角色设定|怪物设定|武器设定|场景设定|render|"
-    # v7.3.6 (maintainer 2026-04-26): include "建模" / "modeling" / "精灵图" /
+    # v7.3.6 (maintainer): include "建模" / "modeling" / "精灵图" /
     # commercial-grade game cues so 2D PvZ-style games that explicitly
     # request crafted enemy / plant / character art trigger the imagegen +
     # spritesheet + assetimport pipeline. Previously these went on the bare
@@ -168,7 +168,7 @@ _PRO_ASSET_HEAVY_RE = re.compile(
     r"tower\s*defense|td\s*game|wave\s*defense|"
     r"不同的怪物.*不同的植物|不同的植物.*不同的怪物|多种怪物.*多种植物|"
     r"multiple\s*(?:distinct\s*)?(?:enemies|monsters|plants|towers|characters)\s*and\s*(?:enemies|monsters|plants|towers|characters)|"
-    # v7.43 (maintainer 2026-04-29): observed in run_4f4e5f0766b0 — user goal
+    # v7.43 (maintainer): observed in run_4f4e5f0766b0 — user goal
     # "2D版的保卫萝卜手游...怪物的种类...防御塔的种类...升级...关卡...金币
     # 皮肤" got asset_heavy=False because none of these classic Chinese
     # tower-defense terms were in the regex. Result: pipeline picked
@@ -337,7 +337,7 @@ def pro_template_profile(goal: str = "") -> Dict[str, Any]:
             "include_asset_pipeline": True,
             "include_polisher": False,
             "parallel_builders": True,
-            # v7.1i (maintainer 2026-04-26): was 3 (forced game>=3 branch in
+            # v7.1i (maintainer): was 3 (forced game>=3 branch in
             # _parallel_builder_task_descriptions which split builder1=core
             # / builder2=support module → kimi-k2.6 wouldn't obey "no index.html"
             # → retry storm 12+min). NE creation only makes builder1+builder2
@@ -366,7 +366,7 @@ def pro_template_profile(goal: str = "") -> Dict[str, Any]:
             "include_asset_pipeline": False,
             "include_polisher": False,
             "parallel_builders": True,
-            # v7.1i (maintainer 2026-04-26): same fix as asset_heavy_game above —
+            # v7.1i (maintainer): same fix as asset_heavy_game above —
             # was 3, NE only creates 2, kimi unable to obey support-only
             # constraint, retry storm. Standard pro game uses 2 builders.
             "builder_count": 2,
@@ -397,9 +397,25 @@ def pro_template_profile(goal: str = "") -> Dict[str, Any]:
         # architecture complexity (dashboard/presentation/creative) also
         # gets parallel builders. Single-page sites without complex arch
         # remain serial (no benefit from 2 builders on a tiny brief).
+        # v7.55 (maintainer): add third trigger — single-page but
+        # visually + content rich with a long brief. Observed run
+        # 2026-04-30 18:55: "Awwwards-grade UI/UX motion designer + 906
+        # char brief, visual_complex=True content_complex=True
+        # long_brief=True multi_page=False arch_complex=False" → fell to
+        # single builder because neither of the original two triggers
+        # matched. A 906-char design-heavy brief deserves 2 builders
+        # competing on motion/layout interpretation, then a merger picks
+        # the better one. Only fires when ALL THREE flags are set so
+        # short single-page tasks stay serial.
+        rich_singlepage = (
+            visual_complex
+            and content_complex
+            and long_brief
+        )
         parallel_builders = (
             large_multi_page_website
             or (architecture_complex and task_type in {"dashboard", "presentation", "creative", "game"})
+            or rich_singlepage
         )
         return {
             "node_count": (
@@ -451,7 +467,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
     task_type = task_classifier.classify(str(goal or "")).task_type if str(goal or "").strip() else "website"
     parallel_builders = bool(profile.get("parallel_builders", True))
     builder_count = max(1, int(profile.get("builder_count", 2) or 2))
-    # v7.1i (maintainer 2026-04-26): WAS `task_type != "website" and builder_count <= 2`
+    # v7.1i (maintainer): WAS `task_type != "website" and builder_count <= 2`
     # which forced game/tool/etc 2-builder pro plans into SERIAL mode (builder2
     # depends_on builder1). This contradicted the "real parallelism" design
     # where builder1 writes index.html + builder2 writes game_features.js
@@ -669,7 +685,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         ])
 
     nodes = _enforce_dual_builder_merger(nodes)
-    # v6.3 (maintainer 2026-04-21): every pro branch gets a conditional patcher
+    # v6.3 (maintainer): every pro branch gets a conditional patcher
     # node that sits after reviewer. It stays dormant on reviewer APPROVE
     # (orchestrator._execute_subtask_inner short-circuits it via the
     # `_reviewer_requeues==0` gate) and only fires on reviewer REJECT with
@@ -682,7 +698,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
     _has_reviewer = any(n.get("key") == "reviewer" for n in nodes)
     _has_patcher = any(n.get("key") == "patcher" for n in nodes)
     if _has_reviewer and not _has_patcher:
-        # v6.4 (maintainer 2026-04-21): patcher is a canvas-parallel sibling of
+        # v6.4 (maintainer): patcher is a canvas-parallel sibling of
         # reviewer (both depend on the last build/polish node) so the UI
         # shows them side-by-side. Runtime execution order is still
         # reviewer → patcher (enforced in orchestrator SubTask construction:
@@ -899,7 +915,7 @@ def _build_optimize_template(goal: str = "") -> Dict[str, Any]:
 
 
 def _build_ultra_template_for_goal(goal: str) -> Dict:
-    """v7.1i (maintainer 2026-04-25): adapt the 4-builder labels to task type.
+    """v7.1i (maintainer): adapt the 4-builder labels to task type.
     Hardcoded "主页 / 分页 / 共享组件 / 交互资源" labels confused the LLM
     when goal was a 3D shooter game (or any non-website project) — Builder 1
     saw "主页 / Landing" and the prompt header said "3D shooting game"

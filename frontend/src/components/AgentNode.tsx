@@ -145,7 +145,7 @@ export function invalidateAvailableModels(): void {
 }
 
 function AgentNode({ id, data, selected }: NodeProps) {
-    // v7.26 (maintainer 2026-04-28): merger/patcher/etc nodes were displaying as
+    // v7.26 (maintainer): merger/patcher/etc nodes were displaying as
     // "builder" when an upstream update path lost data.nodeType. Walk a
     // fallback chain (nodeKey → rawNodeKey → agent → infer-from-id) before
     // giving up to "builder", so a transient nodeType drop on UI sync no
@@ -153,7 +153,7 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const _idLower = (id || '').toLowerCase();
     const _idHints = ['merger', 'patcher', 'reviewer', 'analyst', 'planner', 'uidesign', 'scribe', 'polisher', 'deployer', 'debugger', 'imagegen', 'spritesheet', 'assetimport', 'tester', 'router', 'builder1', 'builder2', 'builder'];
     const _idGuess = _idHints.find((h) => _idLower.includes(h));
-    // v7.39 (maintainer 2026-04-29): old user templates (saved before v7.34) had
+    // v7.39 (maintainer): old user templates (saved before v7.34) had
     // every node's key stored as the React Flow wrapper-type "agent" because
     // the save flow read n.type instead of n.data.nodeType. Reloading those
     // templates produced data.nodeType="agent" → NODE_TYPES["agent"] is
@@ -176,7 +176,7 @@ function AgentNode({ id, data, selected }: NodeProps) {
     const progress = Math.max(0, Math.min(100, (data.progress as number) || 0));
     const model = (data.model as string) || '';
     const assignedModel = (data.assignedModel as string) || '';
-    // v7.1g (maintainer 2026-04-25): friendly label for `cli:<cli>:<model>` strings.
+    // v7.1g (maintainer): friendly label for `cli:<cli>:<model>` strings.
     // Backend now writes assigned_model = "cli:gemini:gemini-3.1-pro-preview"
     // (32 chars) for CLI-routed nodes. Raw form overflows the 8px chip and
     // looks like garbage. Map to short pretty labels:

@@ -3,6 +3,7 @@ HTML Post-Processor — Auto-fix common quality issues after builder generates H
 Applied after every builder write to ensure baseline quality.
 """
 
+import os
 import re
 import logging
 import shutil
@@ -1489,7 +1490,7 @@ _LIBRARY_FINGERPRINTS = (
 
 
 def _dedup_library_scripts(html: str) -> str:
-    """v6.1.13 (maintainer 2026-04-20): merger sometimes concatenates script tags
+    """v6.1.13 (maintainer): merger sometimes concatenates script tags
     for the same library from both builders (local + CDN). Browser loads
     both, warns `WARNING: Multiple instances of Three.js being imported`,
     and game state corrupts. Keep the FIRST occurrence per library (prefer
@@ -1565,7 +1566,7 @@ _IMG_STYLE_ATTR_RE = re.compile(r"""\bstyle\s*=\s*(?P<q>["'])(?P<val>[^"']*)(?P=
 
 
 def _inject_image_fallback_guards(html: str) -> str:
-    """v6.1.14g (maintainer 2026-04-20): reviewer keeps rejecting over broken
+    """v6.1.14g (maintainer): reviewer keeps rejecting over broken
     images (naturalWidth===0, empty src, no fallback). Builder freely invents
     Unsplash URLs and most 404 on first load. Postprocess HARDENS every
     `<img>` tag:
@@ -1687,7 +1688,7 @@ def _inject_image_fallback_guards(html: str) -> str:
 
 
 def _inject_iife_handler_exports(html: str) -> str:
-    """v6.1.13 (maintainer 2026-04-20): REAL INCIDENT — merger shipped a 3D
+    """v6.1.13 (maintainer): REAL INCIDENT — merger shipped a 3D
     shooter where `onclick="startGame()"` threw `ReferenceError: startGame
     is not defined` because the 47 KB game logic sat inside `(function() {
     ... })()` but the button called through inline HTML attribute into
@@ -1969,7 +1970,7 @@ def postprocess_javascript(js: str) -> str:
     for identifier in ("nav", "overlay"):
         js = _guard_optional_js_hook_lines(js, identifier)
 
-    # v6.4.18 (maintainer 2026-04-22): auto-balance parens/braces before handing
+    # v6.4.18 (maintainer): auto-balance parens/braces before handing
     # to preview_validation. Observed 2026-04-22 17:33: gpt-5.4/kimi both
     # emitted `forEach(...) => { }` with an orphan statement outside the
     # closure, leaving `)` > `(` by one or `}` > `{` by one. Node --check
@@ -2086,8 +2087,35 @@ def postprocess_stylesheet(css: str) -> str:
     original = css
     css = _strip_remote_font_resources(css)
 
+    # v7.58 (maintainer): force WebGL canvas z-index → -1 in
+    # external stylesheets too. Builder often writes
+    # `#webgl-canvas { z-index: 0 }` (or 1/2) which gets buried under
+    # content layers (z-index: 1+) → user sees no 3D animation.
+    # Pattern: match any selector containing 'canvas' in the id/class
+    # part with non-negative z-index in its rule body.
+    # v7.62 (maintainer) regex tightening: only target rules that
+    # ALSO have `position: fixed` or `position: absolute` — these are
+    # actual full-screen 3D background canvases. BEM-style class names
+    # like `.canvas-hero` (a regular content section that happens to use
+    # "canvas" in its name) shouldn't get force-buried at z-index: -1.
+    try:
+        _css_canvas_re = re.compile(
+            r'((?:#|\.)[\w\-]*canvas[\w\-]*\s*\{'
+            r'(?=[^}]*\bposition:\s*(?:fixed|absolute))'
+            r'[^}]*?z-index:\s*)([0-9]+)(\s*[;}])',
+            re.IGNORECASE | re.DOTALL,
+        )
+        css, _n_zfix = _css_canvas_re.subn(r'\g<1>-1\g<3>', css)
+        if _n_zfix:
+            logger.info(
+                "[v7.58] Forced %d WebGL canvas z-index → -1 in stylesheet (position:fixed/absolute only)",
+                _n_zfix,
+            )
+    except Exception as _zerr:
+        logger.debug("[v7.58] css canvas z-index fix skipped: %s", _zerr)
+
     if css != original:
-        logger.info("Post-processed stylesheet: removed remote font imports")
+        logger.info("Post-processed stylesheet: applied fixes")
     return css
 
 
@@ -2387,12 +2415,12 @@ def postprocess_html(html: str, task_type: str = "website") -> str:
     html = _add_class_aliases(html, "page-transition-overlay", ["page-transition"])
     html = _add_class_aliases(html, "mobile-menu-toggle", ["nav-toggle"])
     html = _postprocess_inline_script_blocks(html)
-    # v6.1.13 (maintainer 2026-04-20): universal post-merge safety — applies to
+    # v6.1.13 (maintainer): universal post-merge safety — applies to
     # every task type. Duplicate library scripts and IIFE-sealed handler
     # functions break games, webapps, slides, dashboards alike.
     html = _dedup_library_scripts(html)
     html = _inject_iife_handler_exports(html)
-    # v6.1.14g (maintainer 2026-04-20): hardened image fallback — reviewer was
+    # v6.1.14g (maintainer): hardened image fallback — reviewer was
     # rejecting repeatedly because builder invented Unsplash URLs that 404.
     # Every <img> now gets an onerror handler + empty-src guard + CSS
     # gradient placeholder on parent. Purely deterministic — no AI call.
@@ -2428,6 +2456,83 @@ def postprocess_html(html: str, task_type: str = "website") -> str:
 
     svg_open_re = re.compile(r'<svg\b[^>]*>', re.IGNORECASE)
     html = svg_open_re.sub(_fix_svg_sizing, html)
+
+    # v7.56d (maintainer): pure-string Three.js injection — NO file I/O.
+    # v7.56c had `open(.js).read()` which blocked the asyncio event loop for
+    # 9+ minutes when builder direct_multifile post-process ran with multi-
+    # page output. Reverted to HTML-only signal: detect that HTML references
+    # an external `<script src="*.js">` (likely the builder's bundled app.js)
+    # AND has a `<canvas>` element AND has NO Three.js library tag — that's
+    # a strong signal the bundled JS uses THREE. Inject conservatively in
+    # this case. Direct THREE.* inline detection still wins when present.
+    try:
+        _three_usage_re_local = re.compile(
+            r'(\bnew\s+THREE\.[A-Z]\w*\s*\(|\bTHREE\.[A-Z]\w*\b|\bWebGLRenderer\b|\bwindow\.THREE\b)',
+        )
+        _needs_three = bool(_three_usage_re_local.search(html))
+        # Conservative indirect signal: <canvas> + external local .js + no Three.js tag
+        # This is 95% likely to be a 3D builder output that put THREE in app.js.
+        if not _needs_three:
+            _has_canvas = '<canvas' in html.lower()
+            _has_local_js = bool(re.search(
+                r'<script\b[^>]*\bsrc\s*=\s*["\'](?!https?:|//)[^"\']+\.js["\']',
+                html, re.IGNORECASE,
+            ))
+            if _has_canvas and _has_local_js:
+                _needs_three = True
+        _has_three_lib_tag = bool(re.search(
+            r'<script\b[^>]*\bsrc\s*=\s*["\'][^"\']*\bthree(?:\.module|\.min|@[\d.]+)?\.js[^"\']*["\']',
+            html, re.IGNORECASE,
+        ))
+        if _needs_three and not _has_three_lib_tag:
+            _three_tag = (
+                '<script src="https://unpkg.com/three@0.160.0/build/three.min.js"></script>\n  '
+            )
+            _first_script_re = re.compile(
+                r'(<script\b[^>]*\bsrc\s*=\s*["\'][^"\']+["\'][^>]*>\s*</script>)',
+                re.IGNORECASE,
+            )
+            _m = _first_script_re.search(html)
+            if _m:
+                _idx = _m.start()
+                html = html[:_idx] + _three_tag + html[_idx:]
+                logger.info("[v7.56d] Auto-injected Three.js (unpkg) before first <script src>")
+            else:
+                _head_close_re = re.compile(r'</head>', re.IGNORECASE)
+                _m_head = _head_close_re.search(html)
+                if _m_head:
+                    _idx = _m_head.start()
+                    html = html[:_idx] + _three_tag + html[_idx:]
+                    logger.info("[v7.56d] Auto-injected Three.js (unpkg) before </head>")
+    except Exception as _three_err:
+        logger.debug("[v7.56d] Three.js auto-injection skipped: %s", _three_err)
+
+    # v7.58 (maintainer): force WebGL canvas z-index <= -1.
+    # Observed run 14:46-14:50: builder wrote `#webgl-canvas { z-index: 0; }`
+    # while every other section had z-index: 1+ → canvas got visually
+    # buried under hero/header content → Three.js scene rendered fine but
+    # USER SAW NO ANIMATION because content layers covered it. The canvas
+    # must sit BEHIND all interactive content (z-index: -1) for the typical
+    # "3D background + content overlay" pattern.
+    #
+    # Match patterns: `#xxx-canvas { ... z-index: <0..2> }` or any canvas
+    # selector that has `position: fixed` (typical 3D bg setup) and
+    # z-index >= 0.
+    try:
+        # Pattern 1: id-selector with canvas in its name + non-negative z-index
+        _canvas_rule_re = re.compile(
+            r'(\s*#[\w\-]*canvas[\w\-]*\s*\{[^}]*?z-index:\s*)([0-2])(\s*[;}])',
+            re.IGNORECASE | re.DOTALL,
+        )
+        _new_html, _n_fixed = _canvas_rule_re.subn(r'\g<1>-1\g<3>', html)
+        if _n_fixed:
+            html = _new_html
+            logger.info(
+                "[v7.58] Forced %d WebGL canvas z-index → -1 (was 0/1/2 — content was covering 3D bg)",
+                _n_fixed,
+            )
+    except Exception as _zerr:
+        logger.debug("[v7.58] canvas z-index fix skipped: %s", _zerr)
 
     if html != original:
         logger.info(f"Post-processed HTML: applied fixes for {task_type}")

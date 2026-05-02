@@ -143,7 +143,7 @@ class TestPreviewListEndpoint(unittest.TestCase):
 class TestWorkspaceSync(unittest.TestCase):
     def test_workspace_roots_exposes_runtime_and_delivery_dirs(self):
         with patch.object(server, "load_settings", return_value={
-            "workspace": "/path/to/Desktop",
+            "workspace": "/tmp/evermind-workspace",
             "artifact_sync_dir": "/tmp/evermind-delivery",
         }):
             payload = asyncio.run(server.workspace_roots())

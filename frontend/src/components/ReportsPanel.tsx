@@ -5,7 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8765';
 
 /**
- * v7.0 (maintainer 2026-04-24) — Reports side panel (VSCode activity bar).
+ * v7.0 (maintainer) — Reports side panel (VSCode activity bar).
  * Lists recent pipeline runs; click to open full detail via the
  * existing Reports modal (onOpenFullReports callback).
  */

@@ -3475,7 +3475,7 @@ class TestV6_4_26_DeclarativeQualityGates(unittest.TestCase):
         (output_root / "index.html").write_text("<html></html>")
         ctx = {"file_ops_output_dir": str(output_root)}
         # Simulate the kimi bug: it resolved `index.html` vs backend CWD
-        bad_path = "/path/to/Desktop/Evermind.app/Contents/Resources/backend/index.html"
+        bad_path = "/Applications/Evermind.app/Contents/Resources/backend/index.html"
         result = plugin._guard_output_dir_escape(bad_path, "edit", ctx)
         self.assertIsNone(result, "v6.4.28: path inside Evermind bundle must auto-redirect, not reject")
         self.assertIn("_auto_corrected_path", ctx)
@@ -5181,7 +5181,7 @@ footer { padding:24px; opacity:.85; }
             self.assertIn("errors", report)
 
     def test_validate_builder_quality_recovers_game_html_from_output_when_saved_artifact_is_stale(self):
-        template = Path("/path/to/evermind/backend/templates/game_3d_shooter.html").read_text(encoding="utf-8")
+        template = Path(__file__).resolve().parent.parent.joinpath("templates/game_3d_shooter.html").read_text(encoding="utf-8")
         template = (
             template
             .replace("{{GAME_TITLE}}", "Neon Strike")
@@ -16083,7 +16083,7 @@ class TestReviewerNonRetryableRejection(unittest.TestCase):
             finally:
                 orchestrator_module.OUTPUT_DIR = original_output
 
-        # v6.1.3 (maintainer 2026-04-19): premium 3D game rejection budget exhaustion
+        # v6.1.3 (maintainer): premium 3D game rejection budget exhaustion
         # now SOFT-PASSES (keeps pipeline alive) rather than hard-failing. The
         # rejection details must remain visible via output_summary so the user
         # sees what was flagged without losing the downstream deployer/tester.
@@ -16318,7 +16318,7 @@ class TestReviewerNonRetryableRejection(unittest.TestCase):
 
         self.assertFalse(result.get("success"))
         self.assertTrue(result.get("requeue_requested"))
-        # v6.1.14h (maintainer 2026-04-20): on ROUND 1 reject, Evermind routes to
+        # v6.1.14h (maintainer): on ROUND 1 reject, Evermind routes to
         # polisher-patch branch (surgical file_ops edit) instead of the
         # expensive builder rewrite. Polisher (id=2) + reviewer (id=3) are
         # requeued, builder (id=1) stays COMPLETED. On round 2+ the builder

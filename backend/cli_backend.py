@@ -47,7 +47,7 @@ class CLIProfile:
 def _build_claude_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List[str]:
     """Build Claude Code CLI command.
 
-    v7.1g (maintainer 2026-04-24): per-task session reuse + cache-friendly prompt.
+    v7.1g (maintainer): per-task session reuse + cache-friendly prompt.
     KEY upgrades over v7.1c:
       1. --session-id (UUID derived from task hash): same task across multiple
          orchestrator iterations (e.g. patcher round 1, 2, 3 of same lane)
@@ -64,7 +64,7 @@ def _build_claude_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List
     """
     ultra_on = bool(kwargs.get("ultra_mode"))
     node_type = (kwargs.get("node_type", "") or "").strip().lower()
-    # v7.1i (maintainer 2026-04-25 from Aider/OpenHands research):
+    # v7.1i (maintainer from Aider/OpenHands research):
     # Per-node-type max-turns (was statically 300/80). Patcher / polisher
     # / merger don't need 300 turns — capping them prevents runaway loops
     # that drain Claude weekly quota on essentially trivial work.
@@ -197,7 +197,7 @@ def _parse_claude_output(stdout: str, stderr: str, returncode: int) -> Dict:
 def _build_codex_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List[str]:
     """Build Codex CLI command.
 
-    v7.1g (maintainer 2026-04-24): per-node-type profile selection. Codex
+    v7.1g (maintainer): per-node-type profile selection. Codex
     config.toml has `[profiles.evermind-<role>]` blocks tuning
     `model_reasoning_effort` per node type — planner/reviewer="high",
     builder/patcher="medium", merger="minimal", polisher="low".
@@ -242,14 +242,13 @@ def _build_codex_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List[
     profile_name = _profile_map.get(node_type, "")
     if profile_name:
         cmd.extend(["-p", profile_name])
-    # GMN relay env-key wiring (always inject base_url since profile only sets provider name)
-    # v7.1i (2026-04-25):
-    #  - base_url 从 settings.cli_relay_keys.codex.base_url 读取（默认
-    #    https://relayx.com，可在 UI 改）。旧硬编码 relay.cn/v1 已下线。
+    # Codex relay env-key wiring (always inject base_url since profile only sets provider name)
+    # v7.62 (2026-05-01) open-source cleanup:
+    #  - base_url 从 settings.cli_relay_keys.codex.base_url 读取（用户在 UI 填）。
     #  - 没填 key（订阅模式或未配置）→ 跳过整段 -c 注入，让 codex 走自带的
     #    ChatGPT OAuth (~/.codex/auth.json)。
     if os.getenv("GMN_OPENAI_API_KEY"):
-        _codex_base_url = "https://relayx.com"
+        _codex_base_url = ""  # filled from user-supplied settings, no hardcoded relay
         try:
             from settings import load_settings as _load_settings  # local import (avoid cycle at module load)
             _s = _load_settings() or {}
@@ -352,7 +351,7 @@ def _parse_codex_output(stdout: str, stderr: str, returncode: int) -> Dict:
 def _build_gemini_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List[str]:
     """Build Gemini CLI command.
 
-    v7.1d (maintainer 2026-04-24): 解放 Gemini 全部能力。Gemini CLI 没有
+    v7.1d (maintainer): 解放 Gemini 全部能力。Gemini CLI 没有
     Claude 的 --max-turns，但通过 --approval-mode=yolo 可以让模型一直
     跑工具直到任务完成（默认会停在第一个交互点）。Ultra 时切换到
     Gemini 3.1 Pro Preview 默认（最强），普通模式 2.5 Pro。
@@ -369,7 +368,7 @@ def _build_gemini_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List
         --include-directories <workspace>
     """
     ultra_on = bool(kwargs.get("ultra_mode"))
-    # v7.1i (maintainer 2026-04-25 — final): Pre-create .geminiignore with REAL
+    # v7.1i (maintainer — final): Pre-create .geminiignore with REAL
     # content (not empty). Empty .geminiignore + --include-directories=Desktop
     # caused MemoryDiscovery to scan node_modules / git history / large media
     # files → server-side 429 retry storm → CPU 0% deadlock.
@@ -458,7 +457,7 @@ __pycache__/
         "--approval-mode", "yolo",
         "-o", "json",
     ]
-    # v7.1i (maintainer 2026-04-25 — final v4): use gemini-2.5-pro (GA stable).
+    # v7.1i (maintainer — final v4): use gemini-2.5-pro (GA stable).
     # ROOT CAUSE confirmed via direct CLI reproduction with exact stderr:
     #   {"error":{"message":"No capacity available for model
     #     gemini-3.1-pro-preview on the server","code":1}}
@@ -633,7 +632,7 @@ def _parse_gemini_output(stdout: str, stderr: str, returncode: int) -> Dict:
 def _build_kimi_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List[str]:
     """Build Kimi CLI command (Moonshot AI).
 
-    v7.1i (maintainer 2026-04-25): Kimi CLI integration.
+    v7.1i (maintainer): Kimi CLI integration.
     Repo: https://github.com/MoonshotAI/kimi-cli
     Auth: must run `kimi /login` once interactively to save OAuth token,
     THEN subprocess invocations work. There is no KIMI_API_KEY env override
@@ -642,7 +641,7 @@ def _build_kimi_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List[s
     Output: stream-json is JSONL.
     """
     ultra_on = bool(kwargs.get("ultra_mode"))
-    # v7.1i (maintainer 2026-04-25): correct kimi syntax — `--print` mode is
+    # v7.1i (maintainer): correct kimi syntax — `--print` mode is
     # required for `--output-format` to be valid. Without --print, kimi
     # complains "Output format is only supported for print UI".
     cmd = [
@@ -652,7 +651,7 @@ def _build_kimi_cmd(task: str, workspace: str, timeout: int, **kwargs) -> List[s
         "--output-format", "stream-json",
         "--yolo",  # v7.1i: auto-approve all tool calls (= claude's --skip-permissions)
     ]
-    # v7.1i (maintainer 2026-04-25): kimi --work-dir + --add-dir for workspace
+    # v7.1i (maintainer): kimi --work-dir + --add-dir for workspace
     # awareness (was missing — kimi was reading from CWD only, no scope hint).
     if workspace:
         cmd.extend(["--work-dir", workspace, "--add-dir", workspace])
@@ -961,7 +960,7 @@ def get_cli_models(cli_name: str) -> List[Dict[str, str]]:
 
 # Node type → preferred CLI order (builder nodes prefer file-capable CLIs)
 NODE_CLI_PREFERENCE: Dict[str, List[str]] = {
-    # v7.1i (maintainer 2026-04-25): Kimi + Qwen added.
+    # v7.1i (maintainer): Kimi + Qwen added.
     # Kimi (Moonshot K2.6) is best at Chinese-language coding tasks.
     # Qwen (Alibaba) is Gemini-fork with DashScope API; good Chinese fallback.
     "builder":  ["claude", "codex", "kimi", "qwen", "aider", "gemini"],
@@ -1207,7 +1206,7 @@ class CLIExecutor:
     def __init__(self, detector: CLIDetector, config: Optional[Dict] = None):
         self.detector = detector
         self.config = config or {}
-        # v7.1g (maintainer 2026-04-25): per-CLI fast-fail tracker. When a CLI
+        # v7.1g (maintainer): per-CLI fast-fail tracker. When a CLI
         # exits in <10s with no output 3 times in a row, mark it
         # circuit-broken and skip it from rotation for the next 5 minutes.
         # Prevents strict-mode cascade: Gemini quota-exhausted → patcher
@@ -1312,7 +1311,7 @@ class CLIExecutor:
                 "error": f"No suitable CLI found for node type '{node_type}'",
             }
 
-        # v7.1g (maintainer 2026-04-25): circuit-breaker filter.
+        # v7.1g (maintainer): circuit-breaker filter.
         # Skip any CLI that's currently tripped due to repeated fast failures.
         # If ALL preferred CLIs are tripped, fall through and try them anyway
         # (better to attempt than to deadlock).
@@ -1349,7 +1348,7 @@ class CLIExecutor:
                 except Exception:
                     pass
 
-            # v7.1g (maintainer 2026-04-25): session-seed derivation.
+            # v7.1g (maintainer): session-seed derivation.
             # Original idea: stable seed from (run_id + node_key) so retries
             # share prompt cache. PROBLEM: UUID5 of stable seed is
             # deterministic → if the orchestrator re-dispatches the same
@@ -1369,7 +1368,7 @@ class CLIExecutor:
                     or str((node or {}).get("node_key", "")).strip().lower()
                     or node_type
                 )
-                # v7.1i (maintainer 2026-04-25 — 2nd revision):
+                # v7.1i (maintainer — 2nd revision):
                 # Stable seed for cache reuse, BUT add a "process boot"
                 # discriminator so cross-process / cross-restart never
                 # collides with stale session jsonl files left by previous
@@ -1487,7 +1486,7 @@ class CLIExecutor:
             "CLI execute: cli=%s model=%s node=%s timeout=%ds cmd_len=%d",
             cli_name, model or "(default)", node_type, timeout, len(cmd),
         )
-        # v7.1g (maintainer 2026-04-25): per-Gemini-failure debug. Log cmd + cwd
+        # v7.1g (maintainer): per-Gemini-failure debug. Log cmd + cwd
         # the first time we see Gemini exit fast so we can replay manually.
         if cli_name == "gemini":
             try:
@@ -1501,9 +1500,9 @@ class CLIExecutor:
                 pass
 
         start_time = time.time()
-        # v7.0c (maintainer 2026-04-24): codex temp-auth for GMN relay.
+        # v7.0c (maintainer): codex temp-auth for GMN relay.
         # codex reads ~/.codex/auth.json (not env vars) for OPENAI_API_KEY.
-        # Mirror maintainer's zshrc __codex_with_temp_auth: back up existing
+        # Mirror the user's zshrc __codex_with_temp_auth: back up existing
         # auth.json, write the GMN key, run command, restore.
         _codex_auth_backup: Optional[Path] = None
         _codex_auth_file = Path.home() / ".codex" / "auth.json"
@@ -1528,7 +1527,7 @@ class CLIExecutor:
                 _codex_auth_backup = None
 
         try:
-            # v7.1g (maintainer 2026-04-24): subprocess hardening across all CLIs.
+            # v7.1g (maintainer): subprocess hardening across all CLIs.
             # 1. NO_COLOR/TERM=dumb already in place.
             # 2. NO_BROWSER=true: prevent Gemini OAuth from trying to spawn
             #    a browser (subprocess has no TTY → exit 1 within 3-4s).
@@ -1538,7 +1537,7 @@ class CLIExecutor:
             #    the silent 3-second exit-1 flake in run_b318e114b689.
             env = {
                 **os.environ,
-                # v7.1i (maintainer 2026-04-25): TERM=dumb let gemini 0.39 print
+                # v7.1i (maintainer): TERM=dumb let gemini 0.39 print
                 # "Basic terminal detected — stability and security degraded"
                 # warning every call (annoyance + reduces gemini ANSI tools).
                 # NO_COLOR=1 already prevents color output across all CLIs,
@@ -1572,7 +1571,7 @@ class CLIExecutor:
                 except Exception:
                     pass
 
-            # v7.1i (maintainer 2026-04-25): stdout-idle watchdog for gemini.
+            # v7.1i (maintainer): stdout-idle watchdog for gemini.
             # gemini-3.1-pro-preview has a known deadlock pattern (issue
             # #21937 / #22415 / #25192 / #21143): server-side stream never
             # closes, CLI waits forever at "Thinking", 0% CPU, no output.
@@ -1672,7 +1671,7 @@ class CLIExecutor:
             if stderr_text.strip():
                 logger.debug("CLI stderr (%s): %s", cli_name, stderr_text[:500])
 
-            # v7.1g (maintainer 2026-04-25): persist full Gemini stderr to /tmp
+            # v7.1g (maintainer): persist full Gemini stderr to /tmp
             # for any failure that exits in <10s with no stdout. Lets us
             # diagnose the orchestrator-only 3-4s exit-1 mystery.
             # v7.1i: ALSO log gemini stderr to backend log for any short fast-fail

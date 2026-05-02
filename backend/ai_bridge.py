@@ -31,7 +31,7 @@ import httpx  # v6.5 #1 — module-level for global singleton AsyncClient
 # module reference. Previously each new AIBridge instance did `import litellm`
 # inside `_setup_litellm`, costing ~10s cold-start per instantiation (server.py
 # creates 5+ bridges per request/run). Importing here makes the cost one-time.
-# v6.1.8 (maintainer 2026-04-19): force litellm to route through its httpx path
+# v6.1.8 (maintainer): force litellm to route through its httpx path
 # (not aiohttp transport) so we have a single unified HTTP stack — easier to
 # debug and consistent with our own http_client tuning. env var must be set
 # BEFORE `import litellm` is evaluated since litellm reads it at import time.
@@ -63,7 +63,7 @@ import task_classifier
 from privacy import get_masker, PrivacyMasker
 from proxy_relay import get_relay_manager
 
-# v7.1i (maintainer 2026-04-25): Plugin/skill/MCP capability discovery.
+# v7.1i (maintainer): Plugin/skill/MCP capability discovery.
 # Before each CLI dispatch we want to inject a real list of what the
 # user actually has installed in that CLI — so the subprocess prefers
 # real local capabilities over hand-rolled work. Scanner is cached
@@ -544,7 +544,7 @@ MAX_TOOL_ARGS_REPLAY_CHARS = int(os.getenv("EVERMIND_MAX_TOOL_ARGS_REPLAY_CHARS"
 # Generic user/system content cap: 12000 → 8000.
 MAX_MESSAGE_CONTENT_CHARS = int(os.getenv("EVERMIND_MAX_MESSAGE_CONTENT_CHARS", "8000"))
 # V5.8: 60K → 36K. Target ~9K input tokens → much cheaper per call AND
-# faster TTFT on the relay (which slows down linearly with input size).
+# faster TTFT on the third-party relay (which slows down linearly with input size).
 # Aggressive but safe: system prompt + first user turn fits in 16-20K chars,
 # the remaining 16-20K is tool history — plenty for 4-6 tool loops with dedup.
 MAX_REQUEST_TOTAL_CHARS = int(os.getenv("EVERMIND_MAX_REQUEST_TOTAL_CHARS", "36000"))
@@ -554,7 +554,7 @@ MAX_REQUEST_TOTAL_CHARS = int(os.getenv("EVERMIND_MAX_REQUEST_TOTAL_CHARS", "360
 #   1. previous_response_id: server-side context retention → no repeated system prompt
 #   2. Built-in tool orchestration → smaller request payloads
 #   3. Better prompt caching (40-80% improvement per OpenAI benchmarks)
-# Currently gated behind config flag — enable after validation with relay.
+# Currently gated behind config flag — enable after validation with third-party relay.
 USE_RESPONSES_API = str(
     os.getenv("EVERMIND_USE_RESPONSES_API", "0")
 ).strip().lower() in {"1", "true", "yes"}
@@ -582,8 +582,8 @@ _BUILDER_GOAL_HINT_PATTERNS = (
 MODEL_REGISTRY = {
     # ── OpenAI GPT-5 family (default = official OpenAI; users can override
     #    api_base in Settings → API Keys to point at their own relay). ──
-    # v7.7 (maintainer 2026-04-27): removed hardcoded private relay endpoint
-    # (api.private-relay.com) — open-source users would have routed all GPT
+    # v7.7 (maintainer): removed hardcoded private relay endpoint
+    # (api.relay.com) — open-source users would have routed all GPT
     # traffic through the project owner's personal relay, leaking keys
     # and prompt content. Now defaults to official OpenAI; relay opt-in
     # is per-user via Settings.
@@ -714,7 +714,7 @@ MODEL_REGISTRY = {
     "minimax-m2.7": {"provider": "minimax", "litellm_id": "openai/MiniMax-M2.7", "supports_tools": True, "supports_cua": False,
                      "api_base": "https://api.minimax.io/v1",
                      "fallback_api_bases": ["https://api.minimax.chat/v1"]},
-    # v5.8.6: highspeed variant served by relay gateways (e.g. private-relay.com) — same
+    # v5.8.6: highspeed variant served by relay gateways (e.g. relay.com) — same
     # provider family as m2.7 but the litellm_id and endpoint path can differ per
     # relay. api_base defaults to the common relay path; users on other relays can
     # override via `MINIMAX_API_BASE` env var or settings.
@@ -722,50 +722,50 @@ MODEL_REGISTRY = {
                                "supports_tools": True, "supports_cua": False,
                                "api_base": "https://api.minimax.io/v1",
                                "fallback_api_bases": ["https://api.minimax.chat/v1"]},
-    # ── AiGate (private-relay.example) — 中转池,单 key 访问多家 ──
-    # v5.8.6: user onboarded private-relay.example — one key (sk-ag-*) fronts 12 models
+    # ── AiGate (relay) — 中转池,单 key 访问多家 ──
+    # v5.8.6: user onboarded relay — one key (sk-ag-*) fronts 12 models
     # across minimax/glm/doubao/qwen/deepseek/kimi. TTFB 1.4-7.6s (vs Kimi For
     # Coding's 40-90s at peak), making it ideal as a stable fallback when the
     # direct Kimi endpoint 401s / 429s under 3-parallel-builder load.
-    # v5.8.6: aigate-kimi-k2.5 REMOVED — private-relay returns the k2.5-thinking
+    # v5.8.6: aigate-kimi-k2.5 REMOVED — relay returns the k2.5-thinking
     # variant, putting output in `reasoning` field (content=null). Use the
     # non-thinking `aigate-qwen3.6-plus` or `aigate-doubao-seed-2.0-code`
     # for code work.
     "aigate-deepseek-v3.2": {"provider": "aigate", "litellm_id": "openai/deepseek-v3.2",
                              "supports_tools": True, "supports_cua": False,
-                             "api_base": "https://llm.private-relay.example/v1"},
+                             "api_base": ""},
     "aigate-doubao-seed-2.0-code": {"provider": "aigate", "litellm_id": "openai/doubao-seed-2.0-code",
                                     "supports_tools": True, "supports_cua": False,
-                                    "api_base": "https://llm.private-relay.example/v1"},
+                                    "api_base": ""},
     "aigate-doubao-seed-2.0-pro": {"provider": "aigate", "litellm_id": "openai/doubao-seed-2.0-pro",
                                    "supports_tools": True, "supports_cua": False,
-                                   "api_base": "https://llm.private-relay.example/v1"},
-    # v5.8.6: GLM family REMOVED from aigate catalog — private-relay passes through
+                                   "api_base": ""},
+    # v5.8.6: GLM family REMOVED from aigate catalog — relay passes through
     # Zhipu's non-OpenAI-compatible response shape:
     #   - content=null, actual output in non-standard "reasoning" field
     #   - tool_calls=[], XML-formatted tool call embedded in content string
     # Evermind's OpenAI-compatible client can't parse either. Users who need
     # GLM should go through Zhipu's official OpenAI-compat endpoint
     # (https://open.bigmodel.cn/api/paas/v4) which does the conversion.
-    # Uncomment below if private-relay fixes their gateway to translate:
+    # Uncomment below if relay fixes their gateway to translate:
     # "aigate-glm-4.7": {...},
     # "aigate-glm-5":   {...},
     # "aigate-glm-5.1": {...},
-    # v5.8.6: aigate-minimax-m2.5 REMOVED — private-relay runs it in reasoning mode,
+    # v5.8.6: aigate-minimax-m2.5 REMOVED — relay runs it in reasoning mode,
     # consumes all max_tokens on reasoning, returns empty content. Use m2.7
     # or m2.7-highspeed instead (both have visible content output).
     "aigate-minimax-m2.7": {"provider": "aigate", "litellm_id": "openai/minimax-m2.7",
                             "supports_tools": True, "supports_cua": False,
-                            "api_base": "https://llm.private-relay.example/v1"},
+                            "api_base": ""},
     "aigate-minimax-m2.7-highspeed": {"provider": "aigate", "litellm_id": "openai/minimax-m2.7-highspeed",
                                       "supports_tools": True, "supports_cua": False,
-                                      "api_base": "https://llm.private-relay.example/v1"},
+                                      "api_base": ""},
     "aigate-qwen3.5-plus": {"provider": "aigate", "litellm_id": "openai/qwen3.5-plus",
                             "supports_tools": True, "supports_cua": False,
-                            "api_base": "https://llm.private-relay.example/v1"},
+                            "api_base": ""},
     "aigate-qwen3.6-plus": {"provider": "aigate", "litellm_id": "openai/qwen3.6-plus",
                             "supports_tools": True, "supports_cua": False,
-                            "api_base": "https://llm.private-relay.example/v1"},
+                            "api_base": ""},
     # ── Local / Ollama ──
     "ollama-llama3": {"provider": "ollama", "litellm_id": "ollama/llama3", "supports_tools": False, "supports_cua": False},
     "ollama-qwen2.5": {"provider": "ollama", "litellm_id": "ollama/qwen2.5", "supports_tools": False, "supports_cua": False},
@@ -782,20 +782,20 @@ PROVIDER_ENV_KEY_MAP = {
     "doubao": "DOUBAO_API_KEY",
     "yi": "YI_API_KEY",
     "minimax": "MINIMAX_API_KEY",
-    "aigate": "AIGATE_API_KEY",   # v5.8.6: private-relay.example multi-model relay
+    "aigate": "AIGATE_API_KEY",   # v5.8.6: relay multi-model relay
 }
 
 # V4.6: Restored gpt-5.4 to fallback chain — user's preferred model.
-# V4.6 SPEED: kimi-coding (via relay → kimi-k2.5) is 50-100x faster than
+# V4.6 SPEED: kimi-coding (via third-party relay → kimi-k2.5) is 50-100x faster than
 # gpt-5.4 on relay today. gpt-5.4 takes 115-280s for chat calls, kimi ~2s.
 # Promote kimi-coding to primary, keep gpt-5.4 as fallback.
 LEGACY_AUTO_FALLBACK_ORDER = [
-    # v6.7 (maintainer 2026-04-23): fully removed gpt-5.4 / gpt-5.3-codex /
-    # claude-4-sonnet / gemini-2.5-pro. Previous comment acknowledged the relay
+    # v6.7 (maintainer): fully removed gpt-5.4 / gpt-5.3-codex /
+    # claude-4-sonnet / gemini-2.5-pro. Previous comment acknowledged relay
     # had been dead but kept them "for environments with working keys" —
     # in practice run_f90b35a5de35 shows patcher retries still fall through
-    # to gpt-5.4 and burn 2-3min per retry on 502/503 from private-relay.com.
-    # Kimi is maintainer's OFFICIAL Moonshot Coding Plan subscription (not a
+    # to gpt-5.4 and burn 2-3min per retry on 502/503 from relay.com.
+    # Kimi is the user's OFFICIAL Moonshot Coding Plan subscription (not a
     # relay), always primary. Non-openai alternates stay for the unlikely
     # case kimi itself degrades. See reference_kimi_official_plan.md.
     "kimi-k2.6-code-preview",
@@ -819,7 +819,7 @@ BASE_HARNESS_PREAMBLE = (
 # V4.3.1: Use natural prose, NOT JSON. Previous JSON-style template caused nodes
 # to produce rigid machine-formatted summaries that were hard to read.
 EXECUTION_REPORT_TEMPLATE = (
-    # v6.1.3 (maintainer 2026-04-19): trimmed to minimum. The walkthrough generator
+    # v6.1.3 (maintainer): trimmed to minimum. The walkthrough generator
     # builds detailed reports from raw_output; this template was 120+ tokens of
     # boilerplate pushing weaker models to narrate instead of act. Now one line.
     "\n\n## Execution note (last line, optional): one sentence listing files changed + any risk."
@@ -1104,7 +1104,7 @@ AGENT_PRESETS = {
     "polisher": {
         "instructions": (
             "You are a precision code reviewer + motion finisher working on an ALREADY-BUILT artifact.\n"
-            "v6.1.14f (maintainer 2026-04-20): your job is MICRO-EDITS, not rewrites. Think of yourself as "
+            "v6.1.14f (maintainer): your job is MICRO-EDITS, not rewrites. Think of yourself as "
             "a senior engineer doing a PR review — you leave inline comments and apply surgical patches.\n\n"
             "## ABSOLUTE PROHIBITIONS\n"
             "- NEVER use `file_ops write` with a full new HTML document.\n"
@@ -1504,7 +1504,7 @@ AGENT_PRESETS = {
             "- Omit node_briefs keys for nodes not in this plan.\n"
             "- No markdown fences around the JSON.\n"
             "- If JSON fails to parse, orchestrator logs a warning but the XML tail still ships."
-            "\n\n## DETAIL BAR (v6.6 — maintainer 2026-04-23)\n"
+            "\n\n## DETAIL BAR (v6.6 — maintainer)\n"
             "- Target total output: 20000-28000 chars. Below 15000 chars = insufficient research depth.\n"
             "- Each `<builder_N_handoff>` MUST include ≥ 2 real code snippets (from raw source).\n"
             "- `<critical_algorithms>` MUST have ≥ 1 complete runnable function per named algorithm.\n"
@@ -1723,7 +1723,7 @@ class AIBridge:
         self._builder_direct_multifile_disabled = False
         self._builder_empty_batch_count = 0
         self._builder_deferred_context = ""
-        # v6.3.1 (maintainer 2026-04-21): config generation id. Bumped by
+        # v6.3.1 (maintainer): config generation id. Bumped by
         # reload_api_config() when the user saves new api_key / base_url.
         # Included in the OpenAI client cache key so post-reload requests
         # build fresh clients while in-flight requests keep their old ones.
@@ -1763,6 +1763,43 @@ class AIBridge:
             self._agentic_events = []
         logger.info("AIBridge: per-run state reset (kill switch + empty counter + client cache cleared)")
 
+    def drop_openai_clients_after_hang(self, reason: str = "node_hard_timeout") -> int:
+        """v7.54 (maintainer): drop httpx clients after a stream hang.
+
+        When a node's stream goes silent and the orchestrator hard-timeouts
+        the exec_task (orchestrator._execute_subtask line ~28953), the
+        underlying httpx connection inside the cached OpenAI client may be
+        stuck in a half-closed state — Chrome client side cancelled, but
+        the relay's stream socket is still tracking a phantom request
+        forever. Without this, the NEXT request on the same client picks
+        up that dead connection and hangs immediately. Observed in
+        run on 2026-04-30: reviewer round 3 hung 36 min → timeout →
+        retry hung 45 min → next run's router hung at startup until the
+        whole .app was restarted.
+
+        This drops every cached OpenAI client (forces re-creation on next
+        request, ~80ms one-time cost per endpoint). Less aggressive than
+        reset_per_run_state — does NOT touch _builder_* kill switches or
+        _agentic_events. Safe to call mid-run.
+        """
+        if not isinstance(getattr(self, "_openai_client_cache", None), dict):
+            return 0
+        _dropped = 0
+        for _key, _client in list(self._openai_client_cache.items()):
+            try:
+                _close = getattr(_client, "close", None)
+                if callable(_close):
+                    _close()
+            except Exception:
+                pass
+            _dropped += 1
+        self._openai_client_cache.clear()
+        logger.warning(
+            "[v7.54] drop_openai_clients_after_hang: cleared %d cached client(s) (reason=%s)",
+            _dropped, reason,
+        )
+        return _dropped
+
     def _get_or_create_openai_client(self, api_key: str, base_url: str, extra_headers: Optional[Dict] = None, timeout: float = 120) -> "OpenAI":
         """Return a cached OpenAI client for the given (key, base_url) pair.
         Reuses TCP+TLS connections across calls (~100-300ms saved per request).
@@ -1772,7 +1809,7 @@ class AIBridge:
         expanded connection pool limits, and keepalive for long-running streams.
         """
         from openai import OpenAI as _OpenAI
-        # v6.3.1 (maintainer 2026-04-21): include config_generation in cache key so
+        # v6.3.1 (maintainer): include config_generation in cache key so
         # a reload_api_config bump forces the NEXT request to build a fresh
         # client with the new env, while any previous request still holding
         # the old (key, base, gen-N) key keeps using its old client. Pairs
@@ -1791,7 +1828,7 @@ class AIBridge:
                 # planner reflection can leave a socket idle 3-5 minutes before
                 # the next node reuses it.  Re-establishing TLS costs ~200ms;
                 # avoidable on every node transition.
-                # v6.1.8 (maintainer 2026-04-19, research-confirmed): TCP_NODELAY
+                # v6.1.8 (maintainer, research-confirmed): TCP_NODELAY
                 # disables Nagle so the first SSE byte is not held 40ms on
                 # the relay. Biggest TTFT win for relay-backed chat.
                 pool_limits = _httpx.Limits(
@@ -1815,9 +1852,9 @@ class AIBridge:
             except (ImportError, Exception):
                 pass
 
-            # v6.3 (maintainer 2026-04-21): override User-Agent so relays that do
+            # v6.3 (maintainer): override User-Agent so relays that do
             # anti-passthrough fingerprinting on the literal "OpenAI/Python"
-            # UA (confirmed relay.cn returns 403 "Your request was
+            # UA (confirmed relay returns 403 "Your request was
             # blocked.", expected to be widespread in Chinese relay market)
             # don't block every pipeline call. Only set it when the caller
             # didn't supply their own UA via extra_headers.
@@ -1893,7 +1930,7 @@ class AIBridge:
         v5.2: LiteLLM is imported once at module load (_LITELLM_MODULE); this
         per-instance setup only applies config-driven env keys.
 
-        v6.3 (maintainer 2026-04-20): also accepts nested `api_keys` / `api_bases`
+        v6.3 (maintainer): also accepts nested `api_keys` / `api_bases`
         dicts so UI-saved Settings propagate without restart. Previous code
         only read flat fields like `openai_api_key`, missing the shape used
         by /api/settings/save.
@@ -1972,7 +2009,7 @@ class AIBridge:
             AIBridge._litellm_init_logged = True
 
     def reload_api_config(self, new_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """v6.3.1 (maintainer 2026-04-21) — REWRITE to generation-id / let-GC-handle-it.
+        """v6.3.1 (maintainer) — REWRITE to generation-id / let-GC-handle-it.
 
         ## Why this changed
 
@@ -2293,9 +2330,9 @@ class AIBridge:
         state["last_error"] = _sanitize_error(str(error_message or "timeout"))[:200]
         # V4.6 SPEED: Drastically reduced cooldowns — prioritize throughput.
         # Old values (30/60/120) caused cascading idle time across nodes.
-        # v6.4.11 (maintainer 2026-04-22): exponential back-off on consecutive
+        # v6.4.11 (maintainer): exponential back-off on consecutive
         # rejections. Previously fixed 10s cooldown meant a persistently-down
-        # gateway (e.g. relay.cn on 2026-04-22) kept getting retried every
+        # gateway (e.g. relay on 2026-04-22) kept getting retried every
         # 10s, burning ~2 min of `initial-activity timeout after 120s` each
         # time. Tracking `consecutive_rejections` lets us back off aggressively
         # once we've confirmed the gateway is not recovering. Reset to 10s on
@@ -2320,10 +2357,10 @@ class AIBridge:
             float(state.get("rejection_cooldown_until") or 0.0),
             now + cooldown,
         )
-        # v6.4.31 (maintainer 2026-04-23): HARD CIRCUIT BREAKER.
+        # v6.4.31 (maintainer): HARD CIRCUIT BREAKER.
         # After 5 consecutive gateway rejections, slam the circuit open for
         # 30 min across the WHOLE gateway (not just this model). Observed
-        # 2026-04-22 bug: relay.cn was rejecting every gpt-5.4 call for an
+        # 2026-04-22 bug: relay was rejecting every gpt-5.4 call for an
         # hour, yet each patcher retry STILL tried gpt-5.4 first (5 retries
         # per patcher attempt × 3 attempts = 15 failed round-trips to
         # relay = ~2 min of wasted time per patcher round on top of the
@@ -2344,7 +2381,7 @@ class AIBridge:
             model_key, int(cooldown), _nt or "unknown", state["last_error"][:100],
         )
         # V4.6 SPEED: Propagate to gateway-level key so sibling models
-        # on the same host (e.g. gpt-5.4 on the same relay) are also
+        # on the same host (e.g. gpt-5.4 on the same third-party relay) are also
         # deprioritized. Prevents cascading timeouts when the gateway is down.
         gateway_key = self._compatible_gateway_key(info, model_specific=False)
         if gateway_key and gateway_key != model_key:
@@ -2364,7 +2401,7 @@ class AIBridge:
             )
             # v6.4.31: propagate HARD circuit open to gateway level too so
             # sibling models on the same host (gpt-5.4, gpt-5.3-codex, etc
-            # all proxied through relay.cn) also get skipped.
+            # all proxied through relay) also get skipped.
             gw_state["consecutive_rejections"] = int(gw_state.get("consecutive_rejections") or 0) + 1
             if int(gw_state.get("consecutive_rejections") or 0) >= 5:
                 gw_state["circuit_open_until"] = max(
@@ -2613,7 +2650,7 @@ class AIBridge:
         api_key = self.config.get("openai_api_key") or os.getenv("OPENAI_API_KEY")
         if api_key and (not self._openai_client or api_key != self._openai_api_key):
             from openai import AsyncOpenAI
-            # v6.8 P0 (maintainer 2026-04-24): HTTP/2 + connection pooling.
+            # v6.8 P0 (maintainer): HTTP/2 + connection pooling.
             # OpenAI SDK default is HTTP/1.1 with per-instance pool; under
             # long streaming (kimi writes 30KB HTML → 7K-12K chunks over
             # one TCP connection), this caps throughput. Reusing a global
@@ -2668,7 +2705,7 @@ class AIBridge:
         return {"litellm_id": model_name, "supports_tools": True, "supports_cua": False}
 
     def _model_provider_has_key(self, model_name: str) -> bool:
-        """v6.2 (maintainer 2026-04-20): True iff the model's provider has an API
+        """v6.2 (maintainer): True iff the model's provider has an API
         key configured (environment var or self.config.api_keys). Used to
         filter forced-router fast chains on setups where only one provider
         has keys.
@@ -2736,7 +2773,7 @@ class AIBridge:
     def _configured_thinking_depth(self) -> str:
         """Return 'fast' or 'deep' from config. Default: 'deep'.
 
-        v6.3 (maintainer 2026-04-20): added disk fallback. The AIBridge instance
+        v6.3 (maintainer): added disk fallback. The AIBridge instance
         sometimes misses update_config propagation (same SIGHUP / class rebind
         race documented in _effective_timeout_for_node), causing analyst /
         imagegen / reviewer timeouts to silently snap to fast-mode values
@@ -2788,8 +2825,8 @@ class AIBridge:
     # Evermind at their self-hosted OneAPI instance the union-flags behaviour
     # is the right call anyway.
     _RELAY_HOST_MARKERS: Tuple[str, ...] = (
-        "private-relay.com",
-        "private-relay.example",
+        "relay.com",
+        "relay",
         "aigate",
         "openrouter.ai",
         "oneapi",          # OneAPI self-hosted (github.com/songquanpeng/one-api)
@@ -2837,7 +2874,7 @@ class AIBridge:
     def _extract_host(cls, api_base: str) -> str:
         """Return lowercased hostname from an api_base URL. Falls back to the
         first path-free segment if urlparse can't find a netloc (e.g. user
-        typed `private-relay.com/v1` without a scheme)."""
+        typed `relay.com/v1` without a scheme)."""
         raw = str(api_base or "").strip().lower()
         if not raw:
             return ""
@@ -2897,7 +2934,7 @@ class AIBridge:
     #   analyst/reviewer/debugger/polisher/tester → real gain from thinking
     #   builder/merger                            → hurt (must act, not think)
     #   router/planner/planner_degraded           → slow for no quality gain
-    # v6.4.21 (maintainer 2026-04-22) — REMOVED "builder" and "merger" from this list.
+    # v6.4.21 (maintainer) — REMOVED "builder" and "merger" from this list.
     # User feedback: deep mode was producing low reasoning_effort on builder/merger
     # because they were blanket-exempt. Now they honor the difficulty dial:
     # deep → high, fast → medium/low (size-aware), normal → low. The
@@ -2907,12 +2944,12 @@ class AIBridge:
     _THINKING_EXEMPT_NODES: frozenset = frozenset({
         "router", "planner", "planner_degraded",
         "imagegen", "spritesheet", "assetimport",  # asset-producing: tool-heavy, not reasoning
-        # v6.3.5 (maintainer 2026-04-21): added analyst after two runs on the same
+        # v6.3.5 (maintainer): added analyst after two runs on the same
         # 3D shooter goal showed kimi's reasoning_chars swinging from 2067
         # to 19764 — a 9.5× variance that cost 97s extra synthesis time
         # with no measurable quality difference (27KB vs 28KB XML content).
         "analyst",
-        # v6.4 (maintainer 2026-04-21): reviewer/tester/patcher/debugger all
+        # v6.4 (maintainer): reviewer/tester/patcher/debugger all
         # observed producing finish=length with content_chars=0 (300s
         # entirely thinking tokens, zero output). These are tool-heavy
         # action nodes — reviewer issues a verdict + browser tool_calls,
@@ -2922,7 +2959,7 @@ class AIBridge:
         "reviewer", "tester", "patcher", "debugger",
     })
 
-    # v6.4.5 (maintainer 2026-04-21) — write-critical nodes must call file_ops.
+    # v6.4.5 (maintainer) — write-critical nodes must call file_ops.
     # Research finding: Aider/Cline root-cause analysis of "agent writes prose
     # instead of editing files" is tool_choice="auto" letting the model duck
     # out. Solution per OpenAI/Anthropic: force tool_choice to a specific
@@ -2946,7 +2983,7 @@ class AIBridge:
     def _tool_choice_for_node(cls, node_type: str, tools_list, model_name: str = "") -> Any:
         """Return tool_choice value suited to the node + provider.
 
-        v6.4.7 (maintainer 2026-04-21) — REVERT to "auto" for Kimi family.
+        v6.4.7 (maintainer) — REVERT to "auto" for Kimi family.
         Moonshot Kimi K2.6 docs explicitly error-out on tool_choice other
         than auto/none (confirmed from platform.kimi.ai/docs). The real
         fix for "prose before tool_call" is the stream-level prose-abort
@@ -2954,12 +2991,12 @@ class AIBridge:
         prompt contract, not tool_choice. Anthropic still accepts the
         dict form and benefits.
 
-        v6.4.18 (maintainer 2026-04-22) — EXTEND dict form to OpenAI / DeepSeek /
-        Qwen / GPT-5.x via relay / relays. Observed 2026-04-22 19:06
+        v6.4.18 (maintainer) — EXTEND dict form to OpenAI / DeepSeek /
+        Qwen / GPT-5.x via relay / third-party relays. Observed 2026-04-22 19:06
         patcher run: gpt-5.4 made 100+ tool_calls across 4 minutes with 0
         file_ops.write/edit — it kept invoking `file_ops.read` under
         `tool_choice="auto"`, so the patcher produced zero disk changes.
-        OpenAI chat-completions (and the relay / relays that mimic
+        OpenAI chat-completions (and the relay / third-party relays that mimic
         it) accept the dict form `{"type": "function", "function": {"name":
         "file_ops"}}` just like Anthropic. Narrow the deny-list to models
         that demonstrably reject it (Kimi K2.6, GLM-5.x tool_stream issue).
@@ -3019,7 +3056,7 @@ class AIBridge:
         want_fast: bool,
         input_data: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """v6.4.21 (maintainer 2026-04-22) — size-aware reasoning_effort for
+        """v6.4.21 (maintainer) — size-aware reasoning_effort for
         builder/merger. User feedback: fast mode shouldn't always be
         'minimal' — that makes the fast/deep dial meaningless for the
         heaviest nodes. Map:
@@ -3091,7 +3128,7 @@ class AIBridge:
         """
         if thinking_depth is None:
             thinking_depth = self._configured_thinking_depth()
-        # v6.4.22 (maintainer 2026-04-22) — two-dimension split:
+        # v6.4.22 (maintainer) — two-dimension split:
         #   * `thinking_depth` drives the binary thinking FLAG (Anthropic budget,
         #     Kimi thinking.enabled, Qwen enable_thinking, Zhipu thinking.type).
         #     Exempt nodes (planner/analyst/reviewer/etc.) and kimi-family
@@ -3130,7 +3167,7 @@ class AIBridge:
         extra: Dict[str, Any] = kwargs.setdefault("extra_body", {})
 
         # ── Generic relay / gateway (union all flags) ───────────────────
-        # v6.1: Any third-party relay (private-relay / private-relay / OpenRouter / OneAPI /
+        # v6.1: Any third-party relay (relay / relay / OpenRouter / OneAPI /
         # NewAPI / LiteLLM-Proxy / aihubmix / laozhang / etc.) gets the
         # "fire every flag, let the backend pick" treatment. This lets Evermind
         # work with ANY OpenAI-compat gateway a user plugs in, not just the
@@ -3215,7 +3252,7 @@ class AIBridge:
         elif provider in ("glm", "zhipu"):
             ov = self._env_thinking_override("EVERMIND_GLM_THINKING")
             on = ov if ov is not None else want_deep
-            # v6.1.3 (maintainer 2026-04-19, research sources: Z.AI migrate-to-glm-new,
+            # v6.1.3 (maintainer, research sources: Z.AI migrate-to-glm-new,
             # Z.AI stream-tool docs, sglang#11888, vllm#39611, LibreChat#12585):
             # GLM-4.6+ ships with `tool_stream` DEFAULT=False. In stream+tools
             # mode this silently buffers tool_call arguments until the full
@@ -3265,7 +3302,7 @@ class AIBridge:
             # No clean on/off toggle; reasoning_split is always beneficial.
             extra.setdefault("reasoning_split", True)
 
-        # ── aigate / private-relay relay (proxies 6 国产 backends) ─────────────
+        # ── aigate / relay relay (proxies 6 国产 backends) ─────────────
         elif provider == "aigate":
             ov = self._env_thinking_override("EVERMIND_AIGATE_THINKING")
             on = ov if ov is not None else want_deep
@@ -3394,7 +3431,7 @@ class AIBridge:
             "doubao": "DOUBAO_API_KEY",
             "yi": "YI_API_KEY",
             "minimax": "MINIMAX_API_KEY",
-            "aigate": "AIGATE_API_KEY",  # v5.8.6: private-relay.example multi-model relay
+            "aigate": "AIGATE_API_KEY",  # v5.8.6: relay multi-model relay
         }.get(str(provider or "").strip().lower(), "")
 
     # ── v5.8.6: multi-key pool per provider ──────────────────────────────
@@ -3586,7 +3623,7 @@ class AIBridge:
         env_base = str(os.getenv(env_base_key, "") if env_base_key else "").strip().rstrip("/")
         if not env_base:
             return ""
-        # A non-official base (e.g. private-relay.com) IS a custom gateway even when
+        # A non-official base (e.g. relay.com) IS a custom gateway even when
         # model config and env var match — we need the streaming-capable path.
         _official = ("https://api.openai.com", "https://api.anthropic.com",
                      "https://api.deepseek.com", "https://generativelanguage.googleapis.com")
@@ -3726,7 +3763,7 @@ class AIBridge:
             "quota exceeded",
             "exceeded your current quota",
             "余额不足",
-            # v6.3 (maintainer 2026-04-20): auth permanent errors. Without these
+            # v6.3 (maintainer): auth permanent errors. Without these
             # markers, a bad key burns 15s of cooldown then retries forever.
             "invalid token",
             "invalid api key",
@@ -3847,7 +3884,7 @@ class AIBridge:
         )
         now = time.time()
         state["consecutive_failures"] = 0
-        # v6.4.11 (maintainer 2026-04-22): reset the exp-backoff rejection streak
+        # v6.4.11 (maintainer): reset the exp-backoff rejection streak
         # on every successful response so a recovered gateway isn't held
         # hostage by its earlier failure history.
         state["consecutive_rejections"] = 0
@@ -3901,7 +3938,7 @@ class AIBridge:
                 "quota exceeded", "exceeded your current quota",
             )):
                 cooldown_sec = max(cooldown_sec, 3600.0)
-            # v6.3 (maintainer 2026-04-20): permanent errors (model doesn't exist,
+            # v6.3 (maintainer): permanent errors (model doesn't exist,
             # invalid API key, unsupported model) will keep returning forever
             # until config changes. Default 15s cooldown was burning 75s
             # pre-write timeout per retry, dozens of times per run. Escalate
@@ -3918,14 +3955,14 @@ class AIBridge:
             ))
             if _is_permanent_error:
                 cooldown_sec = max(cooldown_sec, 1800.0)
-            # v6.1.15 (maintainer 2026-04-20): 402 insufficient_quota affects the
-            # WHOLE gateway account (e.g. private-relay all plans out of balance),
+            # v6.1.15 (maintainer): 402 insufficient_quota affects the
+            # WHOLE gateway account (e.g. relay all plans out of balance),
             # not just one model. Previously each model on the gateway got
             # 1h cooldown INDEPENDENTLY — so qwen/minimax/kimi each burned
             # a 402 roundtrip. Now set a GATEWAY-level cooldown too so
             # sibling models skip the dead gateway immediately.
-            # v7.3 (maintainer 2026-04-26): include the membership-benefits 402
-            # variant from kimi/private-relay/private-relay relays. Same semantics —
+            # v7.3 (maintainer): include the membership-benefits 402
+            # variant from kimi/relay/relay relays. Same semantics —
             # the entire gateway account is dry, not just one model.
             _is_quota_exhausted = any(marker in err_lower for marker in (
                 "insufficient_quota", "用户额度不足", "余额不足",
@@ -4395,12 +4432,12 @@ class AIBridge:
             for model_name in (candidates or [])
             if str(model_name or "").strip()
         ]
-        # v6.4.57 (maintainer 2026-04-23): cross-host emergency fallback.
+        # v6.4.57 (maintainer): cross-host emergency fallback.
         # Previously: `if len(existing) >= 2: return existing` short-
         # circuited and never added kimi when the existing 2 candidates
         # were BOTH from the same unhealthy compatible gateway (observed
         # Apr 23 14:04 uidesign: [gpt-5.4, gpt-5.3-codex] both on
-        # relay.cn, which entered 300s cooldown → 4 retries all rejected
+        # relay, which entered 300s cooldown → 4 retries all rejected
         # in 5s total). New rule: if ALL existing candidates route through
         # the same UNHEALTHY compatible gateway, force-augment with kimi
         # (cross-host fallback). Only triggers when gateway is actually
@@ -4495,7 +4532,7 @@ class AIBridge:
         fallback_chain = self._normalize_model_chain([fallback_model])
         if explicit_model and bool(effective_node.get("model_is_default")):
             explicit_model = []
-        # v6.1.14h (maintainer 2026-04-20): router is a 2KB classifier — it does
+        # v6.1.14h (maintainer): router is a 2KB classifier — it does
         # NOT need kimi-k2.6-code-preview (thinking model, 27-65s per call).
         # Force a fast path regardless of auto-filled defaults:
         # kimi-k2.5 (non-thinking) → minimax-m2.7-highspeed → deepseek-v3.
@@ -4504,7 +4541,7 @@ class AIBridge:
         # orchestrator auto-fills prefs with `kimi-k2.6-code-preview` even
         # when user's settings.json has `router: []`. New rule: PREPEND
         # fast models unless user explicitly set a non-thinking chain.
-        # v7.44 (maintainer 2026-04-29): also activate fast-path even when the
+        # v7.44 (maintainer): also activate fast-path even when the
         # user has a `default_model` set, IF that default is a slow/code/
         # thinking model and they have NOT explicitly configured the
         # router slot. Observed in run_284a84a171c8: user's default was
@@ -4554,7 +4591,7 @@ class AIBridge:
                 )
             # else: fall through to legacy default below
 
-        # v7.47 (maintainer 2026-04-30): patcher fast-path. Patcher's job is
+        # v7.47 (maintainer): patcher fast-path. Patcher's job is
         # surgical SEARCH/REPLACE blocks — it does NOT need code-tier
         # reasoning. In run_33b2b6d194e3 patcher ran 3 rounds × 0 edits
         # because kimi-k2.6-code-preview emitted bytewise-incorrect
@@ -4589,6 +4626,80 @@ class AIBridge:
                 logger.info(
                     "[v7.47] patcher fast-path activated (avoid code-thinking model for surgical edits): %s",
                     patcher_fast_chain,
+                )
+
+        # v7.56 (maintainer): uidesign + scribe fast-path. Both nodes
+        # produce CONSTRAINED briefs (design tokens, layout, content map)
+        # — they fill structured templates rather than do deep reasoning.
+        # Default kimi-coding (thinking) wastes 30-60s per call on internal
+        # reasoning that adds zero value to a "fill these 5 sections" task.
+        # Observed in run 22:00-22:12: uidesign streamed 102s/236s/238s
+        # totaling 12 min of retry hell, even though the actual brief was
+        # well within a fast model's capability (kimi-k2.5 can write a 5K
+        # design brief in 30-60s with no reasoning overhead).
+        # Same swap rule as router/patcher.
+        if (
+            node_type in ("uidesign", "scribe")
+            and not bool(explicit_chain)
+            and (
+                not configured_chain
+                or str(configured_chain[0] or "").strip().lower() in _slow_models
+            )
+        ):
+            ui_scribe_fast_chain_raw = self._normalize_model_chain([
+                "kimi-k2.5",
+                "minimax-m2.7-highspeed",
+                "deepseek-v3.2",
+            ])
+            ui_scribe_fast_chain = [
+                m for m in ui_scribe_fast_chain_raw
+                if self._model_provider_has_key(m)
+            ]
+            if ui_scribe_fast_chain:
+                _legacy_tail = [m for m in (configured_chain or []) if m not in ui_scribe_fast_chain]
+                configured_chain = ui_scribe_fast_chain + _legacy_tail
+                logger.info(
+                    "[v7.56] %s fast-path activated (constrained-brief task, skip deep reasoning): %s",
+                    node_type, ui_scribe_fast_chain,
+                )
+
+        # v7.62 (maintainer): reviewer fast-path — CRITICAL fix.
+        # Observed run after run: reviewer with kimi-k2.6-code-preview
+        # (thinking model) writes prose but FORGETS the verdict JSON
+        # block, even with v7.59 first-directive + ESCAPE HATCH. Result:
+        # review_verdict='', review_issues=[], patcher gets no actionable
+        # brief, 3 rounds × 0 edits, run fails. forced-synthesis fallback
+        # also returns empty.
+        #
+        # Fix: route reviewer to fast non-thinking models that follow
+        # output-format instructions much more reliably. Yes, evaluation
+        # depth is slightly shallower — but a verdict that SHIPS to
+        # patcher is infinitely better than a thinking-model's poetic
+        # prose with no JSON.
+        if (
+            node_type == "reviewer"
+            and not bool(explicit_chain)
+            and (
+                not configured_chain
+                or str(configured_chain[0] or "").strip().lower() in _slow_models
+            )
+        ):
+            reviewer_fast_chain_raw = self._normalize_model_chain([
+                "kimi-k2.5",
+                "minimax-m2.7-highspeed",
+                "deepseek-v3.2",
+                "kimi-k2.6-code-preview",  # thinking model as last-resort fallback
+            ])
+            reviewer_fast_chain = [
+                m for m in reviewer_fast_chain_raw
+                if self._model_provider_has_key(m)
+            ]
+            if reviewer_fast_chain:
+                _legacy_tail = [m for m in (configured_chain or []) if m not in reviewer_fast_chain]
+                configured_chain = reviewer_fast_chain + _legacy_tail
+                logger.info(
+                    "[v7.62] reviewer fast-path activated (skip thinking — must emit JSON verdict reliably): %s",
+                    reviewer_fast_chain,
                 )
 
         candidates: List[str] = []
@@ -4644,12 +4755,12 @@ class AIBridge:
                 filtered_candidates.insert(0, pinned)
         # v6.1.7 (revised 2026-04-19): GLM-5.x tool_stream is unreliable per
         # sglang#11888 + BigModel official docs. We could demote it in the
-        # builder chain, BUT maintainer explicitly prefers user-chosen model
+        # builder chain, BUT the maintainer explicitly prefers user-chosen model
         # ordering to stand as-is. Demotion is now opt-in via env var —
         # default OFF. User config order is the source of truth.
         if str(os.getenv("EVERMIND_AUTO_DEMOTE_GLM5", "0") or "0").strip() in ("1", "true", "yes"):
             filtered_candidates = self._demote_glm5_for_tool_nodes(node_type, filtered_candidates)
-        # v6.3 (maintainer 2026-04-20): optional strict mode. When
+        # v6.3 (maintainer): optional strict mode. When
         # EVERMIND_STRICT_NODE_PREFERENCES=1, discard any candidate that was
         # NOT listed in the user's configured_chain / explicit_chain. This
         # prevents emergency-fallback / relay-augmentation from reintroducing
@@ -4772,9 +4883,9 @@ class AIBridge:
         usage_data: Any = None
         model_name = kwargs.get("model", "")
 
-        # v6.1.3 (maintainer 2026-04-19): route delta.content through the same
+        # v6.1.3 (maintainer): route delta.content through the same
         # ThinkStripper as the compat path — prevents <think>...</think>
-        # folded into content by some relays (private-relay/aigate/private-relay proxies
+        # folded into content by some relays (relay/aigate/relay proxies
         # kimi/glm) from ever reaching file writes. Also captures
         # reasoning_content deltas separately so they're never appended to
         # content_parts (the source for file_ops direct_text content).
@@ -4854,9 +4965,9 @@ class AIBridge:
                     "total_tokens": getattr(usage_data, "total_tokens", 0),
                 }
 
-        # v6.1.14 (maintainer 2026-04-20): expose reasoning_content on the
+        # v6.1.14 (maintainer): expose reasoning_content on the
         # stitched message so downstream `_serialize_assistant_message`
-        # preserves it (kimi thinking validator at aigate/private-relay requires
+        # preserves it (kimi thinking validator at aigate/relay requires
         # it on every replayed assistant message).
         _reasoning_joined = "".join(_think_stripper.reasoning_parts) if getattr(_think_stripper, "reasoning_parts", None) else ""
         return _NS(
@@ -5086,7 +5197,7 @@ class AIBridge:
         return max(minimum, min(maximum, updated))
 
     def _is_ultra_mode(self) -> bool:
-        """v7.1 (maintainer 2026-04-24): Ultra Mode = 顶级玩家模式。
+        """v7.1 (maintainer): Ultra Mode = 顶级玩家模式。
         放宽所有 timeout / iter cap / rejection budget，支持长任务（3-4h ~ 1 day）
         + 多文件项目 + 图片/爬取工具。只要 cli_mode.enabled 且 cli_mode.ultra_mode
         同时 True 才算 ULTRA（ultra 依赖 CLI 的长运行能力）。
@@ -5123,7 +5234,7 @@ class AIBridge:
         watchdog is the true exit condition, not arbitrary iteration count.
         """
         normalized_node_type = normalize_node_role(node_type)
-        # v6.1.5 (maintainer 2026-04-19): node-type dispatch by "agentic vs
+        # v6.1.5 (maintainer): node-type dispatch by "agentic vs
         # generative" classes — research showed Cursor/MetaGPT/Smol keep
         # generative paths single-pass (imagegen/spritesheet/assetimport
         # all pre-structured, no exploration), while debug/merge paths need
@@ -5133,7 +5244,7 @@ class AIBridge:
             max_iterations = 40
             max_tool_calls = 80
         elif normalized_node_type == "merger":
-            # v6.4 (maintainer 2026-04-21): merger's job is read both builder
+            # v6.4 (maintainer): merger's job is read both builder
             # outputs + write one merged file. 30/60 let kimi over-explore
             # (7m12s observed vs 3-5min expected). 18/30 is plenty for
             # read-read-write + 1-2 corrective edits.
@@ -5143,7 +5254,7 @@ class AIBridge:
             max_iterations = 25
             max_tool_calls = 50
         elif normalized_node_type == "patcher":
-            # v6.4 (maintainer 2026-04-21): patcher now drives repairs via
+            # v6.4 (maintainer): patcher now drives repairs via
             # file_ops read+edit (one pair per blocker), so allow enough
             # loop budget for 4-6 issues (2 tool calls each = 8-12 calls).
             # Keep it below builder so a failed patch still escalates
@@ -5152,7 +5263,7 @@ class AIBridge:
             max_tool_calls = 16
         elif normalized_node_type == "imagegen":
             # Generative: prompt-pack production; 1-2 rounds enough.
-            # v6.1.14h.2 (maintainer 2026-04-20): observed imagegen running 10+
+            # v6.1.14h.2 (maintainer): observed imagegen running 10+
             # rounds × 60-120s each (source_fetch exploration loop) → 10min
             # total. Tighten to 4 iterations. It's a manifest producer, not
             # a researcher — analyst already did the research upstream.
@@ -5163,10 +5274,10 @@ class AIBridge:
             max_iterations = 6
             max_tool_calls = 10
         elif normalized_node_type == "analyst":
-            # v6.1.3 (maintainer 2026-04-19): analyst needs hard converge; it's
+            # v6.1.3 (maintainer): analyst needs hard converge; it's
             # research not building. 20→10 forces synthesis quickly.
-            # v6.1.14 (maintainer 2026-04-20): deep mode needs more research room.
-            # v6.3 (maintainer 2026-04-20): post-mortem run_85ef3b62fcd3 — analyst did
+            # v6.1.14 (maintainer): deep mode needs more research room.
+            # v6.3 (maintainer): post-mortem run_85ef3b62fcd3 — analyst did
             # 10 source_fetch calls then hung 200s before hard-ceiling. tutorial
             # search is naturally divergent; cap deep 16→10, fast 10→6. Pair with
             # the "pick 3 sources" prompt rule in _planner_prompt_for_difficulty.
@@ -5181,19 +5292,19 @@ class AIBridge:
             max_iterations = 6
             max_tool_calls = 8
         elif normalized_node_type == "reviewer":
-            # v6.1.4 (maintainer 2026-04-18): "trust the agent" — don't hard-cap
+            # v6.1.4 (maintainer): "trust the agent" — don't hard-cap
             # tool budget, a mature reviewer knows when it's done. But the
             # runaway-loop pattern (18min re-screenshotting same page) means
             # the real fix is at the PROMPT level: explicit stop criterion +
             # dedup watchdog. Cap is a safety floor only.
-            # v6.7 (maintainer 2026-04-23): observed run_69495533723c — reviewer
+            # v6.7 (maintainer): observed run_69495533723c — reviewer
             # burned 5+ minutes doing redundant browser probes on gpt-5.4.
             # Tighten 20/30 → 12/18 — plenty for 1 page + 1 interaction
             # sweep + JSON report; forces convergence instead of thrashing.
             max_iterations = 12
             max_tool_calls = 18
         elif normalized_node_type == "tester":
-            # v6.4 (maintainer 2026-04-21): previously fell through to else (25/50)
+            # v6.4 (maintainer): previously fell through to else (25/50)
             # which let kimi burn 12 min on a single tester node doing
             # redundant browser screenshots. 15/25 is plenty for a 3D game
             # smoke test (start screen → spawn → input → HUD → game-over),
@@ -5294,13 +5405,13 @@ class AIBridge:
                 # game pages without hitting the ceiling.
                 base = self._read_int_env("EVERMIND_BUILDER_DIRECT_MAX_TOKENS", 28672, 4096, 65536)
             elif is_merger_like:
-                # v6.1.10 (maintainer 2026-04-19): merger combines 2 builder outputs
+                # v6.1.10 (maintainer): merger combines 2 builder outputs
                 # into 80-120KB integrated HTML. 24576 tokens ≈ 62KB — tight.
                 # Bump to 32768 default (~82KB) so merger rarely hits
                 # finish=length on 3D game merges.
                 base = self._read_int_env("EVERMIND_BUILDER_MERGER_TOOLCALL_MAX_TOKENS", 32768, 8192, 65536)
             else:
-                # v6.1.10 (maintainer 2026-04-19): peer builders writing 50KB HTML
+                # v6.1.10 (maintainer): peer builders writing 50KB HTML
                 # in tool_call JSON args consistently hit finish=length at
                 # 16384 tokens (~40KB). Raised to 24576 (~60KB) default so
                 # kimi/minimax one-shot big files don't get truncated.
@@ -5336,7 +5447,7 @@ class AIBridge:
             # v5.8.4: Analyst was falling through to the 4096-token default, causing
             # finish=length after tool-loop synthesis (16196 chars observed). Bumped
             # to 12288 — matches planner headroom so the synthesizer rarely fires.
-            # v7.15 (maintainer 2026-04-28): bumped 12288→18432. Observed multiple
+            # v7.15 (maintainer): bumped 12288→18432. Observed multiple
             # runs with finish=length truncating 4-5 TIER-1 sections (deliverables_
             # contract / implementation_blueprint / critical_algorithms /
             # builder_1_handoff / builder_2_handoff) leaving builder blind. v7.7
@@ -5352,7 +5463,7 @@ class AIBridge:
             # + parallel builders), kimi's JSON routing table routinely exceeds
             # 8K chars → finish=length truncation → JSON parsing error → full
             # router retry. 6144 tokens ≈ 24K chars safely fits.
-            # v6.3 (maintainer 2026-04-21): 6144 → 2048. Observed router streaming
+            # v6.3 (maintainer): 6144 → 2048. Observed router streaming
             # 12KB of JSON in 80-114s on kimi-k2.6-code-preview — blocking the
             # entire pipeline for 2 minutes before planner can start. The
             # extended 6144 allowance encouraged verbose output the router
@@ -5362,7 +5473,7 @@ class AIBridge:
             # ceiling + occasional finish=length is safer than multi-minute
             # startup stall. Users who need 11-node parallel routing tables
             # can override via EVERMIND_ROUTER_MAX_TOKENS.
-            # v6.3.4 (maintainer 2026-04-21): 2048 → 1024. Post-mortem of latest
+            # v6.3.4 (maintainer): 2048 → 1024. Post-mortem of latest
             # run: router still took 44s producing 8786 chars (finish=length
             # exactly at 2048 tokens).
             # v7.7 (2026-04-27): 1024 → 4096. Real-world data on Kimi
@@ -5445,7 +5556,7 @@ class AIBridge:
         elif normalized_node_type == "imagegen":
             # v4.0: Reduced from 420→240. ImageGen writes briefs/manifests, not heavy code.
             # 420s was letting it idle excessively on retry loops.
-            # v6.1.15 (maintainer 2026-04-20): observed imagegen 15 min total on
+            # v6.1.15 (maintainer): observed imagegen 15 min total on
             # kimi-k2.5 source_fetch loop + model fallback chain. Tightened
             # 240→180. With max_iterations=4 and each ≤45s, this is a hard wall.
             value = self._read_int_env("EVERMIND_IMAGEGEN_TIMEOUT_SEC", 180, 45, 360)
@@ -5468,7 +5579,7 @@ class AIBridge:
             # v3.1: Raised from 120s to 180s. Analyst with web research tools needs
             # time to fetch references and synthesize findings.
             # v6.1.13: deep mode 360s, fast 180s.
-            # v7.46 (maintainer 2026-04-29): observed run_2dc6e934372c — analyst's
+            # v7.46 (maintainer): observed run_2dc6e934372c — analyst's
             # synthesis stream (after source_fetch cap reached) hit the 360s
             # timeout exactly, then litellm auto-retry kicked in, restarting
             # from scratch (including re-running 8× source_fetch). Total
@@ -5489,18 +5600,18 @@ class AIBridge:
         elif normalized_node_type == "router":
             # v5.8: 240 → 120. Router only emits a ~2K-token JSON routing table;
             # no deep thinking required. 240s encouraged relay stalls to sit idle.
-            # v6.3 (maintainer 2026-04-21): 120 → 45. Observed router on
+            # v6.3 (maintainer): 120 → 45. Observed router on
             # kimi-k2.6-code-preview taking 80-114s streaming an over-verbose
             # 12KB JSON (prompt says ≤80-char / 3-5 subtasks but model over-
             # generates). With max_tokens now capped at 2048 (≈ 8KB chars),
             # 45s is the realistic ceiling.
-            # v6.3.2 (maintainer 2026-04-21): 45 → 60. Post-mortem of new run:
+            # v6.3.2 (maintainer): 45 → 60. Post-mortem of new run:
             # first call hit 45s exactly and timed out, forcing a retry.
             # Second attempt finished at 44.35s (finish=length, 8786 chars).
             # 45s is one second too tight — kimi-k2.6-code-preview streams
             # ~40 tok/s so 2048 tokens needs ~50s. 60s eliminates the retry
             # waste while still being 2× faster than the old 120s wall.
-            # v7.7 (maintainer 2026-04-28): 60 → 120. Observed kimi.com peak-hour
+            # v7.7 (maintainer): 60 → 120. Observed kimi.com peak-hour
             # latency repeatedly hitting 60s exactly with first-chunk delay
             # 35-50s + content burst — entire DAG stalled because router
             # blocked all 13 NEs for 60s × 3 retries = 3min before fallback.
@@ -5527,7 +5638,7 @@ class AIBridge:
             # v5.8.4: Deployer lists files + prints preview URL. 120s plenty.
             value = self._read_int_env("EVERMIND_DEPLOYER_TIMEOUT_SEC", 120, 30, 300)
         elif normalized_node_type == "patcher":
-            # v6.7 (maintainer 2026-04-23): dedicated patcher timeout. Previously
+            # v6.7 (maintainer): dedicated patcher timeout. Previously
             # patcher fell through to EVERMIND_TIMEOUT_SEC=120s, hitting a
             # hard-ceiling at 138s when kimi streamed a 20KB edit — triggered
             # a fallback chain to gpt-5.3-codex (which 503s on the current
@@ -5535,16 +5646,29 @@ class AIBridge:
             # wall-clock at 5min, so 300s base matches the prompt contract.
             value = self._read_int_env("EVERMIND_PATCHER_TIMEOUT_SEC", 300, 60, 600)
         elif normalized_node_type == "scribe":
-            value = self._read_int_env("EVERMIND_DOC_TIMEOUT_SEC", 240, 45, 600)
+            # v7.56 (maintainer): 240 → 480 base. Observed
+            # run_d36f804773d1: scribe streamed 223s/188s/186s on real
+            # tasks — barely under the 240s ceiling. ANY slow run hit
+            # hard-timeout → 4-min wasted retry → another 4-min retry →
+            # 12 min wasted before success. New 480s base gives 2x
+            # buffer over the 240s p90 latency. Max 900s for deep mode.
+            _scribe_default = 600 if self._configured_thinking_depth() == "deep" else 480
+            value = self._read_int_env("EVERMIND_DOC_TIMEOUT_SEC", _scribe_default, 45, 900)
         elif normalized_node_type == "uidesign":
-            # v6.7d (maintainer 2026-04-24): 180 → 360. kimi-k2.6 on deep-mode
+            # v6.7d (maintainer): 180 → 360. kimi-k2.6 on deep-mode
             # uidesign regularly streams 200-280s (10K-char system prompt +
             # thinking enabled); 180s triggered hard-ceiling timeout →
             # model fallback → gpt-5.4 on dead relay → 3 min wasted. 360s
             # matches analyst deep-default; enough margin for kimi's
             # natural first-byte latency + full reasoning pass.
-            _ui_default = 360 if self._configured_thinking_depth() == "deep" else 240
-            value = self._read_int_env("EVERMIND_UIDESIGN_TIMEOUT_SEC", _ui_default, 30, 600)
+            # v7.56 (maintainer): 360 → 600 deep, 240 → 420 fast.
+            # Observed in run 22:00-22:12: uidesign streamed 236s, 238s,
+            # 102s — too close to 360s hard ceiling. Three 6-min retries
+            # ate 18 min. New 600s deep gives natural 1.7x buffer over the
+            # 360s p90; max 900s allows kimi-k2.6 thinking traces to fully
+            # land without hard-cancel.
+            _ui_default = 600 if self._configured_thinking_depth() == "deep" else 420
+            value = self._read_int_env("EVERMIND_UIDESIGN_TIMEOUT_SEC", _ui_default, 30, 900)
         else:
             value = self._read_int_env("EVERMIND_TIMEOUT_SEC", 120, 30, 600)
 
@@ -5641,7 +5765,7 @@ class AIBridge:
         # truncated. The floor here is smaller (1200s) than primary-builder
         # deep floor (1800s) because merger really should finish fast, but 300s
         # was killing legitimate 3-5 min merger streams.
-        # v6.4.7 (maintainer 2026-04-21) — ALSO detect merger via node_key because
+        # v6.4.7 (maintainer) — ALSO detect merger via node_key because
         # orchestrator DAG creates merger subtasks with agent_type="builder"
         # + node_key="merger" and sometimes forgets to set the
         # `builder_merger_like` flag → merger fell through to multi-page
@@ -5813,7 +5937,7 @@ class AIBridge:
         return base
 
     def _compatible_gateway_fail_fast_node_types(self) -> set[str]:
-        # v6.3.1 (maintainer 2026-04-21): added merger + patcher. Both were
+        # v6.3.1 (maintainer): added merger + patcher. Both were
         # missing before, so they returned initial_activity=0 and would
         # silently wait 300s (merger hard_timeout) / 120s (patcher
         # hard_timeout) when a relay's TTFB silently hung. Adding them
@@ -5844,21 +5968,21 @@ class AIBridge:
         Use a shorter initial-activity deadline so nodes fail over before the full
         hard ceiling expires.
 
-        v5.8.6: aigate (private-relay) multiplier — MiniMax/Kimi/GLM on private-relay have
+        v5.8.6: aigate relay multiplier — MiniMax/Kimi/GLM on relay have
         reasoning-mode TTFB 30-60s on large prompts (the relay routes through
         the upstream's thinking step before first chunk). Default 20-28s isn't
         enough and causes premature fail-over. Apply 2.5x multiplier for aigate.
         """
         # v5.2: Conservative defaults — v4.6 SPEED values (14/12/10) were too
         # aggressive for slow providers. External benchmarks (Kimi K2.5 via
-        # Together/Fireworks/Clarifai) show TTFT of 8-9s is normal, and the relay
+        # Together/Fireworks/Clarifai) show TTFT of 8-9s is normal, and relay
         # first_chunk p95 for gpt-5.4 reaches 15-18s. Doubled the defaults to
         # give p95 enough headroom while keeping env overrides for fast links.
         # v5.8.6 REDESIGN: initial-activity timeouts tripled across the board.
         # Old values (20-28s) were pre-reasoning-model era. Modern Chinese
         # reasoning models (Kimi-K2.5 / MiniMax-M2.7 / Qwen3) legitimately
         # spend 30-90s in internal reasoning before first chunk, especially
-        # when routed through relays (relay) that trigger reasoning
+        # when routed through relays (relay/relay) that trigger reasoning
         # auto-mode on tool-using requests. Per Cline/Roo conventions.
         normalized_node_type = normalize_node_role(node_type)
         text = str(input_data or "")
@@ -5880,7 +6004,7 @@ class AIBridge:
             result = self._read_int_env("EVERMIND_COMPAT_GATEWAY_INITIAL_ACTIVITY_SEC", 75, 15, 240)
         else:
             return 0
-        # aigate (private-relay) reasoning-mode gets extra 1.5x on top of the new baseline.
+        # aigate relay reasoning-mode gets extra 1.5x on top of the new baseline.
         _provider = str((model_info or {}).get("provider") or "").strip().lower()
         if _provider == "aigate":
             result = int(result * 1.5)
@@ -5922,7 +6046,7 @@ class AIBridge:
         Absolute cap for a single builder model call before the first real HTML write.
         This guards against long planning / streaming loops that never reach file_ops.
 
-        v6.1.3 (maintainer 2026-04-19): CRITICAL — this value wraps the ENTIRE async
+        v6.1.3 (maintainer): CRITICAL — this value wraps the ENTIRE async
         call with `asyncio.wait_for`, not "idle chunk" detection. Thinking models
         like GLM-5.1 / DeepSeek reasoner spend 150-400s on reasoning_content
         alone (correctly streaming, not stuck) before the first tool_call delta.
@@ -6025,7 +6149,7 @@ class AIBridge:
             minimum=60,
             maximum=1800,
         )
-        # v6.1.7 (maintainer 2026-04-19): GLM-5.x + tool_calls has observed 6+ min
+        # v6.1.7 (maintainer): GLM-5.x + tool_calls has observed 6+ min
         # dead-stream behavior (zero chunks, zero reasoning). LiteLLM retries
         # don't help — the upstream just never produces bytes. Shorten the
         # prewrite cap for this specific provider so the fallback chain
@@ -6221,18 +6345,18 @@ class AIBridge:
         """
         if normalize_node_role(node_type) != "polisher":
             return 0
-        # v6.4.61-A (maintainer 2026-04-23): raised base 60→90 and multi-page
+        # v6.4.61-A (maintainer): raised base 60→90 and multi-page
         # 75→150. Observed Apr 23 16:07 session: polisher needs to read
         # 4-8 pages worth of deliverable before first edit; 75s is
         # insufficient especially on kimi's slower stream. This is the
         # "pre-write" cap — polisher still has other watchdogs downstream,
         # so loosening here only helps initial analysis not runaway.
-        # v6.7 (maintainer 2026-04-23 20:09): observed run_69495533723c — gpt-5.4
-        # on relay.cn hit the 90s cap before its reasoning chunk landed,
+        # v6.7 (maintainer 20:09): observed run_69495533723c — gpt-5.4
+        # on relay hit the 90s cap before its reasoning chunk landed,
         # so polisher failed on first call with zero writes. Raise base
         # 90→180 so slow-thinking models get one honest reasoning pass.
         # Multi-page 150→240.
-        # v6.7b (maintainer 2026-04-23 23:22): observed run_f90b35a5de35 polisher
+        # v6.7b (maintainer 23:22): observed run_f90b35a5de35 polisher
         # failed at 180s ("no real file write"). kimi streamed 38 chunks
         # then another 42 chunks (just tool_call acks) but never got to
         # write. Raise base 180→300, max 360→480 so kimi's first-write
@@ -6266,7 +6390,7 @@ class AIBridge:
         """
         Allow one quick inspection pass, but stop a polisher that keeps calling
         tools without producing a concrete file write.
-        v6.1.14f (maintainer 2026-04-20): bumped base 3→6 because polisher is now
+        v6.1.14f (maintainer): bumped base 3→6 because polisher is now
         patch-only (file_ops edit). It needs more read rounds to identify the
         target line before editing. It also has the "polish skipped" escape
         hatch so legitimate early termination won't count as failure.
@@ -6462,7 +6586,7 @@ class AIBridge:
             "no file write produced",
             "builder pre-write timeout",
             "builder first-write timeout",
-            # v6.4.9 (maintainer 2026-04-22): extend markers to cover the zero-files
+            # v6.4.9 (maintainer): extend markers to cover the zero-files
             # demote + unnamed-block + direct-text stall surfaces. Without these,
             # retries after those failures didn't flip into patch_context and
             # the builder kept trying direct_text again on the same goal text.
@@ -6476,12 +6600,12 @@ class AIBridge:
         return any(marker in retry_context for marker in missing_artifact_markers)
 
     def _experiment_force_tool_call_enabled(self) -> bool:
-        """v6.4.14 / v6.4.15 (maintainer 2026-04-22) — unified ON-switch for the
+        """v6.4.14 / v6.4.15 (maintainer) — unified ON-switch for the
         "short-burst tool_call only" experiment. Reads BOTH env and disk
         config so the user can flip it persistently via config.json without
         needing a shell export on every Evermind launch.
 
-        v6.4.16 (maintainer 2026-04-22): server.py constructs AIBridge.config
+        v6.4.16 (maintainer): server.py constructs AIBridge.config
         from a whitelist dict that does NOT include the experiment flag.
         Cache the resolved value per AIBridge instance so we only read the
         disk config once per session — the file is only ~7KB so the read
@@ -6532,7 +6656,7 @@ class AIBridge:
     ) -> bool:
         if normalize_node_role(node_type) != "builder":
             return False
-        # v6.4.14 (maintainer 2026-04-22): short-burst experiment switch.
+        # v6.4.14 (maintainer): short-burst experiment switch.
         # Toggleable via EITHER env var `EVERMIND_BUILDER_FORCE_TOOL_CALL=1`
         # OR `config.json.experiment_force_tool_call=true` (persistent across
         # Evermind restarts without needing shell export). When ON every
@@ -6567,7 +6691,7 @@ class AIBridge:
         provider = str((resolved or {}).get("provider") or "").strip().lower()
         model_lower = str(model_name or "").lower()
 
-        # v6.4.10 (maintainer 2026-04-22): known streaming-incompatible models.
+        # v6.4.10 (maintainer): known streaming-incompatible models.
         # GLM-5.x has a known tool_stream bug (sglang#11888) that corrupts
         # multi-file batches; other providers stream `<file path="...">`
         # blocks cleanly. Keep the explicit deny list narrow.
@@ -6603,7 +6727,7 @@ class AIBridge:
     ) -> bool:
         if normalize_node_role(node_type) != "builder":
             return False
-        # v6.4.14 (maintainer 2026-04-22): short-burst experiment switch (mirror
+        # v6.4.14 (maintainer): short-burst experiment switch (mirror
         # of the multifile guard above). When EVERMIND_BUILDER_FORCE_TOOL_CALL=1
         # every builder is forced through the multi-turn tool_call loop.
         if str(os.getenv("EVERMIND_BUILDER_FORCE_TOOL_CALL", "0")).strip().lower() in {"1", "true", "yes", "on"}:
@@ -6657,7 +6781,7 @@ class AIBridge:
         # lanes were already filtered by the support_lane_hint check above, so
         # any primary peer reaching this point is truly an HTML producer.
         #
-        # v6.3.7 (maintainer 2026-04-21) HOTFIX: Observed builder2 hanging for 15+
+        # v6.3.7 (maintainer) HOTFIX: Observed builder2 hanging for 15+
         # minutes because it fell through to tool_calls mode while builder1
         # ran direct_multifile. Root cause: the strict `is False` check on
         # `can_write_root_index` fails when the orchestrator omits that
@@ -6677,7 +6801,7 @@ class AIBridge:
             and not bool(node.get("builder_is_support_lane_node"))
             and not bool(node.get("builder_merger_like"))
         )
-        # v6.3.9 (maintainer 2026-04-21) HOTFIX: previous `is False` / None check
+        # v6.3.9 (maintainer) HOTFIX: previous `is False` / None check
         # treats ONLY peer builders (merger will own root) as direct_text
         # candidates. But in the 2-builder+merger topology observed this run,
         # ONE builder has `can_write_root_index=True` (the primary) and the
@@ -6743,7 +6867,7 @@ class AIBridge:
                 is_parallel_peer_with_merger,
             )
         if is_parallel_peer_with_merger:
-            # v6.1.3 (maintainer 2026-04-19): the kimi-only gate caused builder1
+            # v6.1.3 (maintainer): the kimi-only gate caused builder1
             # (tool_call) + builder2 (direct_text) asymmetry on glm-5.1 —
             # same peer class, same task intent, but task text slightly
             # differs ("game" vs "support subsystem") so task_classifier
@@ -6883,14 +7007,14 @@ class AIBridge:
 
     def _max_tool_iterations_for_node(self, node_type: str, node: Optional[Dict[str, Any]] = None) -> int:
         normalized_node_type = normalize_node_role(node_type)
-        # v6.1.3 (maintainer 2026-04-18): significantly raised caps across the
+        # v6.1.3 (maintainer): significantly raised caps across the
         # board. Previous values were forcing functions that killed
         # legitimate long-running nodes (analyst research, reviewer CoVe).
         # Trust the no-activity watchdog + content-activity detectors to
         # catch real deadlocks; arbitrary iteration counts hurt quality more
         # than they help. Max ceiling raised 30→100.
         if normalized_node_type == "builder":
-            # v6.7 (maintainer 2026-04-23): 60 → 15. builder.yaml mandates
+            # v6.7 (maintainer): 60 → 15. builder.yaml mandates
             # one-shot file_ops write (architect/editor contract v6.4.23)
             # plus at most 2-3 corrective edits. Observed V6.6 run: kimi
             # burned 6-10 tool-loop rounds × 200-300s each = 30-50min on
@@ -6901,39 +7025,39 @@ class AIBridge:
         elif normalized_node_type == "imagegen":
             value = self._read_int_env("EVERMIND_IMAGEGEN_MAX_TOOL_ITERS", 40, 2, 80)
         elif normalized_node_type == "polisher":
-            # v6.7 (maintainer 2026-04-23): 50 → 10. polisher.yaml V6.4.15
+            # v6.7 (maintainer): 50 → 10. polisher.yaml V6.4.15
             # mandates ≤1 read + ≤3 writes + ≤3 min wall clock. 50 was
             # a legacy ceiling that let kimi loop 20+ rounds of reads.
             # 10 covers a real polish path (list → read → 3 writes +
             # corrective edit) with comfortable margin.
             value = self._read_int_env("EVERMIND_POLISHER_MAX_TOOL_ITERS", 10, 3, 100)
         elif normalized_node_type in ("reviewer", "tester"):
-            # v6.4.59 (maintainer 2026-04-23): QA iter cap 50→15. Observed Apr 23
+            # v6.4.59 (maintainer): QA iter cap 50→15. Observed Apr 23
             # 14:45 session: reviewer burned 9 minutes on 12 tool_call
             # rounds across gpt-5.4. Most audits converge in 5-8 rounds;
             # 15 gives headroom but forces commitment. Still overridable
             # via EVERMIND_QA_MAX_TOOL_ITERS.
             value = self._read_int_env("EVERMIND_QA_MAX_TOOL_ITERS", 15, 4, 100)
         elif normalized_node_type == "analyst":
-            # v6.1.3 (maintainer 2026-04-19): analyst is a RESEARCH node, not a
+            # v6.1.3 (maintainer): analyst is a RESEARCH node, not a
             # build node. 2-3 source_fetch rounds then MUST synthesize a
             # final report. Raising to 30 (previous attempt) made it loop
             # for 14+ min without converging. 8 keeps enough headroom for a
             # real multi-repo research while forcing commitment.
-            # v6.3 (maintainer 2026-04-20): 8→6. Tutorial-search prompts keep asking
+            # v6.3 (maintainer): 8→6. Tutorial-search prompts keep asking
             # for one more source. Observed 10 fetches → hard-ceiling hang.
             # Cap + prompt "pick 3" convergence rule now carry the load.
             value = self._read_int_env("EVERMIND_ANALYST_MAX_TOOL_ITERS", 6, 2, 12)
         elif normalized_node_type == "planner":
             value = self._read_int_env("EVERMIND_PLANNER_MAX_TOOL_ITERS", 20, 1, 60)
         elif normalized_node_type == "merger":
-            # v6.7 (maintainer 2026-04-23): 12 → 6. merger.yaml V6.6 spec:
+            # v6.7 (maintainer): 12 → 6. merger.yaml V6.6 spec:
             # MERGE_NOOP default path (1 tool_call: file_ops list, done),
             # or ≤3 SEARCH/REPLACE blocks. Real merges need 2-4 rounds;
             # 6 gives headroom without letting kimi over-explore.
             value = self._read_int_env("EVERMIND_MERGER_MAX_TOOL_ITERS", 6, 2, 40)
         elif normalized_node_type == "patcher":
-            # v6.7 (maintainer 2026-04-23): 10 → 5. patcher.yaml V6.6 mandates
+            # v6.7 (maintainer): 10 → 5. patcher.yaml V6.6 mandates
             # ≤4 tool calls total (NO PREAMBLE + snapshot-based). Reviewer
             # rejection budget is now 1 (see orchestrator._configured_max_reviewer_rejections),
             # so patcher gets exactly one attempt — tighten round cap to
@@ -6942,7 +7066,7 @@ class AIBridge:
         elif normalized_node_type == "debugger":
             value = self._read_int_env("EVERMIND_DEBUGGER_MAX_TOOL_ITERS", 15, 3, 40)
         elif normalized_node_type == "deployer":
-            # v6.7d (maintainer 2026-04-24): tight deployer cap. Observed
+            # v6.7d (maintainer): tight deployer cap. Observed
             # run_3f5d8b0ebe1e: deployer ran 10+ tool_calls across 17 min
             # (kimi read every file to "verify"), then hit 603s watchdog
             # and retried — wasted 10 min. deployer.yaml now hard-limits
@@ -6982,9 +7106,9 @@ class AIBridge:
         )
 
     def _analyst_source_fetch_call_limit(self, node: Optional[Dict[str, Any]] = None) -> int:
-        # v6.3 (maintainer 2026-04-20): independent per-tool cap for source_fetch.
-        # v6.6 (maintainer 2026-04-23): cap raised 5→8.
-        # v7.27 (maintainer 2026-04-29): on retry, cap drops to 2 — observed
+        # v6.3 (maintainer): independent per-tool cap for source_fetch.
+        # v6.6 (maintainer): cap raised 5→8.
+        # v7.27 (maintainer): on retry, cap drops to 2 — observed
         # run_1e0b49c06d01 analyst spent 18min because it hit cap=8 on the
         # first attempt (~5min), got hard-gated for word-count, then on
         # retry redid 8 more source_fetch (~5min) instead of just expanding
@@ -6997,7 +7121,7 @@ class AIBridge:
         override = self._node_int_override(node, "source_fetch_call_limit", minimum=1, maximum=12)
         if override is not None:
             return override
-        # v7.46 (maintainer 2026-04-29): also accept `retry_attempt` because
+        # v7.46 (maintainer): also accept `retry_attempt` because
         # orchestrator.py line 27513 sets `agent_node["retry_attempt"]` —
         # the dual-key check failed silently so v7.27's retry-cap drop
         # (8→2) never fired in production. Read both keys; whichever is
@@ -7034,7 +7158,7 @@ class AIBridge:
         tool_call_stats: Dict[str, int],
         node: Optional[Dict[str, Any]] = None,
     ) -> bool:
-        # v6.3 (maintainer 2026-04-20): analyst-only source_fetch per-tool cap,
+        # v6.3 (maintainer): analyst-only source_fetch per-tool cap,
         # mirrors _should_block_browser_call. Pairs with the prompt-side
         # "pick 3, cap at 5" convergence rule so the LLM can't silently
         # ignore it.
@@ -7060,7 +7184,7 @@ class AIBridge:
         normalized_node_type = normalize_node_role(node_type)
         if normalized_node_type in ("reviewer", "tester"):
             port = str(os.getenv("PORT", "8765") or "8765").strip() or "8765"
-            # v6.4.19 (maintainer 2026-04-22): always emit a cache-buster so the
+            # v6.4.19 (maintainer): always emit a cache-buster so the
             # reviewer/tester browser bypasses the preview's 5s Cache-Control
             # window (see server.py:1162) AND any stale state left in the
             # Chromium page from a prior node. Without this, reviewer
@@ -8332,7 +8456,7 @@ class AIBridge:
                 ),
             )
         elif requested_pages >= 3:
-            # v6.4.12 (maintainer 2026-04-22): raise default tokens 12288 → 24576.
+            # v6.4.12 (maintainer): raise default tokens 12288 → 24576.
             # Observation 2026-04-22 15:00:
             #   - gpt-5.4 per-page HTML ≈ 25 KB = ~6300 tokens → 4 pages = 25K
             #   - kimi     per-page HTML ≈ 14.5 KB = ~3600 tokens → 4 pages = 14K
@@ -8376,7 +8500,7 @@ class AIBridge:
                 2,
             )
         if requested_pages >= 3:
-            # v6.4.12 (maintainer 2026-04-22): default 2 → 4 for 3-5 page builders.
+            # v6.4.12 (maintainer): default 2 → 4 for 3-5 page builders.
             # With `DIRECT_MULTIFILE_MAX_TOKENS` raised to 16384, a single
             # streaming call fits all 4 target pages for gpt-5.4 / kimi. The
             # previous default 2 meant gpt-5.4 had to do two sequential
@@ -9836,7 +9960,7 @@ class AIBridge:
         return text, continuation_count, cont_resp
 
     def _strip_builder_plan_block(self, text: str) -> str:
-        """v7.16 (maintainer 2026-04-28): strip leading <plan>...</plan> block
+        """v7.16 (maintainer): strip leading <plan>...</plan> block
         from builder output before HTML extraction. Per the new
         thinking_gate_v7_16 contract, builder MUST emit a ≤220-char plan
         block grounding tech / files / controls / risk before the actual
@@ -9957,7 +10081,7 @@ class AIBridge:
         if not files:
             stripped = text.strip()
             stripped_lower = stripped.lower()
-            # v6.1.3 (maintainer 2026-04-18 builder2 zero-files bug): peer builder
+            # v6.1.3 (maintainer builder2 zero-files bug): peer builder
             # in direct_text mode sometimes emits 58K chars with <!DOCTYPE> /
             # <html> but without an explicit <body> tag (HTML5 makes <body>
             # implicit; models occasionally skip it when dumping pure
@@ -10467,7 +10591,7 @@ class AIBridge:
         parsed_args: Any,
         result: Any,
     ) -> tuple:
-        """v6.1.12 (maintainer 2026-04-20): track consecutive file_ops edit failures.
+        """v6.1.12 (maintainer): track consecutive file_ops edit failures.
 
         Returns ``(total_failures, per_path_failures, path)`` so callers can
         decide whether to:
@@ -10690,6 +10814,19 @@ class AIBridge:
         return pages
 
     def _classify_task_type(self, prompt_source: str) -> str:
+        # v7.55 (maintainer): use frozen orchestrator-side classification
+        # if available. Without this, every node re-classifies its own prompt
+        # source — patcher gets a prompt containing reviewer's blocking_issues
+        # which often mentions "tool/editor/timer", flipping a clear website
+        # task to task_type=tool. Observed run 2026-04-30 18:14: deployer saw
+        # task_type=website but patcher saw task_type=tool. Frozen value lives
+        # at orchestrator._current_task_type (set in _execute_plan from the
+        # raw user goal) and is mirrored to AIBridge._frozen_task_type by
+        # orchestrator. Falls through to per-prompt classification when no
+        # freeze available (chat / direct ai_bridge use, tests).
+        _frozen = str(getattr(self, "_frozen_task_type", "") or "").strip()
+        if _frozen:
+            return _frozen
         source = str(prompt_source or "").strip()
         if not source:
             return "website"
@@ -11317,7 +11454,7 @@ class AIBridge:
                 action = str(event.get("action") or "").strip()
                 if action and action not in action_names:
                     action_names.append(action)
-            # v7.7 (maintainer 2026-04-28): inject the actual DOM-diff / console-
+            # v7.7 (maintainer): inject the actual DOM-diff / console-
             # error / failed-request evidence the reviewer needs to enforce
             # HARD GATES A and B from reviewer.yaml. Was leaking only action
             # names + capture_path — reviewer had to guess whether the click
@@ -12024,7 +12161,7 @@ class AIBridge:
         """Concatenate continuation, cutting any overlap where the model
         accidentally repeats the tail of the prior chunk.
 
-        v6.1.10 (maintainer 2026-04-19) — research found that GPT/Gemini
+        v6.1.10 (maintainer) — research found that GPT/Gemini
         semantic-continue mode causes 20-200 char repetition in 40-50% of
         code/JSON scenarios (OpenAI forum #806445). Even with our anchor
         prompt, models sometimes emit "...</body>" twice. This O(n) scan
@@ -12106,7 +12243,7 @@ class AIBridge:
         - Gemini — no prefill API
         - Grok (xAI) — no prefix field in docs
         - Together/Fireworks/Groq — OpenAI-compat, no prefix
-        - Relay gateways (private-relay/aigate/private-relay) — strip unknown fields
+        - Relay gateways (relay/aigate/relay) — strip unknown fields
         """
         return self._assistant_prefill_field(model_info, model_name) is not None
 
@@ -12129,7 +12266,7 @@ class AIBridge:
         base = str(info.get("api_base") or "").lower()
         routes_through_relay = any(
             tok in lid or tok in base
-            for tok in ("relay", "aigate", "private-relay", "relay", "llm.private-relay.example")
+            for tok in ("relay", "aigate", "relay", "relay", "llm.relay")
         )
         if routes_through_relay:
             return None
@@ -12262,7 +12399,7 @@ class AIBridge:
     ) -> Optional[List[Dict[str, Any]]]:
         """Stamp the last tool with cache_control:ephemeral for Anthropic.
 
-        v6.1.6 (maintainer 2026-04-19): Claims the 4th of 4 Anthropic cache
+        v6.1.6 (maintainer): Claims the 4th of 4 Anthropic cache
         breakpoints on the tools array. Tools are stable across turns in a
         single agent run so this is free compute savings (Cline
         src/core/api/providers/anthropic.ts:L125-L133 comments document this
@@ -12323,7 +12460,7 @@ class AIBridge:
             # which our sorted-set + cached-catalog fixes preserve.
             return messages
 
-        # v6.1.5 (maintainer 2026-04-19): upgrade to Cline v3.5.0 multi-breakpoint
+        # v6.1.5 (maintainer): upgrade to Cline v3.5.0 multi-breakpoint
         # pattern (src/api/providers/anthropic.ts:L37-L86). Keep system +
         # LAST TWO user messages tagged so multi-turn history still hits cache.
         # Anthropic caps at 4 cache_control breakpoints per request; we use 3
@@ -12611,10 +12748,10 @@ class AIBridge:
                     if isinstance(_m, dict) and _i != _last_assistant_idx:
                         _m.pop("reasoning_content", None)
 
-            # v6.1.3 → v6.1.14 (maintainer 2026-04-20): UNIVERSAL reasoning_content
-            # synthesis. History: private-relay/aigate first hit this 400 (first tool
+            # v6.1.3 → v6.1.14 (maintainer): UNIVERSAL reasoning_content
+            # synthesis. History: relay/aigate first hit this 400 (first tool
             # call round has no reasoning). Then kimi-k2.6-code-preview direct
-            # hit it too. maintainer asked to make this universal so ANY relay + ANY
+            # hit it too. User asked to make this universal so ANY relay + ANY
             # direct provider + ANY model works in deep mode.
             #
             # Contract: if we've decided to KEEP reasoning_content (i.e.
@@ -12623,7 +12760,7 @@ class AIBridge:
             # carry `reasoning_content`. Upstream providers (OpenAI-compat API)
             # either ignore the extra field or require it — never reject. So
             # synthesizing empty string is the safe default that prevents 400s
-            # across private-relay / aigate / openrouter / kimi direct / moonshot /
+            # across relay / aigate / openrouter / kimi direct / moonshot /
             # qwen / doubao / glm / minimax / any future relay.
             #
             # Exclusions already handled above:
@@ -12636,7 +12773,7 @@ class AIBridge:
                 and self._configured_thinking_depth() == "deep"
             )
             if _needs_empty_reasoning_synth:
-                # v6.1.14b (maintainer 2026-04-20): Kimi Coding endpoint validator
+                # v6.1.14b (maintainer): Kimi Coding endpoint validator
                 # treats `""` as "missing" — still 400s. Use a non-empty
                 # placeholder so any strict validator sees a truthy value.
                 # Plain text, no special syntax — safe for all OpenAI-compat
@@ -12733,7 +12870,7 @@ class AIBridge:
         # ── Layer 3: CONTEXT COLLAPSE — drop older message content ───
         keep_last = max(4, MAX_CONTEXT_KEEP_LAST_MESSAGES)
         compact_upto = max(2, len(prepared) - keep_last)
-        # v6.1.14d (maintainer 2026-04-20): preserve reasoning_content placeholder
+        # v6.1.14d (maintainer): preserve reasoning_content placeholder
         # through compaction — Kimi Coding / any strict thinking validator
         # treats "" as missing and 400s. Use the same placeholder the earlier
         # synth block uses so the contract is consistent.
@@ -12992,7 +13129,7 @@ class AIBridge:
         preset = AGENT_PRESETS.get(str(node_type or ""), AGENT_PRESETS.get(normalized_node_type, {}))
         base_prompt = node.get("prompt") or preset.get("instructions", "You are a helpful assistant.")
         prompt_source = str(input_data or node.get("goal") or node.get("task") or "").strip()
-        # v6.1.3 (maintainer 2026-04-19): lightweight fast-path for pure classifier
+        # v6.1.3 (maintainer): lightweight fast-path for pure classifier
         # nodes (router). Router outputs a 100-byte JSON — it does NOT need
         # skill directives, execution report templates, scratchpad rules or
         # strategy blocks. Industry norm (Kiro/Cline/Cursor) is <4KB router.
@@ -13003,8 +13140,8 @@ class AIBridge:
         # V4.3: Language-aware reports for ALL node types (was only 5).
         # Without this, builder/merger/tester execution_report sections
         # ignore the user's language setting.
-        # v6.1.14e (maintainer 2026-04-20): prefer the DEDICATED walkthrough_language
-        # setting, so maintainer can run the UI in English but still receive Chinese
+        # v6.1.14e (maintainer): prefer the DEDICATED walkthrough_language
+        # setting, so the maintainer can run the UI in English but still receive Chinese
         # analyst handoffs and builder copy (he reported walkthrough stuck in
         # English despite walkthrough_language=zh).
         _walk_lang = str(self.config.get("walkthrough_language", "") or "").strip().lower()
@@ -13017,7 +13154,7 @@ class AIBridge:
                 "Technical terms (function names, file paths, library names, variable names) should keep their English form.\n"
             )
             base_prompt = base_prompt + language_directive
-        # v6.1.14e (maintainer 2026-04-20): hard rule against Evermind brand
+        # v6.1.14e (maintainer): hard rule against Evermind brand
         # pollution. Observed real run where builder produced
         # `<title>Evermind — Unlock Your Mind's Potential</title>` while the
         # user's goal was a Chinese artisan/craft website. The model keyed
@@ -13037,6 +13174,86 @@ class AIBridge:
             )
         # v4.0: Inject universal execution protocol for all node types
         base_prompt = base_prompt + BASE_HARNESS_PREAMBLE
+
+        # v7.57 (maintainer): planner blueprint compliance for downstream
+        # code-producing nodes. Pro template's builder.depends_on does NOT
+        # include planner, so the detailed plan never reached builder. v7.57
+        # orchestrator side now injects "PLANNER BLUEPRINT" section at the
+        # top of user input — this system prompt addition tells the LLM to
+        # actually look at it and treat as authoritative.
+        if normalized_node_type in {"builder", "merger", "polisher", "patcher", "debugger"}:
+            base_prompt = base_prompt + (
+                "\n\n## PLANNER BLUEPRINT COMPLIANCE (v7.57 — non-negotiable)\n"
+                "The user message starts with a `=== v7.57 PLANNER BLUEPRINT ===` "
+                "section when planner ran upstream. Treat its contents as the "
+                "AUTHORITATIVE delivery contract:\n"
+                "- The `node_briefs.<your role>.brief` line is YOUR scope. Do not "
+                "  add features outside that brief; do not skip features inside it.\n"
+                "- The `acceptance_checks` array lists hard quality gates the "
+                "  orchestrator will run on your output. Plan your output to pass "
+                "  every check before you finish.\n"
+                "- The `builder_ownership` block tells primary vs support builder "
+                "  what files each owns and must NOT touch. Respect this strictly.\n"
+                "- If the analyst/uidesign/scribe handoff conflicts with the "
+                "  blueprint, FOLLOW THE BLUEPRINT. They are research, the "
+                "  blueprint is the contract.\n"
+                "- If the blueprint and the user's latest request directly "
+                "  conflict, follow the user — but state the conflict in your "
+                "  summary so reviewer/patcher knows.\n"
+            )
+        # v7.56 (maintainer): inject required-capability awareness for
+        # reviewer/patcher/polisher/debugger/analyst/uidesign too. Builder
+        # gets it via task_classifier.builder_system_prompt; the others need
+        # an explicit reminder so reviewer can flag missing capabilities as
+        # blocking_issues, patcher knows what big rewrites are required, and
+        # uidesign drafts a layout that accommodates the canvas/3D plane.
+        if normalized_node_type in {"reviewer", "patcher", "polisher", "debugger", "analyst", "uidesign", "scribe"}:
+            try:
+                import task_classifier as _tc
+                _caps = _tc.extract_required_capabilities(prompt_source)
+                if _caps:
+                    _cap_lines = ["", "## V7.56 USER-REQUESTED CAPABILITIES (must be present in delivery)"]
+                    for cap_name, contract in _caps:
+                        _cap_lines.append(f"- **{cap_name}**: {contract}")
+                    _cap_lines.append("")
+                    if normalized_node_type == "reviewer":
+                        _cap_lines.append(
+                            "If any of the above capabilities is MISSING from the artifact, "
+                            "you MUST emit a blocking_issue with severity=blocker and an "
+                            "estimated_lines_to_change ≥ 50 so the patcher uses round-2+ "
+                            "large-rewrite mode to add it."
+                        )
+                    elif normalized_node_type == "patcher":
+                        _cap_lines.append(
+                            "Reviewer's blocking_issues will reference these capabilities. "
+                            "If a capability is missing entirely (e.g. no <canvas> at all), "
+                            "use round-2+ large-rewrite mode (replace whole `<body>` or `<script>`) "
+                            "rather than failing with surgical SEARCH/REPLACE."
+                        )
+                    elif normalized_node_type in ("polisher", "debugger"):
+                        _cap_lines.append(
+                            "Do NOT remove or weaken any of these capabilities while polishing/debugging."
+                        )
+                    elif normalized_node_type == "analyst":
+                        _cap_lines.append(
+                            "Your handoff to builder MUST include implementation hints for each "
+                            "capability above (concrete library, code patterns, snippet links). "
+                            "A handoff that says only 'use Three.js' without code structure is insufficient."
+                        )
+                    elif normalized_node_type == "uidesign":
+                        _cap_lines.append(
+                            "Your Layout Blueprint MUST account for the canvas/3D/audio/etc. surface — "
+                            "tell the builder which section is rendered ON the WebGL/canvas plane and "
+                            "which sections sit ABOVE it (z-index/positioning)."
+                        )
+                    elif normalized_node_type == "scribe":
+                        _cap_lines.append(
+                            "Your content architecture MUST mark sections that depend on each "
+                            "capability (e.g. 'Hero section: WebGL 3D background, copy overlays it')."
+                        )
+                    base_prompt = base_prompt + "\n".join(_cap_lines) + "\n"
+            except Exception as _cap_err:
+                logger.debug("v7.56 capability injection failed: %s", _cap_err)
 
         # v5.2: Reviewer/Tester browser tool downgrade.
         # If the Playwright runtime is unavailable (user hasn't enabled visual
@@ -13092,12 +13309,12 @@ class AIBridge:
                     "sufficient to score functionality/completeness.\n"
                 )
 
-        # v6.1.14f (maintainer 2026-04-20): extend react-bits injection to polisher
+        # v6.1.14f (maintainer): extend react-bits injection to polisher
         # and merger. Originally only builder got this catalog. Polisher needs
         # it to know which animation/transition components to micro-edit into
         # the existing artifact. Merger needs it when consolidating peer
         # builder outputs that reference react-bits components.
-        # v6.4.11 (maintainer 2026-04-22): extend to uidesign and analyst. uidesign
+        # v6.4.11 (maintainer): extend to uidesign and analyst. uidesign
         # designs the brief → it must know which components builder can call
         # on ("use Magnet hover buttons here, Aurora background in hero, Bento
         # grid for features") instead of inventing visuals from scratch.
@@ -13230,6 +13447,32 @@ class AIBridge:
             except Exception:
                 # Keep execution resilient if classifier has an unexpected runtime issue.
                 pass
+
+            # v7.60 (maintainer): builder takes a SPECIAL prompt path
+            # via task_classifier.builder_system_prompt that WIPES whatever
+            # the standard _compose_system_prompt_raw flow had appended.
+            # The v7.57 PLANNER BLUEPRINT COMPLIANCE block was lost on this
+            # path. Re-append it here so builder gets the same direction
+            # as merger/polisher/patcher/debugger.
+            base_prompt = base_prompt + (
+                "\n\n## PLANNER BLUEPRINT COMPLIANCE (v7.57 — non-negotiable)\n"
+                "The user message starts with a `=== v7.57 PLANNER BLUEPRINT ===` "
+                "section when planner ran upstream. Treat its contents as the "
+                "AUTHORITATIVE delivery contract:\n"
+                "- The `node_briefs.<your role>.brief` line is YOUR scope. Do not "
+                "  add features outside that brief; do not skip features inside it.\n"
+                "- The `acceptance_checks` array lists hard quality gates the "
+                "  orchestrator will run on your output. Plan your output to pass "
+                "  every check before you finish.\n"
+                "- The `builder_ownership` block tells primary vs support builder "
+                "  what files each owns and must NOT touch. Respect this strictly.\n"
+                "- If the analyst/uidesign/scribe handoff conflicts with the "
+                "  blueprint, FOLLOW THE BLUEPRINT. They are research, the "
+                "  blueprint is the contract.\n"
+                "- If the blueprint and the user's latest request directly "
+                "  conflict, follow the user — but state the conflict in your "
+                "  summary so reviewer/patcher knows.\n"
+            )
 
         if repo_block:
             if skill_block:
@@ -13899,7 +14142,7 @@ class AIBridge:
             )
             or auto_builder_direct_multifile
         )
-        # v7.49 (maintainer 2026-04-30): merger fast-path. Observed
+        # v7.49 (maintainer): merger fast-path. Observed
         # run_679d34ebb1b3 — merger took 10+ min and was on track for 12+
         # because all 3 fast-path flags evaluated False:
         #   direct_multifile=False  (merger_like blocked at orchestrator gate)
@@ -13936,7 +14179,7 @@ class AIBridge:
                     model_name,
                 )
 
-        # v7.45 (maintainer 2026-04-29): peer-builder symmetry guarantee.
+        # v7.45 (maintainer): peer-builder symmetry guarantee.
         # Observed in run_284a84a171c8 (保卫萝卜 game): builder1 took 7:38,
         # builder2 took 14+ min before user cancelled. Reason: orchestrator
         # set `builder_delivery_mode=direct_multifile` only for builder1; the
@@ -13981,7 +14224,7 @@ class AIBridge:
                     str(node.get("node_key") or node.get("key") or "?"),
                     model_name,
                 )
-        # v6.1.11 (maintainer 2026-04-19): retry_patch_context used to kill
+        # v6.1.11 (maintainer): retry_patch_context used to kill
         # direct_multifile unconditionally. But for peer builders (can_root
         # =False) in multi-builder game runs, dropping back to tool_call
         # is exactly the path where JSON-args truncation kills us. If the
@@ -14028,7 +14271,7 @@ class AIBridge:
             auto_builder_direct_text = False
             retry_builder_direct_text = False
         force_builder_direct_text = (requested_builder_direct_text or auto_builder_direct_text) and safe_builder_direct_text
-        # v6.4.10 (maintainer 2026-04-22) — v6.4.9 safety net REVERTED.
+        # v6.4.10 (maintainer) — v6.4.9 safety net REVERTED.
         # The v6.4.9 safety net routed multi-target builders away from
         # direct_text to tool_call. Empirically (2026-04-22 run 14:00-14:14)
         # tool_call requires 8-15 file_ops.write turns per builder = 12-15min,
@@ -14104,6 +14347,14 @@ class AIBridge:
 
         max_retries = 2 if total_candidate_count > 1 else 3
         last_error = None
+        # v7.56b (maintainer): PROSE-ABORT loop-break counter.
+        # Observed run_e8a752a5ab7b: patcher hit PROSE-ABORT 4 times in a
+        # row (4101→4101→4096→574 chars), each time wasting ~30s + a retry
+        # slot, total burning the whole reviewer budget on a single LLM
+        # that just won't emit SEARCH/REPLACE format. After 2 consecutive
+        # prose-aborts, fall through to fail cleanly so reviewer multi-
+        # round can re-engage with fresh context instead of compounding.
+        _prose_abort_streak = 0
         result: Dict[str, Any] = {
             "success": False,
             "output": "",
@@ -14128,7 +14379,7 @@ class AIBridge:
             preflight_error = self._compatible_gateway_preflight_error(model_info)
             if preflight_error:
                 # P0 FIX 2026-04-04: Try fallback gateway bases before giving up.
-                # If relay.cn blocks gpt-5.4, try EVERMIND_OPENAI_FALLBACK_API_BASE.
+                # If relay blocks gpt-5.4, try EVERMIND_OPENAI_FALLBACK_API_BASE.
                 fallback_used = False
                 for fb_base in self._fallback_gateway_bases(model_info):
                     fb_info = {**model_info, "api_base": fb_base}
@@ -14186,6 +14437,40 @@ class AIBridge:
                             base_wait = 1.0  # V4.6: Was 2s — faster rate-limit retry
                         wait = base_wait + jitter
                     logger.info(f"Retry {attempt}/{max_retries} for {model_name}, waiting {wait:.1f}s...")
+                    # v7.55 (maintainer): drop cached httpx clients on
+                    # internal retry, mirroring v7.54's orchestrator-level
+                    # cleanup at hard timeout. Without this, scribe round 1
+                    # & 2 hung 4 min each because the cached OpenAI client
+                    # held a poisoned httpx connection from the prior
+                    # stream — observed run 2026-04-30 19:00-19:11 where
+                    # scribe took 11 min total (3×~4min) before retry 3
+                    # got a clean conn. Cheap (~80ms re-create per
+                    # endpoint) and runs only on retry path so happy-path
+                    # latency unaffected.
+                    _is_likely_hang = bool(last_error) and any(
+                        kw in str(last_error).lower()
+                        for kw in ("timeout", "timed out", "stream", "no content", "no activity", "stall")
+                    )
+                    if _is_likely_hang:
+                        try:
+                            _drop = getattr(self, "drop_openai_clients_after_hang", None)
+                            if callable(_drop):
+                                _drop(reason=f"litellm_retry_{attempt}_{model_name}")
+                        except Exception as _drop_err:
+                            logger.debug("retry-path client drop failed: %s", _drop_err)
+                    # v7.56b (maintainer): PROSE-ABORT loop-break.
+                    if bool(last_error) and "prose_before_tool_abort" in str(last_error).lower():
+                        _prose_abort_streak += 1
+                        if _prose_abort_streak >= 2:
+                            logger.warning(
+                                "[v7.56b] %s prose-abort streak=%d — breaking retry loop "
+                                "to avoid burning reviewer budget on a model that won't emit "
+                                "structured output. Letting orchestrator re-engage reviewer.",
+                                normalized_node_type, _prose_abort_streak,
+                            )
+                            break
+                    else:
+                        _prose_abort_streak = 0
                     if on_progress:
                         await self._emit_noncritical_progress(on_progress, {
                             "stage": "retrying",
@@ -14221,7 +14506,7 @@ class AIBridge:
                         )
                         result = None  # Fall through to standard routing below
                 elif (force_builder_direct_multifile or force_builder_direct_text) and (model_info.get("extra_headers") or custom_gateway):
-                    # v6.1.6 (maintainer 2026-04-19, Cursor Fast Apply pattern):
+                    # v6.1.6 (maintainer, Cursor Fast Apply pattern):
                     # allow a cheap "apply" model to handle direct text output
                     # while planning stays on the primary model. Opt-in via
                     # config.fast_write_model; no-op if unset.
@@ -14405,7 +14690,7 @@ class AIBridge:
                 except Exception:
                     pass
             _cli_enabled = _cli_settings.get("enabled", False) or is_cli_mode_enabled()
-            # v7.0 (maintainer 2026-04-24): expanded CLI coverage. Previous v6.x
+            # v7.0 (maintainer): expanded CLI coverage. Previous v6.x
             # limited CLI to only 5 "worker" nodes, arguing that orchestrator
             # nodes like planner/analyst need AGENT_PRESETS structured output.
             # In practice: Claude Code CLI / Codex CLI are fully capable of
@@ -14413,7 +14698,7 @@ class AIBridge:
             # asks for it (see prompt_templates/*.yaml — they already describe
             # the target schema). Excluding planner/analyst/uidesign/polisher/
             # patcher/deployer/scribe meant a CLI-mode user still paid the full
-            # relay cost for half the pipeline. Now every node whose
+            # third-party relay cost for half the pipeline. Now every node whose
             # output is *text* is CLI-eligible. Only true asset-plugin nodes
             # (imagegen/spritesheet/assetimport) stay on the backend plugin
             # path because they invoke non-LLM side effects.
@@ -14422,7 +14707,7 @@ class AIBridge:
                 "builder", "merger", "polisher", "reviewer", "patcher",
                 "tester", "debugger", "deployer", "router",
             }
-            # v7.1g (maintainer 2026-04-25): reviewer/tester NOW go through CLI too.
+            # v7.1g (maintainer): reviewer/tester NOW go through CLI too.
             # Previously these auto-routed to API because CLI subprocess had no
             # browser plugin. Since v7.1g registers playwright-mcp in all 3 CLI
             # configs (~/.claude/.mcp.json + ~/.gemini/settings.json + codex
@@ -14454,7 +14739,7 @@ class AIBridge:
                 _preferred_cli = _cli_settings.get("preferred_cli", "")
                 _preferred_model = _cli_settings.get("preferred_model", "")
                 _node_overrides = _cli_settings.get("node_cli_overrides", {})
-                # v7.1d (maintainer 2026-04-24): per-node-key override priority.
+                # v7.1d (maintainer): per-node-key override priority.
                 # Lookup order: node_key (e.g. "builder1") → node_type ("builder")
                 # → preferred. Lets ultra split frontend builders → gemini and
                 # backend builders → claude without changing the workflow.
@@ -14473,7 +14758,7 @@ class AIBridge:
                     _cli_choice = _override or _preferred_cli
                     _model_choice = _preferred_model
                 _workspace = (self.config or {}).get("workspace", "")
-                # v7.1c (maintainer 2026-04-24): ULTRA-aware CLI timeouts.
+                # v7.1c (maintainer): ULTRA-aware CLI timeouts.
                 # Was: builder 600s = 10min — fine for single HTML, way too
                 # tight for Claude CLI doing a full multi-file Vite/Electron
                 # project (it needs 30-60min to scaffold + write 20+ files).
@@ -14495,7 +14780,7 @@ class AIBridge:
                     "planner": 360 * _ULTRA_MULT,
                 }
                 _cli_timeout = _CLI_TIMEOUTS.get(node_type, 600 * _ULTRA_MULT)
-                # v7.0b (maintainer 2026-04-24): inject full system prompt from
+                # v7.0b (maintainer): inject full system prompt from
                 # AGENT_PRESETS / yaml template as a prefix to the task.
                 # Without this, claude/codex/gemini CLI treat the prompt as
                 # conversational and return terse answers (observed analyst
@@ -14515,7 +14800,7 @@ class AIBridge:
                         _SYS_CAP = 40_000
                         if len(_sys_prompt) > _SYS_CAP:
                             _sys_prompt = _sys_prompt[:_SYS_CAP] + "\n\n[SYSTEM PROMPT TRUNCATED TO 40KB]"
-                        # v7.1d (maintainer 2026-04-24): CLI-specialization header.
+                        # v7.1d (maintainer): CLI-specialization header.
                         # Each CLI has different strengths — tell the subprocess
                         # to lean into its native talents. This is the "1+1>2"
                         # layer: claude does backend auth hard, gemini does
@@ -14697,7 +14982,7 @@ class AIBridge:
                         node_type, str(_cli_exc)[:200],
                     )
                     _cli_result = None
-                # v7.1d (maintainer 2026-04-24): DUAL-DELIVERY RECOVERY.
+                # v7.1d (maintainer): DUAL-DELIVERY RECOVERY.
                 # If the CLI succeeded but returned a very short message
                 # (Claude often does deep tool work then says "Done.") try
                 # to recover the FULL deliverable from the file the prompt
@@ -14750,8 +15035,8 @@ class AIBridge:
                                 str(_rec_err)[:200],
                             )
 
-                # v7.1g (maintainer 2026-04-24): STRICT CLI MODE.
-                # Per maintainer's directive: "确保 cli 模式下调用的是 cli 不是
+                # v7.1g (maintainer): STRICT CLI MODE.
+                # Per the user's directive: "确保 cli 模式下调用的是 cli 不是
                 # 用户配置的 api". When cli_mode.enabled = true and the node
                 # is in _CLI_ALLOWED_NODES, the result MUST come from CLI.
                 # No silent API fallback (which would charge user's API key
@@ -14762,7 +15047,7 @@ class AIBridge:
                 #    to API path EARLIER (see _CLI_BROWSER_REQUIRED check)
                 #    via _cli_enabled = False — those won't reach this code.
                 # 2. Strict mode can be relaxed via cli_mode.allow_api_fallback.
-                # v7.1i (maintainer 2026-04-25): router/classifier 节点天生短输出
+                # v7.1i (maintainer): router/classifier 节点天生短输出
                 # （返回 "tool" / "code" 这种分类标签），100 字节阈值会把
                 # 它误判成 unusable → 整个 ultra plan 退化成 4 节点
                 # deterministic fallback。给短输出节点单独宽松阈值。
@@ -14776,9 +15061,9 @@ class AIBridge:
                 _allow_api_fallback = bool(
                     _cli_settings.get("allow_api_fallback", False)
                 ) if isinstance(_cli_settings, dict) else False
-                # v7.1i (maintainer 2026-04-25): REMOVED merger/patcher/polisher/deployer
+                # v7.1i (maintainer): REMOVED merger/patcher/polisher/deployer
                 # safety net. Previous behavior silently fell back to API for these
-                # 4 nodes — maintainer observed Kimi API being called during CLI runs and
+                # 4 nodes — the maintainer observed Kimi API being called during CLI runs and
                 # rejected this. Strict CLI mode must be **truly strict**: if CLI
                 # fails, fail the node and let the orchestrator retry with another
                 # CLI candidate (or surface the failure), never silently bill the
@@ -14856,7 +15141,7 @@ class AIBridge:
             logger.warning("CLI backend error, falling back to API: %s", str(_cli_err)[:200])
 
         candidate_models = self.resolve_node_model_candidates(node, model)
-        # v6.7d (maintainer 2026-04-24): hard-filter gpt-* / claude-* from the
+        # v6.7d (maintainer): hard-filter gpt-* / claude-* from the
         # candidate chain when kimi is available. The config scrubs + pre-
         # promotion already try to keep gpt out, but `_augment_candidates_
         # with_matching_relays` can re-add gpt-5.4 siblings of the selected
@@ -14974,7 +15259,7 @@ class AIBridge:
             result["output"] = masker.unmask(result["output"], restore_map)
             result["privacy_masked"] = len(restore_map)
 
-        # v6.1.10 (maintainer 2026-04-19): respect the DEDICATED walkthrough_language
+        # v6.1.10 (maintainer): respect the DEDICATED walkthrough_language
         # setting first — matches orchestrator._report_language() semantics.
         # Lets user run UI in English but receive Chinese walkthroughs (or
         # vice versa). Without this fix, walkthrough language flapped between
@@ -15427,7 +15712,7 @@ class AIBridge:
         # ── v7.3.4 outbound PII gate ────────────────────────────────────
         # system_prompt is composed AFTER input_data was already masked
         # (line 13895), but the system prompt itself can still embed user
-        # paths like /path/to/Desktop, OUTPUT_DIR, ALLOWED_DIRS.
+        # paths like $HOME/Desktop, OUTPUT_DIR, ALLOWED_DIRS.
         # Mask the system prompt now so absolutely nothing reaches the
         # relay with raw filesystem identity. The accumulated restore_map
         # is stored on `node` so the streaming-loop restores it in tool
@@ -15476,7 +15761,7 @@ class AIBridge:
         polisher_has_written_file = False
         builder_non_write_streak = 0
         polisher_non_write_streak = 0
-        # v6.7 (maintainer 2026-04-23): post-write full-rewrite loop guard.
+        # v6.7 (maintainer): post-write full-rewrite loop guard.
         # Existing post_write_read_loop guard only fires when non_write_streak
         # >= 4 after a write. If the model keeps emitting full <!DOCTYPE>…</html>
         # rewrites, every write resets non_write_streak to 0, so the guard
@@ -15508,10 +15793,19 @@ class AIBridge:
         # OpenAI auto-caches prefixes >1024 tokens; shuffled tool order breaks cache.
         # v5.8.6: defense-in-depth tool allowlist. router/planner/scribe YAML
         # already declare tools=[], but if any code path leaks tools through,
-        # the bloat (3-5K tokens) can trigger private-relay / relay routers
+        # the bloat (3-5K tokens) can trigger relay / third-party relay routers
         # into reasoning mode. uidesign (browser) + deployer (file_ops) keep
         # their tools because they legitimately use them.
-        _CHAT_ONLY_ROLES = {"router", "planner", "scribe"}
+        # v7.52 (maintainer): added "patcher" — yaml v7.51 sets tools=[]
+        # but harness_loader.py only forwards `instructions` to AGENT_PRESETS,
+        # so the yaml tools list never reaches this point. Without this set,
+        # NODE_DEFAULT_PLUGINS["patcher"]=["file_ops","shell"] gets reassembled
+        # below and kimi reflexively calls file_ops instead of emitting the
+        # SEARCH/REPLACE prose blocks v7.47 made primary. 0 edits across
+        # runs 633b/679d/618eb. Forcing empty tools = the only mechanism
+        # left for patcher to apply changes is SEARCH/REPLACE blocks, which
+        # the orchestrator's udiff_apply.py parses with fuzzy threshold 0.8.
+        _CHAT_ONLY_ROLES = {"router", "planner", "scribe", "patcher"}
         tools = []
         if plugins and normalized_node_type not in _CHAT_ONLY_ROLES:
             for p in plugins:
@@ -15639,12 +15933,12 @@ class AIBridge:
                     # F4-1: Request usage data in streaming mode for accurate token monitoring
                     "stream_options": {"include_usage": True},
                     # V4.3.1: Transport timeout uses 3x stall for first-chunk grace.
-                    # relay can have high cold-start latency; 2x was too tight.
+                    # third-party relay can have high cold-start latency; 2x was too tight.
                     "timeout": stall_timeout * 3,
                 }
                 if tls:
                     kwargs["tools"] = tls
-                    # v6.4.5 (maintainer 2026-04-21): force file_ops for write-
+                    # v6.4.5 (maintainer): force file_ops for write-
                     # critical nodes (builder/merger/patcher/polisher) instead
                     # of "auto" to stop model from streaming 60KB prose without
                     # calling the write tool. See _tool_choice_for_node.
@@ -15688,10 +15982,10 @@ class AIBridge:
                     # Opus review #2 P2: reviewer/tester added to serial list.
                     # Observed interleaving bug: parallel browser.observe + file_ops read
                     # from Kimi can emit mismatched tool_call_id on some relays
-                    # (v6.1 logs #ID 2026-04-17). Sequential is safe everywhere.
+                    # (v6.1 logs #relay 2026-04-17). Sequential is safe everywhere.
                     _serial_nodes = {"builder", "merger", "polisher", "debugger",
                                      "deployer", "reviewer", "tester"}
-                    # v6.3 (maintainer 2026-04-20): asset-producing nodes (imagegen/
+                    # v6.3 (maintainer): asset-producing nodes (imagegen/
                     # spritesheet/assetimport) benefit from parallel file_ops on
                     # kimi/openai-compat, but Anthropic's parallel write path is
                     # known-broken (claude-code issue #24131: only one write per
@@ -15784,7 +16078,7 @@ class AIBridge:
                             )
                         # V4.3.1: First-chunk grace window.
                         # v5.8.6 P1-1: when tools present AND first_content not seen,
-                        # use 6x grace instead of 3x — relay reasoning-mode
+                        # use 6x grace instead of 3x — relay/relay reasoning-mode
                         # models emit `delta.reasoning_content` for 30-60s before
                         # first `delta.content`. 3x = 90s was killing Kimi p99.
                         _has_tools = bool(tools) if 'tools' in locals() else False
@@ -15840,7 +16134,7 @@ class AIBridge:
                             if _clean_delta:
                                 content_parts.append(_clean_delta)
                             latest_stream_text = "".join(content_parts)
-                            # v6.4.7 (maintainer 2026-04-21) — PROSE-ABORT GUARD.
+                            # v6.4.7 (maintainer) — PROSE-ABORT GUARD.
                             # For write-critical nodes (builder/merger/
                             # polisher/patcher), if the model streams >8 KB
                             # of pure prose WITHOUT a tool_call and without
@@ -15855,18 +16149,49 @@ class AIBridge:
                                 and normalized_node_type in ("builder", "merger", "polisher", "patcher")
                             ):
                                 _prose_len = len(latest_stream_text)
-                                _lower_head = latest_stream_text[:1024].lower()
+                                # v7.53 (maintainer): scan the WHOLE stream
+                                # text (not just first 1024 chars) for valid
+                                # markers — patcher writes a 200-300 char prose
+                                # preamble before the SEARCH/REPLACE block, so
+                                # only checking the head misses legitimate
+                                # output. The check is cheap (already-allocated
+                                # string, single .lower() pass).
+                                _scan = latest_stream_text.lower()
                                 _has_html_marker = (
-                                    "<!doctype" in _lower_head
-                                    or "<html" in _lower_head
-                                    or "<body" in _lower_head
-                                    or "<style" in _lower_head
-                                    or "<script" in _lower_head
+                                    "<!doctype" in _scan
+                                    or "<html" in _scan
+                                    or "<body" in _scan
+                                    or "<style" in _scan
+                                    or "<script" in _scan
                                 )
-                                _abort_cap = int(os.getenv("EVERMIND_PROSE_ABORT_BYTES", "8192"))
-                                if _prose_len >= _abort_cap and not _has_html_marker:
+                                # v7.53 (maintainer): SEARCH/REPLACE block
+                                # head is a valid format marker for patcher —
+                                # don't ABORT if LLM has started emitting one.
+                                # `<<<<<<< search` is the lower-cased form of
+                                # `<<<<<<< SEARCH` from patcher.yaml v7.51.
+                                _has_sr_marker = (
+                                    "<<<<<<< search" in _scan
+                                    or ">>>>>>> replace" in _scan
+                                    or "\nfile:" in _scan
+                                )
+                                # v7.53 (maintainer): patcher gets a
+                                # tighter abort budget (4096 vs 8192). Without
+                                # SEARCH/REPLACE within 4 KB of prose the LLM
+                                # is almost certainly never going to emit one.
+                                # v7.59 (maintainer): 4096 → 1500 for
+                                # patcher. Observed run 14:50-14:56: kimi-k2.5
+                                # wrote 1760 chars 3 rounds in a row, all
+                                # finish=stop (LLM thought it was done) — so
+                                # PROSE-ABORT at 4096 NEVER triggered, the
+                                # short prose escaped detection naturally.
+                                # 1500 forces early cut — if no SR marker by
+                                # 1.5 KB, model isn't going to add one in
+                                # another 200 chars before hitting stop.
+                                _patcher_cap_default = "1500" if normalized_node_type == "patcher" else "8192"
+                                _abort_cap = int(os.getenv("EVERMIND_PROSE_ABORT_BYTES", _patcher_cap_default))
+                                if _prose_len >= _abort_cap and not _has_html_marker and not _has_sr_marker:
                                     logger.warning(
-                                        "PROSE-ABORT: node=%s model=%s streamed %d chars of prose without any tool_call or HTML marker — cutting stream to retry with tighter prompt.",
+                                        "PROSE-ABORT: node=%s model=%s streamed %d chars of prose without any tool_call or HTML/SR marker — cutting stream to retry with tighter prompt.",
                                         normalized_node_type, model_name, _prose_len,
                                     )
                                     try:
@@ -16160,7 +16485,7 @@ class AIBridge:
                             model_name, len(final_content) - len(_post_clean),
                         )
                         final_content = _post_clean
-                # v6.1.14c (maintainer 2026-04-20): mirror the litellm-wrapper fix —
+                # v6.1.14c (maintainer): mirror the litellm-wrapper fix —
                 # openai-compat streaming wrapper also must attach reasoning_content
                 # so downstream `_serialize_assistant_message` preserves it. Without
                 # this, uidesign / any kimi-direct node with tools gets 400
@@ -16359,7 +16684,7 @@ class AIBridge:
                 if custom_gateway:
                     initial_activity_timeout = self._gateway_initial_activity_timeout_for_node(node_type, input_data, model_info=model_info)
                 elif normalized_node_type not in ("builder", "polisher"):
-                    # v6.3 (maintainer 2026-04-20): non-build nodes on native kimi/claude
+                    # v6.3 (maintainer): non-build nodes on native kimi/claude
                     # also suffer relay TTFB hangs — observed run_85ef3b62fcd3
                     # where analyst's 10th LLM call silently ate 200s before
                     # hard-ceiling (no stream chunks arrived). Apply the same
@@ -16639,15 +16964,15 @@ class AIBridge:
             polisher_repair_prompts_sent = 0
             polisher_force_write_grace_available = False
             polisher_force_write_grace_used = False
-            # v6.4.58 (maintainer 2026-04-23) — PATCHER loop guard. Observed
+            # v6.4.58 (maintainer) — PATCHER loop guard. Observed
             # Apr 23 14:54-15:00: patcher spun 42+ tool iters in 6 min,
             # messages=80, all 0 content / no write. Tighter than
             # polisher since patcher tasks are small targeted edits.
             patcher_non_write_streak = 0
             patcher_has_written_file = False
-            # v6.4.59 (maintainer 2026-04-23): threshold 8→5. Patcher should
+            # v6.4.59 (maintainer): threshold 8→5. Patcher should
             # diff + apply within 3 tool calls; 5 is the pain threshold.
-            _PATCHER_LOOP_GUARD_THRESHOLD = 10  # v7.20a (maintainer 2026-04-28): 5→10. Read-heavy patchers (need to scan large root before fix) were tripping at 5 even when about to write. 10 keeps the runaway-loop guarantee while letting careful patchers locate the fix site.
+            _PATCHER_LOOP_GUARD_THRESHOLD = 10  # v7.20a (maintainer): 5→10. Read-heavy patchers (need to scan large root before fix) were tripping at 5 even when about to write. 10 keeps the runaway-loop guarantee while letting careful patchers locate the fix site.
             patcher_loop_guard_reason = ""
             qa_followup_count = 0
             analyst_followup_count = 0
@@ -16655,7 +16980,7 @@ class AIBridge:
             plain_text_force_reason = ""
             length_truncation_tool_count = 0  # Track consecutive finish=length with tool calls
             length_truncation_break_reason = ""  # v5.8.6: set when tool-loop breaks on 2+ truncations; forwarded to error field so retry triggers direct_text mode
-            # v6.1.12 (maintainer 2026-04-20): per-path file_ops edit-miss counter.
+            # v6.1.12 (maintainer): per-path file_ops edit-miss counter.
             # Protects merger/builder/polisher/debugger from edit-loop that
             # shrinks already-landed files.
             edit_failures_by_path: Dict[str, int] = {}
@@ -16793,7 +17118,7 @@ class AIBridge:
                         iteration,
                         length_truncation_tool_count,
                     )
-                    # v6.1.10 (maintainer 2026-04-19, research opencode#18108):
+                    # v6.1.10 (maintainer, research opencode#18108):
                     # tool_call arguments CANNOT be prefill-resumed on any
                     # provider (Kimi partial/OpenAI/Claude prefill all only
                     # apply to `content`, not `tool_calls`). So one truncation
@@ -16801,7 +17126,7 @@ class AIBridge:
                     # fit the payload for builder/merger that output big HTML
                     # — break immediately and let the orchestrator switch to
                     # direct_text on retry.
-                    # v6.1.10-fix (maintainer 2026-04-19): only apply the aggressive
+                    # v6.1.10-fix (maintainer): only apply the aggressive
                     # 1-truncation break to BUILDER/MERGER nodes. Non-builder
                     # nodes (assetimport/imagegen/spritesheet/etc) don't have
                     # a direct_text fallback path and were getting killed on
@@ -16878,7 +17203,7 @@ class AIBridge:
                             "Tool call loop detected; tool access revoked for this turn. "
                             "Output your final answer now without calling any more tools."
                         )
-                        # v6.4.20 (maintainer 2026-04-22) — patcher/merger recovery.
+                        # v6.4.20 (maintainer) — patcher/merger recovery.
                         # For patcher/merger the "revoke tools, emit prose" pattern
                         # produces 8192-char prose runs that get PROSE-ABORTed and
                         # then timeout at 138s (observed 19:47-19:49 run). The real
@@ -17075,7 +17400,7 @@ class AIBridge:
                             "artifacts": [],
                         }
                     elif fn_name == "source_fetch" and self._should_block_source_fetch_call(node_type, tool_call_stats, node=node):
-                        # v6.3 (maintainer 2026-04-20): enforce per-tool cap on source_fetch
+                        # v6.3 (maintainer): enforce per-tool cap on source_fetch
                         # for analyst so tutorial search can't diverge indefinitely.
                         _sf_limit = self._analyst_source_fetch_call_limit(node=node)
                         logger.info(
@@ -17121,7 +17446,7 @@ class AIBridge:
                                 node=node,
                             )
                     elif fn_name == "file_ops" and normalized_node_type == "patcher":
-                        # v7.32 (maintainer 2026-04-29): hard-block patcher's
+                        # v7.32 (maintainer): hard-block patcher's
                         # `action="read"`. The patcher.yaml v6.6 already
                         # FORBIDS reads — the file_snapshot is embedded in
                         # the system prompt — but kimi LLMs ignored that
@@ -17532,7 +17857,7 @@ class AIBridge:
                         })
                     break
 
-                # v6.1.14 (maintainer 2026-04-20): POST-WRITE read-loop guard.
+                # v6.1.14 (maintainer): POST-WRITE read-loop guard.
                 # Observed: builder writes once (written=True), then spends
                 # 15+ min cycling short tool_calls that never produce another
                 # write. Existing guard above only fires PRE-first-write
@@ -17559,7 +17884,7 @@ class AIBridge:
                         })
                     break
 
-                # v6.7 (maintainer 2026-04-23): POST-WRITE FULL-REWRITE guard.
+                # v6.7 (maintainer): POST-WRITE FULL-REWRITE guard.
                 # Companion to post_write_read_loop above. Covers the case
                 # where kimi keeps re-emitting full <!DOCTYPE>…</html> after
                 # the first legitimate write — each rewrite resets
@@ -17650,7 +17975,7 @@ class AIBridge:
                         })
                     break
 
-                # v6.4.58 (maintainer 2026-04-23) — PATCHER loop guard.
+                # v6.4.58 (maintainer) — PATCHER loop guard.
                 # Parallel to polisher: if patcher runs ≥ 8 consecutive
                 # non-write tool iterations (no deliverable .html/.js/.css
                 # written) AND has never written a file this turn,
@@ -17685,12 +18010,12 @@ class AIBridge:
                 usage_totals = self._merge_usage(usage_totals, getattr(response, "usage", None))
 
             if polisher_loop_guard_reason:
-                # v6.1.14f (maintainer 2026-04-20): treat polisher guard as SUCCESS
+                # v6.1.14f (maintainer): treat polisher guard as SUCCESS
                 # when builder's output was already high-quality. The polisher
                 # harness explicitly allows "polish skipped" as a valid outcome.
                 # Downstream (reviewer/tester/deployer) works on the builder's
                 # artifact unchanged — no harm, no retry.
-                # v6.1.14h (maintainer 2026-04-20): EXCEPTION — when polisher is
+                # v6.1.14h (maintainer): EXCEPTION — when polisher is
                 # doing a reviewer-rejection-patch retry, skipping is NOT OK.
                 # The reviewer flagged concrete issues; polisher MUST edit.
                 # Detect by checking input_data for the patch-mandate marker.
@@ -18047,7 +18372,7 @@ class AIBridge:
         stream_has_initial_activity = False
         custom_gateway = bool(self._custom_compatible_gateway_base(model_info))
         loop = asyncio.get_running_loop()
-        # v6.1.8 Wave A (maintainer 2026-04-19): Bolt.new-style incremental
+        # v6.1.8 Wave A (maintainer): Bolt.new-style incremental
         # stream-to-disk parser. When builder is in direct_text mode writing
         # index.html, flush on </script> / </style> / </html> boundaries so
         # the preview materializes ~5s in instead of ~170s. No-op when
@@ -18055,7 +18380,7 @@ class AIBridge:
         _stream_parser = self._maybe_make_incremental_stream_parser(
             node=node, node_type=node_type, direct_multifile=direct_multifile,
         )
-        # v6.1.9 Task 1 (maintainer 2026-04-19): emit stream_flush event to the
+        # v6.1.9 Task 1 (maintainer): emit stream_flush event to the
         # frontend when the parser materializes a boundary so the preview
         # iframe can reload from /api/preview/streaming/:task_id.
         if _stream_parser is not None and on_progress is not None:
@@ -18418,7 +18743,7 @@ class AIBridge:
             _is_builder_chat = _normalized_node_type_local == "builder"
 
             def _build_continue_turn(prior_content: str) -> Dict[str, str]:
-                """v6.1.10 (maintainer 2026-04-19): semantic anchor continue turn.
+                """v6.1.10 (maintainer): semantic anchor continue turn.
 
                 Community research (OpenAI forum + Aider #1492) confirms that
                 naive "please continue" prompts cause 20-200 char repetition
@@ -18455,7 +18780,7 @@ class AIBridge:
                 # One assistant turn carrying the FULL accumulated output.
                 # One user turn asking to continue. Prefix byte-stability =
                 # 100% prompt-cache hit on sys+user block (50% input discount).
-                # v6.1.8 Wave B (maintainer 2026-04-19): Aider-style assistant
+                # v6.1.8 Wave B (maintainer): Aider-style assistant
                 # prefill retry. For providers that support `prefix: true`
                 # (Anthropic, DeepSeek, some Kimi), send the partial content
                 # as the LAST message and the model continues writing the
@@ -18552,7 +18877,7 @@ class AIBridge:
                     str(self._response_finish_reason(response) or "").lower(),
                 )
             # v5.8.7: reasoning-mode fallback for non-streaming direct_multifile.
-            # Some relay stations (aigate, private-relay) silently route the deliverable
+            # Some relay stations (aigate, relay) silently route the deliverable
             # into `reasoning_content` when tools=[] are present. If `content` is
             # empty/short and reasoning carries a fenced HTML block, lift it over.
             if not self._builder_named_code_blocks(content):
@@ -19005,7 +19330,7 @@ class AIBridge:
             if _node_temp is not None:
                 kwargs["temperature"] = _node_temp
             if tools:
-                # v6.1.6 (maintainer 2026-04-19): claim the 4th Anthropic cache
+                # v6.1.6 (maintainer): claim the 4th Anthropic cache
                 # breakpoint on the tools array — static across the run, so
                 # free compute savings (Cline anthropic.ts:L125 pattern).
                 kwargs["tools"] = self._apply_tools_cache_breakpoint(tools, model=litellm_model)
@@ -19155,12 +19480,21 @@ class AIBridge:
 
         # Build OpenAI-format tools from plugins
         # V4.5: Sort by name for stable prefix caching (same as openai_compatible path)
+        # v7.52 (maintainer): mirror the _CHAT_ONLY_ROLES guard from
+        # _execute_openai_compatible — patcher must reach the LLM with zero
+        # tools so it cannot reflexively call file_ops and must emit
+        # SEARCH/REPLACE prose blocks (parsed by udiff_apply.py with fuzzy
+        # threshold 0.8). Without this, NODE_DEFAULT_PLUGINS["patcher"] =
+        # ["file_ops","shell"] gets reassembled here and v7.51 yaml tools=[]
+        # is silently bypassed for the litellm tool-calling path.
+        _CHAT_ONLY_ROLES_LITELLM = {"router", "planner", "scribe", "patcher"}
         tools = []
-        for p in plugins:
-            if p.name != "computer_use":
-                defn = p.get_tool_definition()
-                tools.append({"type": "function", "function": defn} if "function" not in defn else defn)
-        tools.sort(key=lambda t: str((t.get("function") or {}).get("name") or ""))
+        if normalized_node_type not in _CHAT_ONLY_ROLES_LITELLM:
+            for p in plugins:
+                if p.name != "computer_use":
+                    defn = p.get_tool_definition()
+                    tools.append({"type": "function", "function": defn} if "function" not in defn else defn)
+            tools.sort(key=lambda t: str((t.get("function") or {}).get("name") or ""))
         available_tool_names = self._tool_names_from_defs(tools)
         qa_browser_use_available = self._qa_browser_use_available(node_type, available_tool_names)
 
@@ -19425,15 +19759,15 @@ class AIBridge:
             polisher_repair_prompts_sent = 0
             polisher_force_write_grace_available = False
             polisher_force_write_grace_used = False
-            # v6.4.58 (maintainer 2026-04-23) — PATCHER loop guard. Observed
+            # v6.4.58 (maintainer) — PATCHER loop guard. Observed
             # Apr 23 14:54-15:00: patcher spun 42+ tool iters in 6 min,
             # messages=80, all 0 content / no write. Tighter than
             # polisher since patcher tasks are small targeted edits.
             patcher_non_write_streak = 0
             patcher_has_written_file = False
-            # v6.4.59 (maintainer 2026-04-23): threshold 8→5. Patcher should
+            # v6.4.59 (maintainer): threshold 8→5. Patcher should
             # diff + apply within 3 tool calls; 5 is the pain threshold.
-            _PATCHER_LOOP_GUARD_THRESHOLD = 10  # v7.20a (maintainer 2026-04-28): 5→10. Read-heavy patchers (need to scan large root before fix) were tripping at 5 even when about to write. 10 keeps the runaway-loop guarantee while letting careful patchers locate the fix site.
+            _PATCHER_LOOP_GUARD_THRESHOLD = 10  # v7.20a (maintainer): 5→10. Read-heavy patchers (need to scan large root before fix) were tripping at 5 even when about to write. 10 keeps the runaway-loop guarantee while letting careful patchers locate the fix site.
             patcher_loop_guard_reason = ""
             qa_followup_count = 0
             analyst_followup_count = 0
@@ -19583,7 +19917,7 @@ class AIBridge:
                             "artifacts": [],
                         }
                     elif fn_name == "source_fetch" and self._should_block_source_fetch_call(node_type, tool_call_stats, node=node):
-                        # v6.3 (maintainer 2026-04-20): enforce per-tool cap on source_fetch
+                        # v6.3 (maintainer): enforce per-tool cap on source_fetch
                         # for analyst so tutorial search can't diverge indefinitely.
                         _sf_limit = self._analyst_source_fetch_call_limit(node=node)
                         logger.info(
@@ -20184,7 +20518,7 @@ class AIBridge:
                     not builder_has_written_file
                     and not self._builder_text_output_has_persistable_html(output_text, input_data)
                 ):
-                    # v6.1.3 (maintainer 2026-04-19): only fail on narration if the
+                    # v6.1.3 (maintainer): only fail on narration if the
                     # builder truly hasn't written anything. If file_ops.write
                     # tool_call already landed a real artifact earlier in the
                     # loop, narration-only final assistant content is a natural
@@ -20474,7 +20808,7 @@ class AIBridge:
         if name == "browser" and force_visible and normalized_node_type in ("reviewer", "tester", "uidesign"):
             plugin_context["browser_headful"] = True
             plugin_context["browser_force_reason"] = f"{normalized_node_type}_visible_review"
-        # v7.11 (maintainer 2026-04-28): EXPLICITLY force headless for reviewer/
+        # v7.11 (maintainer): EXPLICITLY force headless for reviewer/
         # tester unless EVERMIND_REVIEWER_TESTER_FORCE_HEADFUL is set.
         # User reported "reviewer 打开外部浏览器之前还是会先打开内部浏览器" — the
         # second visible Chromium window confused them. Default operation
@@ -20583,7 +20917,7 @@ class AIBridge:
                     node_meta.get("builder_existing_artifact_patch_mode")
                     or node_meta.get("file_ops_require_existing_artifact_read")
                 )
-                # v6.1.3 (maintainer 2026-04-19): propagate patch-only mode flag to
+                # v6.1.3 (maintainer): propagate patch-only mode flag to
                 # file_ops so write actions get BLOCKED during reviewer-rejection
                 # retries. Forces builder to use action=edit only, preventing
                 # regression from full-file rewrites losing existing features.

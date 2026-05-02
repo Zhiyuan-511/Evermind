@@ -7,7 +7,7 @@ design guidance, structure blueprints, and quality criteria.
 
 import re
 from pathlib import Path
-from typing import Dict, List, NamedTuple
+from typing import Dict, List, NamedTuple, Tuple
 
 _TEMPLATE_DIR = Path(__file__).parent / "templates"
 
@@ -1443,7 +1443,7 @@ def classify(goal: str) -> TaskProfile:
     # Keep explicit product-shape tasks deterministic. A "website with animation"
     # is still a website and should keep the website delivery contract.
     #
-    # v7.2 (maintainer 2026-04-26) FIX — strong website-signal pre-empts presentation.
+    # v7.2 (maintainer) FIX — strong website-signal pre-empts presentation.
     # Observed run_d9d45558eb79: user goal "类似淘宝的购物网站...还有动画演示等等"
     # was misclassified as presentation/slides because presentation pattern
     # contains the bare word "演示". The single character "演示" should NOT
@@ -1482,6 +1482,214 @@ def classify(goal: str) -> TaskProfile:
 
     # Default to website
     return PROFILES["website"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# v7.56 (maintainer) — Required Capability Extraction
+# ─────────────────────────────────────────────────────────────────
+# When the user's brief explicitly demands a specific technical capability
+# (WebGL 3D, 2D canvas game, GLSL shader, Web Audio, physics engine, drag-
+# and-drop, real-time charts), the builder MUST actually implement it. The
+# task_classifier returns a flat task_type (website/game/...) which loses
+# this granularity — observed run_d36f804773d1 where "未来科技 3D 网站 +
+# WebGL 创意开发者" was classified as plain "website" (because of the v7.2
+# `_strong_website` early-return) and the builder shipped 8 plain HTML
+# files with ZERO Three.js / canvas / WebGLRenderer code.
+#
+# Solution: in addition to the existing task_type, scan the goal for
+# capability keywords and attach a list of "required_capabilities" that
+# downstream nodes (builder system prompt, reviewer brief, patcher) can
+# enforce as MUST-IMPLEMENT contracts.
+_CAPABILITY_PATTERNS: List[Tuple[str, "re.Pattern[str]", str]] = [
+    (
+        "webgl_3d",
+        re.compile(
+            r"(WebGL|three\.?js|3D\s*(网站|website|场景|scene|portfolio|页面|landing|体验|experience)|"
+            r"沉浸式|immersive|spatial\s*web|raymarching|"
+            r"GLSL|GPU\s*shader|fragment\s*shader|"
+            r"apple\s*vision|awwwards.*3D|3D\s*hero)",
+            re.IGNORECASE,
+        ),
+        # Mandatory implementation contract (v7.58 加强 z-index):
+        "WebGL/3D 强制实现：(1) 在 HTML <head> 加 `<script type=\"module\">` "
+        "或 `<script src=\"https://unpkg.com/three@0.160.0/build/three.min.js\">` "
+        "**同步加载 Three.js**（不允许 document.createElement('script') 动态注入 — "
+        "异步加载会让首屏看不到 3D + CDN 失败时永远空白）；(2) 必须 "
+        "new THREE.WebGLRenderer + new THREE.Scene + new THREE.PerspectiveCamera "
+        "+ 至少 1 个 Mesh 持续 animate()；(3) `<canvas>` 元素必现且 CSS 必须是 "
+        "`position:fixed; inset:0; width:100%; height:100%; z-index:-1; "
+        "pointer-events:none;` **(z-index:-1 否则页面内容会盖住 3D 背景，"
+        "用户看到的就是普通网站不是 3D 体验)**；(4) 加 fallback：如果 WebGL "
+        "context 创建失败，给 canvas 一个渐变 background 保底视觉；"
+        "(5) 物体颜色不能和页面 body 背景同色 — 3D 物体要清晰可辨。",
+    ),
+    (
+        "canvas_2d_game",
+        re.compile(
+            r"(2D\s*游戏|2D\s*game|canvas\s*game|网页\s*游戏|browser\s*game|html5\s*game|"
+            r"塔防|tower\s*defense|RPG|射击\s*游戏|shooter\s*game|平台\s*游戏|platformer|"
+            r"接金币|消消乐|match[- ]?3|解谜\s*游戏|puzzle\s*game|益智|"
+            r"贪吃蛇|snake\s*game|俄罗斯方块|tetris|马里奥|mario|"
+            r"保卫萝卜|2048|flappy|atari|arcade|"
+            r"赛车\s*游戏|racing\s*game|跳跃|jump\s*and\s*run)",
+            re.IGNORECASE,
+        ),
+        "2D Canvas 游戏强制实现：必须 `<canvas>` + 2D context + game loop "
+        "(requestAnimationFrame) + 玩家输入处理 (keydown/touch/click) + "
+        "至少 1 个角色精灵 + 碰撞检测 + 计分/失败/重启状态。不允许仅 DOM 拼接。",
+    ),
+    (
+        "canvas_art",
+        re.compile(
+            r"(canvas\s*(动画|animation|art|可视化|visualization)|"
+            r"粒子\s*系统|particle\s*system|生成艺术|generative\s*art|"
+            r"interactive\s*art|交互艺术|流体\s*模拟|fluid\s*sim)",
+            re.IGNORECASE,
+        ),
+        "Canvas 艺术强制实现：必须 `<canvas>` + requestAnimationFrame + "
+        "鼠标/触摸交互影响视觉 + ≥100 个粒子或 grid 单元持续动画。",
+    ),
+    (
+        "shader_glsl",
+        re.compile(
+            r"(shader|GLSL|fragment\s*shader|vertex\s*shader|"
+            r"shadertoy|raymarching|sdf|signed\s*distance\s*function)",
+            re.IGNORECASE,
+        ),
+        "Shader 强制实现：必须真 GLSL fragment shader 字符串（含 uniform "
+        "time/resolution + main() 输出 fragColor），通过 Three.js ShaderMaterial "
+        "或 raw WebGL pipeline。不允许用 CSS filter/SVG 模拟。",
+    ),
+    (
+        "audio_reactive",
+        re.compile(
+            r"(音频\s*可视化|audio\s*visual|music\s*visual|声音\s*可视化|"
+            r"web\s*audio\s*api|audiocontext|fft\s*分析|frequency\s*spectrum)",
+            re.IGNORECASE,
+        ),
+        "Audio 强制实现：必须 Web Audio API (AudioContext + AnalyserNode + "
+        "getByteFrequencyData) → 实时驱动可视化（频谱柱 / 波形 / 粒子动作）。"
+        "不允许 fake 随机数模拟。",
+    ),
+    (
+        "physics_engine",
+        re.compile(
+            r"(物理\s*引擎|physics\s*engine|碰撞\s*模拟|matter\.?js|cannon|rapier|ammo\.?js|"
+            r"重力\s*模拟|gravity\s*sim|刚体|rigid\s*body|布料|cloth\s*sim|verlet)",
+            re.IGNORECASE,
+        ),
+        "物理强制实现：matter.js / cannon-es / 自实现 Verlet 积分 + 碰撞检测 + "
+        "重力 + ≥5 个交互刚体。状态每帧更新，不允许预计算 keyframe。",
+    ),
+    (
+        "drag_drop",
+        re.compile(
+            r"(拖拽|drag\s*(and|&)?\s*drop|拖动\s*排序|sortable|kanban|"
+            r"看板|trello|notion[- ]?like|dnd)",
+            re.IGNORECASE,
+        ),
+        "拖拽强制实现：HTML5 native drag-and-drop API（dragstart/dragover/drop）"
+        "或 pointer events 完整链 + 视觉反馈 (drag-ghost, drop-indicator)。"
+        "不允许仅 CSS hover。",
+    ),
+    (
+        "real_time_chart",
+        re.compile(
+            r"(实时\s*图表|real-?time\s*chart|实时\s*数据|live\s*data|"
+            r"实时\s*仪表盘|realtime\s*dashboard|stock\s*tracker|股票|crypto\s*price)",
+            re.IGNORECASE,
+        ),
+        "实时图表强制实现：Chart.js / D3 / ECharts / canvas 自绘 + "
+        "setInterval/WebSocket/MOCK 数据流（≥1 秒一次） + 图表持续重绘（不能是静态 SVG）。",
+    ),
+    (
+        "video_embed",
+        re.compile(
+            r"(嵌入\s*视频|插入\s*视频|video\s*embed|video\s*background|"
+            r"video\s*hero|背景\s*视频|视频\s*背景|视频\s*hero|"
+            r"加\s*视频|有\s*视频|视频\s*插入|<video\b)",
+            re.IGNORECASE,
+        ),
+        "视频强制实现：至少 1 个 `<video>` 元素 + autoplay/muted/loop/playsinline "
+        "+ poster fallback。可使用 mp4/webm 远程 URL 或 picsum/unsplash 占位。",
+    ),
+    (
+        "scroll_driven",
+        re.compile(
+            r"(滚动\s*驱动|scroll[- ]?driven|scrollytelling|滚动\s*动画|"
+            r"GSAP\s*ScrollTrigger|scroll\s*timeline|视差\s*滚动|parallax)",
+            re.IGNORECASE,
+        ),
+        "滚动驱动强制实现：IntersectionObserver 或 CSS scroll-timeline 或 GSAP "
+        "ScrollTrigger + 至少 3 个 section 在不同滚动位置触发不同动画状态。"
+        "纯 CSS hover 不算。",
+    ),
+]
+
+
+def extract_required_capabilities(goal: str) -> List[Tuple[str, str]]:
+    """v7.56: scan the user goal for capability keywords and return a list
+    of (capability_name, mandatory_contract_text) tuples.
+
+    Multiple capabilities can match (e.g. "3D portfolio with audio
+    reactive shader" → webgl_3d + shader_glsl + audio_reactive). Builder
+    system prompt will inject ALL matching contracts so each must be
+    implemented.
+
+    Returns empty list when no specific capability is required (plain
+    website/dashboard/tool tasks). Existing builder prompt machinery
+    handles those.
+    """
+    text = (goal or "").strip()
+    if not text:
+        return []
+    # Same harness-block trim as classify() to avoid harness leakage
+    _separators = (
+        "\n=== REFERENCE", "\n=== HARNESS", "\n--- HARNESS",
+        "\nGAME/INTERACTIVE", "\n[BUILDER_", "\n=== BUILDER",
+    )
+    lower = text.lower()
+    cut = len(text)
+    for sep in _separators:
+        idx = lower.find(sep.lower())
+        if idx >= 0 and idx < cut:
+            cut = idx
+    text = text[:cut][:2000].strip() or (goal or "").strip()
+
+    matched: List[Tuple[str, str]] = []
+    for cap_name, pattern, contract in _CAPABILITY_PATTERNS:
+        if pattern.search(text):
+            matched.append((cap_name, contract))
+    return matched
+
+
+def required_capability_block(goal: str) -> str:
+    """v7.56: format extracted capabilities as a builder-system-prompt
+    enforcement block. Returns empty string when no capabilities matched.
+
+    Used by builder_system_prompt to append a "MUST IMPLEMENT" section
+    so the LLM cannot ship a plain website when the brief explicitly
+    asks for 3D / 2D game / shader etc.
+    """
+    caps = extract_required_capabilities(goal)
+    if not caps:
+        return ""
+    lines = [
+        "",
+        "=== V7.56 REQUIRED CAPABILITY ENFORCEMENT (mandatory) ===",
+        "用户的 brief 明确要求以下技术能力。本次产出必须每项都真实实现，"
+        "否则 reviewer 会直接打 0 分并触发 patcher / builder 重做。",
+        "",
+    ]
+    for i, (cap_name, contract) in enumerate(caps, 1):
+        lines.append(f"[{i}] {cap_name.upper()}: {contract}")
+    lines.append("")
+    lines.append("禁止用 \"占位\" 或 \"TODO\" 或 \"略\" 跳过任何一项；")
+    lines.append("禁止用 CSS 动画 / SVG 装饰冒充 WebGL/Canvas/Shader 真实现；")
+    lines.append("如果你最终交付的产物缺少任意一项能力，本次 build 将被记为失败。")
+    lines.append("=== END CAPABILITY ENFORCEMENT ===")
+    lines.append("")
+    return "\n".join(lines)
 
 
 def builder_system_prompt(goal: str, *, split_deferred: bool = False):
@@ -1569,6 +1777,12 @@ def builder_system_prompt(goal: str, *, split_deferred: bool = False):
     )
     foundation_block = gameplay_foundation_contract(goal)
 
+    # v7.56 (maintainer) FIX: capability block injected into the
+    # ACTUAL builder system prompt return paths (not builder_task_description).
+    # Both legacy and split_deferred paths must include it so the LLM cannot
+    # ship a plain website when brief explicitly asks for 3D/2D-game/shader/etc.
+    builder_capability_block = required_capability_block(goal)
+
     if not split_deferred:
         # Legacy path: everything in one system prompt string
         return (
@@ -1584,6 +1798,7 @@ def builder_system_prompt(goal: str, *, split_deferred: bool = False):
             f"{language_block}"
             f"Quality: {profile.quality}\n"
             f"{delivery_block}"
+            f"{builder_capability_block}"
         )
 
     # V4.6 SPEED: Split into compact system prompt + deferred user context.
@@ -1599,6 +1814,7 @@ def builder_system_prompt(goal: str, *, split_deferred: bool = False):
         f"{language_block}"
         f"Quality: {profile.quality}\n"
         f"{delivery_block}"
+        f"{builder_capability_block}"
     )
     deferred_parts = []
     if css_block:
@@ -1754,6 +1970,11 @@ def builder_task_description(goal: str) -> str:
             "DELIVERY CONTRACT: output one complete playable file from <!DOCTYPE html> to </html>; do not output only a patch fragment, CSS shell, or JS tail. "
             "After saving, briefly describe exactly what you built and what quality checks you satisfied."
         )
+
+    # v7.56 (maintainer) NOTE: capability enforcement is injected into
+    # the builder SYSTEM PROMPT (builder_system_prompt return paths), not
+    # here in the task description. Task description stays short to avoid
+    # double-injection and prompt bloat.
 
     return (
         f"{scope_line}"

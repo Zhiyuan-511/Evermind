@@ -5,7 +5,7 @@ Usage::
 
     python3 bench/diagnose_direct_text.py "3D 第三人称射击游戏，有武器系统和关卡"
 
-Reports which gate conditions fire/miss so maintainer can tell why his task
+Reports which gate conditions fire/miss so the maintainer can tell why his task
 ended up in tool_call mode instead of the faster direct_text path.
 """
 from __future__ import annotations

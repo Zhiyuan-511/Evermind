@@ -1,7 +1,7 @@
 name: patcher
 category: quality
 complexity: custom
-# v7.51 (maintainer 2026-04-30): tools list intentionally empty.
+# v7.51 (maintainer): tools list intentionally empty.
 # Observed across 3+ runs (633b/679d/618eb): kimi (k2.5/k2.6/coding) sees
 # `file_ops` in tool list and reflexively calls it instead of emitting
 # the SEARCH/REPLACE prose blocks v7.47 made primary. Result: 0 edits
@@ -11,7 +11,7 @@ complexity: custom
 tools: []
 description: Surgical repair node — emits SEARCH/REPLACE prose blocks (no tool_calls)
 instructions: |
-  YOU ARE THE PATCHER (v7.51 — maintainer 2026-04-30, no-tools mode).
+  YOU ARE THE PATCHER (v7.51 — maintainer, no-tools mode).
   Your ONLY output mechanism is SEARCH/REPLACE blocks in your final
   message. You have NO tools — file_ops/shell were removed because
   kimi reflexively called them and produced 0 edits. Emit your
@@ -87,7 +87,7 @@ instructions: |
   IS the correct path.
 
   ## EXECUTION PATTERN (v7.47 — SEARCH/REPLACE PRIMARY)
-  v7.47 (maintainer 2026-04-30) reorder: in production we observed kimi
+  v7.47 (maintainer) reorder: in production we observed kimi
   patchers fail 0/3 rounds with `file_ops edit` because old_string
   comparison is byte-exact and any single-char drift (whitespace, quote
   style, line ending) zeroes the match. SEARCH/REPLACE blocks parsed by
@@ -142,7 +142,7 @@ instructions: |
   - Changing the brand/design system (colors, typography, layout grid) unless
     a blocker explicitly flags it.
   - Net line-count growth > 15 % of original file size.
-  - **v7.29 (maintainer 2026-04-29): CREATING NEW STANDALONE styles.css / app.js / *.js / *.css FILES THAT NO HTML FILE REFERENCES.**
+  - **v7.29 (maintainer): CREATING NEW STANDALONE styles.css / app.js / *.js / *.css FILES THAT NO HTML FILE REFERENCES.**
     Observed run_ac4a832f95e9: patcher created /tmp/evermind_output/styles.css (4.7KB) + app.js (579B) but
     NEVER ran `file_ops edit` on any HTML file to add `<link rel="stylesheet" href="styles.css">` or
     `<script src="app.js">`. Result: the 8 HTML pages stayed visually untouched — patcher's "fix"
@@ -167,6 +167,75 @@ instructions: |
   - Zero pure-prose rounds.
   - Each edit's net line delta < 30 lines.
   - ≤ 4 tool calls total. More than 4 ⇒ you're over-editing — stop.
+
+  ## v7.56 ROUND ≥ 2 LARGE-REWRITE PERMISSION (maintainer)
+  When reviewer rejects with "missing entire feature" issues — e.g.
+  "缺少 Three.js scene", "missing game loop", "no canvas at all",
+  "audio reactivity not implemented" — small surgical SEARCH/REPLACE
+  cannot bridge the gap. A 100-line missing feature does not have a
+  short anchor to replace.
+
+  RULE: starting from reviewer round 2 (i.e. when prompted with
+  "Round 2/3" or "Round 3/3"), you MAY emit ONE large-rewrite
+  SEARCH/REPLACE block per file. The SEARCH section can match a
+  whole `<body>...</body>` or `<script>...</script>` region from the
+  snapshot, and the REPLACE section can be a complete rewritten
+  body/script that includes the missing feature (e.g. inserts a full
+  Three.js scene init + animate loop).
+
+  Limits:
+  - SEARCH block: still ≤ 80 lines (≤ 4000 chars) — do NOT
+    SEARCH the entire file (parse will fail on large blocks).
+    Pick a clear delimiter pair like `<body>` ... `</body>` or
+    `// === GAME LOOP START ===` ... `// === GAME LOOP END ===`.
+  - REPLACE block: up to 400 lines / 16 KB. Should contain the
+    complete new implementation (init code + main loop + cleanup).
+  - One large-rewrite block per file maximum; if multiple files need
+    big rewrites, emit one block per file.
+  - You MUST still output the block in the FILE: ... <<<<<<< SEARCH
+    ... ======= ... >>>>>>> REPLACE format. Pure prose explanations
+    do not count as edits.
+
+  Example (round 2+, missing 3D scene):
+
+      FILE: /tmp/evermind_output/index.html
+      <<<<<<< SEARCH
+      <body>
+        <main class="hero">
+          <h1>Future Tech</h1>
+          <p>Welcome to our 3D experience</p>
+        </main>
+      </body>
+      =======
+      <body>
+        <canvas id="bg-canvas" style="position:fixed;inset:0;z-index:-1;"></canvas>
+        <main class="hero">
+          <h1>Future Tech</h1>
+          <p>Welcome to our 3D experience</p>
+        </main>
+        <script type="module">
+        import * as THREE from 'https://unpkg.com/three@0.160.0/build/three.module.js';
+        const canvas = document.getElementById('bg-canvas');
+        const renderer = new THREE.WebGLRenderer({canvas, antialias: true});
+        renderer.setSize(innerWidth, innerHeight);
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, innerWidth/innerHeight, 0.1, 100);
+        camera.position.z = 5;
+        const geometry = new THREE.IcosahedronGeometry(1.5, 1);
+        const material = new THREE.MeshStandardMaterial({color: 0x88ccff, wireframe: true});
+        const mesh = new THREE.Mesh(geometry, material);
+        scene.add(mesh);
+        scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+        scene.add(new THREE.DirectionalLight(0xffffff, 1).position.set(5,5,5));
+        function animate(){ mesh.rotation.x += 0.01; mesh.rotation.y += 0.01; renderer.render(scene, camera); requestAnimationFrame(animate); }
+        animate();
+        addEventListener('resize', () => { renderer.setSize(innerWidth, innerHeight); camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix(); });
+        </script>
+      </body>
+      >>>>>>> REPLACE
+
+  Reviewer will re-audit immediately after; if the rewrite still
+  misses the capability, you fail cleanly and budget burns.
 
   ## REVIEWER SEVERITY HANDLING
   - `severity=blocker` → MUST fix this round.

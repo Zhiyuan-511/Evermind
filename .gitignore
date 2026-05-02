@@ -78,3 +78,6 @@ latest-mac.yml
 # Electron-builder local output
 electron/dist/
 electron/out/
+
+# Next.js standalone build artifact (含个人路径，不该 push)
+electron/.packaged/

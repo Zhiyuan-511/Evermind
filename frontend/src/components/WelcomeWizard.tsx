@@ -1,6 +1,6 @@
 'use client';
 /**
- * Evermind Welcome Wizard (v6.2 — maintainer 2026-04-20)
+ * Evermind Welcome Wizard (v6.2 — maintainer)
  *
  * First-run onboarding shown when localStorage.evermind_onboarded_v62 is unset.
  * 2 branches, any skip button exits:
@@ -21,7 +21,7 @@ interface WelcomeWizardProps {
     onSkip: () => void;
 }
 
-// v6.2b (maintainer 2026-04-20): bumped so users who saw the prior demo-key
+// v6.2b (maintainer): bumped so users who saw the prior demo-key
 // variant see the new template-based wizard again. Bump further if future
 // wizard content changes materially.
 const STORAGE_KEY = 'evermind_onboarded_v62b';

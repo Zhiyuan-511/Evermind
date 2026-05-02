@@ -130,7 +130,7 @@ CANONICAL_NODE_KEY_TO_AGENT: Dict[str, str] = {
     "builder": "builder",
     "builder1": "builder",
     "builder2": "builder",
-    # v7.40 (maintainer 2026-04-29): merger has its OWN agent_preset in
+    # v7.40 (maintainer): merger has its OWN agent_preset in
     # ai_bridge.py (not a builder variant). Mapping to "builder" was wrong
     # — it caused custom canvas runs to spawn a misnamed subtask
     # (`agent=builder node=merger`) that took the builder code path
@@ -398,7 +398,7 @@ class SubTask:
     # v6.1.9: set by salvage-loop rescue to force direct_text on next retry
     builder_force_direct_text: bool = False
     _direct_text_salvage_rescue_attempted: bool = False
-    # v6.4.26 (maintainer 2026-04-22) — declarative quality gates. Planner
+    # v6.4.26 (maintainer) — declarative quality gates. Planner
     # populates this from `node_briefs[N].acceptance_checks` in plan.json;
     # analyst may augment via `<build_checks node=N>` in its output.
     # Validator uses Orchestrator._quality_check_registry() to interpret
@@ -443,7 +443,7 @@ class Orchestrator:
         return BUILDER_DIRECT_MULTIFILE_MARKER.lower() in text.lower()
 
     def _experiment_force_tool_call_via_bridge(self) -> bool:
-        """v6.4.17b (maintainer 2026-04-22) — check whether the short-burst
+        """v6.4.17b (maintainer) — check whether the short-burst
         tool_call experiment is enabled. Delegates to AIBridge so both
         `orchestrator._builder_execution_*_mode` and
         `ai_bridge._builder_should_auto_direct_*` read the same source of
@@ -465,7 +465,7 @@ class Orchestrator:
         subtask: Optional[SubTask],
         model: str,
     ) -> bool:
-        # v6.4.17b (maintainer 2026-04-22) — honour the force-tool-call experiment
+        # v6.4.17b (maintainer) — honour the force-tool-call experiment
         # at the orchestrator gate too. Previously this check only lived in
         # `ai_bridge._builder_should_auto_direct_*`, so the orchestrator
         # still set `agent_node["builder_delivery_mode"] = "direct_multifile"`
@@ -479,12 +479,12 @@ class Orchestrator:
             return True
         if not plan or not subtask or getattr(subtask, "agent_type", "") != "builder":
             return False
-        # v6.1.7 (maintainer 2026-04-19): peer builders in tool_call mode spend
+        # v6.1.7 (maintainer): peer builders in tool_call mode spend
         # 170-220s per turn streaming HTML through JSON-escaped tool_call
         # arguments. Route peer builders (can't write root index) to
         # direct_multifile — same model streams raw files via <file> tags
         # at 2-3x the throughput of tool_call streaming.
-        # MODEL-AGNOSTIC (maintainer 2026-04-19 #2): check capability, not name.
+        # MODEL-AGNOSTIC (maintainer #2): check capability, not name.
         # Any streaming-capable chat model benefits from direct_multifile;
         # only exclude models that genuinely can't stream tool results well
         # (e.g. GLM-5.x which has the tool_stream incompatibility).
@@ -508,9 +508,9 @@ class Orchestrator:
         # `assigned_targets` is often empty — planner lets the model decide
         # which support files to emit. That's exactly what direct_multifile
         # handles best (model emits multiple <file path=...> blocks).
-        # v6.1.10 (maintainer 2026-04-19): add diagnostic log so we can see WHY
+        # v6.1.10 (maintainer): add diagnostic log so we can see WHY
         # this gate returns False in live runs despite source returning True.
-        # v6.3.9 (maintainer 2026-04-21) HOTFIX: drop the `not can_root` guard.
+        # v6.3.9 (maintainer) HOTFIX: drop the `not can_root` guard.
         # Observed in parallel-builder + merger topology: builder1
         # (can_root=False, peer) correctly got direct_multifile=True and
         # finished in ~280s, but builder2 (can_root=True, primary) fell
@@ -526,7 +526,7 @@ class Orchestrator:
         _primary_tool_calls = str(
             os.getenv("EVERMIND_BUILDER_PRIMARY_TOOL_CALLS", "0") or "0"
         ).strip().lower() in ("1", "true", "yes", "on")
-        # v6.3.11 (maintainer 2026-04-21) HOTFIX: v6.3.9 inadvertently dragged
+        # v6.3.11 (maintainer) HOTFIX: v6.3.9 inadvertently dragged
         # merger into direct_multifile because "agent_type=builder + is_game
         # + supports_stream" matched every merger-like subtask. Merger
         # produces a single reconciled index.html, not a batch of files —
@@ -541,7 +541,7 @@ class Orchestrator:
             peer_eligible = (not can_root and supports_stream_mode and is_game)
         else:
             peer_eligible = (supports_stream_mode and is_game)
-        # v6.1.14 (maintainer 2026-04-20): dedup the log — prior version fired every
+        # v6.1.14 (maintainer): dedup the log — prior version fired every
         # 5-7s during long subtasks, flooding the log with identical lines.
         # Stash last signature on the subtask; emit only on change.
         _gate_sig = (
@@ -569,7 +569,7 @@ class Orchestrator:
         )
         if override_targets:
             return True
-        # v6.4.10 (maintainer 2026-04-22): any streaming-capable model with 2+
+        # v6.4.10 (maintainer): any streaming-capable model with 2+
         # assigned HTML targets benefits from direct_multifile. Previously
         # this was "kimi-only" for backward compat, which pushed gpt-5.x /
         # claude / deepseek / qwen multi-page builders through the tool_call
@@ -588,7 +588,7 @@ class Orchestrator:
     ) -> Optional[str]:
         """Map (source, target) → built-in processor name.
 
-        v6.1.5 (maintainer 2026-04-19): follows ChatDev payload_processor pattern
+        v6.1.5 (maintainer): follows ChatDev payload_processor pattern
         to slim handoff per edge semantics. Keeping full packet as the safe
         default; only strip when the target demonstrably doesn't need it.
         """
@@ -614,7 +614,7 @@ class Orchestrator:
         plan: Optional[Plan],
         subtask: Optional[SubTask],
     ) -> bool:
-        # v6.4.17b (maintainer 2026-04-22) — experiment_force_tool_call also kills
+        # v6.4.17b (maintainer) — experiment_force_tool_call also kills
         # the orchestrator's direct_text gate.
         if self._experiment_force_tool_call_via_bridge():
             return False
@@ -626,7 +626,7 @@ class Orchestrator:
             return False
         if self._builder_direct_multifile_mode(subtask):
             return False
-        # v6.1.9 (maintainer 2026-04-19): force-override for debugging / emergency.
+        # v6.1.9 (maintainer): force-override for debugging / emergency.
         # (a) EVERMIND_BUILDER_FORCE_DIRECT_TEXT=1 env var — affects all builders
         # (b) subtask.builder_force_direct_text — set by salvage-loop rescue
         # Both bypass the can_write_root_index gate. Merger still excluded above.
@@ -654,7 +654,7 @@ class Orchestrator:
             return True
         if task_classifier.game_direct_text_delivery_mode(goal):
             return True
-        # v6.1.5 (maintainer 2026-04-19): EXPAND direct_text coverage — research
+        # v6.1.5 (maintainer): EXPAND direct_text coverage — research
         # shows Smol Developer / Bolt.diy go single-pass stream whenever the
         # planner task brief is detailed enough to skip exploration. Criteria:
         # description ≥ 200 chars AND lists ≥2 concrete modules/systems.
@@ -843,7 +843,7 @@ class Orchestrator:
                 getattr(subtask, "description", ""),
             )
         ).lower()
-        # v6.1.14 (maintainer 2026-04-20): TYPE-AGNOSTIC fast path — if the previous
+        # v6.1.14 (maintainer): TYPE-AGNOSTIC fast path — if the previous
         # attempt was demoted purely because it emitted HTML via direct_text
         # stream instead of file_ops write, the retry MUST stay in direct_text
         # mode. Otherwise the retry flips to tool_call which on kimi-k2.5 cost
@@ -919,7 +919,7 @@ class Orchestrator:
         has_html_shape = any(marker in lower for marker in html_markers) or len(compact) >= 400
         if not has_html_shape:
             return False
-        # v6.4.9 (maintainer 2026-04-22): for multi-target builders running in
+        # v6.4.9 (maintainer): for multi-target builders running in
         # direct_text mode, require an explicitly named HTML block before
         # calling the stream "meaningful". Without a filename hint the
         # extractor drops the output as an unnamed block, so stream bytes
@@ -1113,7 +1113,7 @@ class Orchestrator:
         return required_domains
 
     def _imagegen_core_asset_filenames(self, goal: str = "") -> List[str]:
-        # v6.3.10 (maintainer 2026-04-21): REVERT v6.3 logic — the Python template
+        # v6.3.10 (maintainer): REVERT v6.3 logic — the Python template
         # synthesis is free (~0ms per file), so there is no reason to skip
         # SVG sheets just because no image-gen API key is configured. In fact
         # users EXPLICITLY want SVG placeholders when they run without a real
@@ -1143,13 +1143,13 @@ class Orchestrator:
 
     def _imagegen_companion_asset_filenames(self, goal: str = "") -> List[str]:
         if not self._goal_needs_richer_imagegen_asset_pack(goal):
-            # v6.3.10 (maintainer 2026-04-21): previously returned [] here, which
+            # v6.3.10 (maintainer): previously returned [] here, which
             # meant non-richer goals got ZERO companion files. But Builder
             # still expects visuals.css + sprites_visual.svg + visual_config
             # as deterministic code assets. Always emit the code-asset trio
             # so downstream is never starved.
             return ["visuals.css", "visual_config.json", "sprites_visual.svg"]
-        # v6.3 (maintainer 2026-04-20): in degraded mode (no image-gen API), skip
+        # v6.3 (maintainer): in degraded mode (no image-gen API), skip
         # the deep-dive docs — orthographic prompts and texture directions are
         # only useful when a real image backend will consume them. The two
         # code-asset fallbacks (visuals.css, visual_config.json) stay because
@@ -1159,7 +1159,7 @@ class Orchestrator:
         except Exception:
             has_backend = False
         if not has_backend:
-            # v6.3.10 (maintainer 2026-04-21): always include sprites_visual.svg
+            # v6.3.10 (maintainer): always include sprites_visual.svg
             # so builder has a concrete <symbol> source for HUD + VFX icons,
             # matching the "image_gen no-key → Python-synthesized SVG"
             # expectation the user explicitly called out.
@@ -1933,7 +1933,7 @@ class Orchestrator:
                     {"id": "monster_primary_sheet", "type": "concept_svg", "width": 1200, "height": 720, "frames": 1, "source": "monster_primary_sheet.svg"},
                     {"id": "weapon_primary_sheet", "type": "concept_svg", "width": 1200, "height": 720, "frames": 1, "source": "weapon_primary_sheet.svg"},
                     {"id": "environment_kit_sheet", "type": "concept_svg", "width": 1200, "height": 720, "frames": 1, "source": "environment_kit_sheet.svg"},
-                    # v6.4.25 (maintainer 2026-04-22) — external no-key placeholders.
+                    # v6.4.25 (maintainer) — external no-key placeholders.
                     # Lorem Picsum serves Unsplash-licensed photos (commercial use
                     # OK, no API key). Deterministic seed → same URL per goal.
                     {"id": "bg_arena_texture", "type": "external_texture",
@@ -2033,7 +2033,7 @@ class Orchestrator:
         manifest_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return True
 
-    # v6.4.25 (maintainer 2026-04-22) — spritesheet/assetimport Python fast_path.
+    # v6.4.25 (maintainer) — spritesheet/assetimport Python fast_path.
     # Before v6.4.25: Kimi ran an 11-15 min tool_call loop writing sprites.js
     # + sprite_config.json one field at a time because each tool_call carries
     # a full 85-120s API round-trip. Same story for assetimport (loader.js +
@@ -2106,7 +2106,7 @@ class Orchestrator:
         return {"atlas_width": max_width, "atlas_height": max(cursor_y, 64), "sprites": sprites}
 
     def _render_sprites_js(self, cfg: Dict[str, Any]) -> str:
-        """v7.9 (maintainer 2026-04-28) — Path2D + SVG path layered schema.
+        """v7.9 (maintainer) — Path2D + SVG path layered schema.
 
         Was: dumped a flat sheet rect dict, drawSprite() fell back to an
         ugly 64×64 gray rectangle when no PNG was available. Builders
@@ -2260,7 +2260,7 @@ class Orchestrator:
             "  };\n"
         )
         return (
-            "// v7.9 (maintainer 2026-04-28) — Python-synthesized sprite runtime.\n"
+            "// v7.9 (maintainer) — Python-synthesized sprite runtime.\n"
             "// Path2D + SVG path layered schema. Builder MUST clone the\n"
             "// density of REFERENCE_SPRITES below when adding new units.\n"
             "(function(root) {\n"
@@ -2458,7 +2458,7 @@ class Orchestrator:
         goal: str = "",
         extra_sections: Optional[List[tuple[str, str]]] = None,
     ) -> str:
-        """v6.4.26 (maintainer 2026-04-22) — richer walkthrough for fast_path nodes.
+        """v6.4.26 (maintainer) — richer walkthrough for fast_path nodes.
         Previously Python fast_path wrote only a 1-line '_done_msg' as
         subtask.output, which left the downstream walkthrough generator with
         nothing to narrate. UI showed empty walkthrough reports. This
@@ -2771,7 +2771,7 @@ class Orchestrator:
         self._reviewer_requeues: int = 0
         # v6.4: sentinel for deferred reviewer re-audit after patcher success
         self._pending_reviewer_requeue_id: Optional[str] = None
-        # v7.1j (maintainer 2026-04-25): set True whenever the reviewer ships
+        # v7.1j (maintainer): set True whenever the reviewer ships
         # without further requeue (any of: rejection budget exhausted,
         # builder retries exhausted, no patcher available). Used by the
         # tester deterministic visual gate to SOFT-PASS rather than fail.
@@ -4264,7 +4264,7 @@ class Orchestrator:
                 if verdict:
                     lines.append(f"{_L('### 评审结论', '### Verdict')}: `{verdict.upper()}`\n")
                 lines.append(_ai_prose)
-                # v6.1.3 (maintainer 2026-04-19): ALWAYS surface the detailed rejection
+                # v6.1.3 (maintainer): ALWAYS surface the detailed rejection
                 # to walkthrough when the verdict is REJECTED, not truncated to 500.
                 # Users need to see exactly what was flagged so they can judge
                 # whether the soft-pass artifact is still usable.
@@ -4975,12 +4975,40 @@ class Orchestrator:
         # v4.0-fix: Conditionally include feature checks based on actual project type.
         # Previously all three arrays were always combined, causing phantom features
         # like "database ops" or "search/filter" to appear in browser game reports.
-        _is_game = bool(re.search(r'(?:game|enemy|weapon|player|spawn|wave|score|level|health|damage)', output, re.IGNORECASE))
-        _is_backend = bool(re.search(r'(?:express|fastify|flask|django|database|SQL|mongoose|sequelize|prisma)', output, re.IGNORECASE))
+        # v7.56 (maintainer): use task_classifier task_type as PRIMARY signal,
+        # falling back to output regex only when task_type is unavailable. Old
+        # heuristic flagged 3D websites as games because Three.js code contains
+        # `camera`/`level`/`wave`/`score` even though the brief is a plain
+        # marketing site. Observed in run_d36f80...: "未来科技 3D 网站"
+        # builder1 report was tagged with "枪口火焰/弹着点火花/波次推进/
+        # 程序化地形/掩体" because output contained `camera` (Three.js scene)
+        # and `wave` (audio waveform / scroll-reveal "wave" easing). User saw
+        # game features in a website report → loss of trust in the pipeline.
+        _frozen_tt = str(getattr(self, "_current_task_type", "") or "").strip().lower()
+        if _frozen_tt in {"game"}:
+            _is_game = True
+        elif _frozen_tt in {"website", "dashboard", "tool", "presentation", "creative"}:
+            _is_game = False
+        else:
+            # Unknown task_type → fall back to output regex (kept conservative
+            # by requiring multiple game-specific words, not any single hit).
+            _game_hits = len(re.findall(
+                r'(?:enemy|weapon|spawnEnemy|fireWeapon|tower\s*defense|'
+                r'gameLoop|update\s*\(\s*delta|'
+                r'requestAnimationFrame.*scene|'
+                r'Raycaster|OrbitControls|PointerLock|hit\s*box)',
+                output, re.IGNORECASE,
+            ))
+            _is_game = _game_hits >= 2  # 需要 2+ 强游戏特征才认定
+        _is_backend = bool(re.search(
+            r'(?:express\(\)|app\.listen|fastify\.listen|flask\(__name__\)|'
+            r'django|mongoose\.connect|sequelize|prisma\.|postgres://|mysql://)',
+            output, re.IGNORECASE,
+        ))
         _feature_checks: list = []
         if _is_game:
             _feature_checks.extend(_game_feature_checks)
-        # Web features only if the project has non-game web patterns
+        # Web features run for non-game tasks AND game tasks with web shell
         if not _is_game or re.search(r'(?:navbar|footer|hero-section|form\s+action|<form|signup|login\s+page)', output, re.IGNORECASE):
             _feature_checks.extend(_web_feature_checks)
         # Software/backend features only for actual backend projects
@@ -6614,7 +6642,7 @@ class Orchestrator:
                 )
 
         if subtask.agent_type == "deployer" and result.get("success"):
-            # v7.1i (maintainer 2026-04-25): post-deploy asset integrity check.
+            # v7.1i (maintainer): post-deploy asset integrity check.
             # Builders/patchers sometimes delete the prefetched ASL/anatomy/
             # flag SVGs during the run. Re-fetch any missing items so the
             # final delivery actually has the real images.
@@ -7543,7 +7571,7 @@ class Orchestrator:
     # v5.8.6: kimi-coding (legacy K2.5 endpoint) returns 401 Invalid Auth in prod.
     # Promote kimi-k2.6-code-preview as the primary.
     # v5.8.6 (late): GPT relay is also out of quota (403 insufficient_user_quota on
-    # api.private-relay.com, balance $-0.001372). Demote gpt-5.4 / gpt-5.4-mini / codex
+    # api.relay.com, balance $-0.001372). Demote gpt-5.4 / gpt-5.4-mini / codex
     # below the working non-OpenAI alternates so _first_available picks something
     # that actually responds. OpenAI entries stay at the tail for environments with
     # a funded key; the gateway circuit breaker will skip them on 403.
@@ -7555,10 +7583,10 @@ class Orchestrator:
         "kimi-k2.6-code-preview", "deepseek-v3", "gemini-2.5-pro", "qwen-max",
         "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "claude-4-sonnet", "o3", "kimi-coding",
     ]
-    # v6.7 (maintainer 2026-04-23): removed gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex.
-    # Those route via private-relay.com which currently returns 502/503 ("账号池负载较高"
+    # v6.7 (maintainer): removed gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex.
+    # Those route via relay.com which currently returns 502/503 ("账号池负载较高"
     # / "模型名称配置错误") for every call, wasting 30s-2min per retry before
-    # falling back. Kimi is maintainer's OFFICIAL Moonshot Coding Plan (not a relay) —
+    # falling back. Kimi is the user's OFFICIAL Moonshot Coding Plan (not a relay) —
     # keep it at the head. Non-openai alternates stay for truly degraded runs.
     _DOWNGRADE_CHAIN = ["kimi-k2.6-code-preview", "kimi-coding", "deepseek-v3", "qwen-max", "gemini-2.0-flash"]
 
@@ -7829,7 +7857,7 @@ class Orchestrator:
             if agent_type in fast_defaults:
                 defaults[agent_type] = fast_defaults[agent_type]
         elif explicit_depth and depth == "deep":
-            # v6.1: maintainer asked to "cancel node time limits" in deep mode —
+            # v6.1: User asked to "cancel node time limits" in deep mode —
             # interpreted as the outer subtask cap. Inner ai_bridge 60s stall
             # detection remains (real deadlock protection). These values are
             # generous enough that a legit reasoning model (Claude deep, GPT-5
@@ -8074,10 +8102,10 @@ class Orchestrator:
         if callable(normalized_preferences):
             try:
                 _prefs = normalized_preferences()
-                # v6.1.3 (maintainer 2026-04-18): for merger-like subtasks, prefer
+                # v6.1.3 (maintainer): for merger-like subtasks, prefer
                 # the SEPARATE `merger` config entry if the user set one. The
                 # subtask.agent_type is "builder" (merger is a builder-like
-                # flow), but maintainer's settings.json often has a dedicated
+                # flow), but the user's settings.json often has a dedicated
                 # `merger: [...]` list that was being silently ignored.
                 _lookup_key = str(getattr(subtask, "agent_type", "") or "").strip().lower()
                 if self._builder_is_merger_like_subtask(subtask):
@@ -8106,7 +8134,7 @@ class Orchestrator:
 
         if self._builder_is_merger_like_subtask(subtask):
             # V4.9 FIX: Respect user's configured_chain for merger-like subtasks.
-            # v6.1.3 (maintainer 2026-04-18): also do NOT filter by `viable` — that
+            # v6.1.3 (maintainer): also do NOT filter by `viable` — that
             # was silently dropping user-configured models (e.g. aigate-*) just
             # because they weren't in the LEGACY chain of the run-level
             # fallback_model. User intent is authoritative; `viable` only fills
@@ -8127,7 +8155,7 @@ class Orchestrator:
             builder_index = builders.index(subtask)
         except ValueError:
             return []
-        # v6.1.3 (maintainer 2026-04-18 bug): multi-builder runs were ignoring the
+        # v6.1.3 (maintainer bug): multi-builder runs were ignoring the
         # user's configured_chain and returning `viable` (derived from the
         # run-level fallback_model — typically kimi-coding). That drove every
         # builder to kimi-coding even when the user pinned
@@ -8150,7 +8178,7 @@ class Orchestrator:
 
         primary_provider = str(resolve_model(base_order[0]).get("provider") or "").strip().lower()
 
-        # v6.1.10 (maintainer 2026-04-19): if user has TWO API keys for the primary
+        # v6.1.10 (maintainer): if user has TWO API keys for the primary
         # provider AND `peer_builders_share_model_when_multikey` is enabled
         # (default True), keep peer builders on the PREFERRED first model —
         # the bridge's `_provider_key_pool` round-robins across both keys so
@@ -8286,7 +8314,7 @@ class Orchestrator:
         if isinstance(cfg, dict):
             raw = cfg.get("reviewer_max_rejections")
         if raw is None:
-            # v7.1 (maintainer 2026-04-24): ULTRA MODE = 5 次 rejection 上限，死磕质量
+            # v7.1 (maintainer): ULTRA MODE = 5 次 rejection 上限，死磕质量
             # 长任务无时间压力；普通模式维持 v6.7 的 1 次单轮闭环。
             _ultra_on = False
             try:
@@ -8303,7 +8331,7 @@ class Orchestrator:
                     _ultra_rej = 5
                 default = str(max(1, min(_ultra_rej, 10)))
             else:
-                # v7.7 (maintainer 2026-04-27): users commonly conflate
+                # v7.7 (maintainer): users commonly conflate
                 # "Max Retries" (the visible Settings control) with the
                 # reviewer reject budget. Honor that mental model — let
                 # max_retries be the default ceiling for reviewer
@@ -8332,7 +8360,7 @@ class Orchestrator:
         patcher_output: str,
         files_created: List[str],
     ) -> Dict[str, Any]:
-        """v6.2 (maintainer 2026-04-20): Parse udiff blocks from the patcher LLM
+        """v6.2 (maintainer): Parse udiff blocks from the patcher LLM
         output and apply them to the target files. Enforces:
           - 80% volume floor (net file size must stay ≥ 80% of pre-patch size)
           - 3-anchor-tag preservation (<script>, <style>, </body> counts unchanged)
@@ -8497,7 +8525,7 @@ class Orchestrator:
         review_payload: Dict[str, Any],
         issues_found: List[Any],
     ) -> bool:
-        """v6.2 (maintainer 2026-04-20): Decide if the udiff patcher is the right
+        """v6.2 (maintainer): Decide if the udiff patcher is the right
         tool for the reviewer's complaints.
 
         Rules (based on Aider benchmarks + HTML inline-script risk):
@@ -8507,7 +8535,7 @@ class Orchestrator:
           - > 6 issues or any "structural"/"rewrite_required"/"multi_section"
             flag → builder (the old "rebuild" route).
 
-        v6.3 rationale (maintainer 2026-04-20): 3-issue ceiling was too tight on
+        v6.3 rationale (maintainer): 3-issue ceiling was too tight on
         complex 3D games where reviewers routinely list 4-6 micro-fixes.
         Forcing those back to builder wastes the 9-12min asset-heavy rebuild
         cycle. udiff can still apply cleanly if each issue localises.
@@ -8691,7 +8719,7 @@ class Orchestrator:
                 # and wastes 7+ minutes per attempt. Cap at 1 retry max.
                 st.max_retries = min(retries, 1)
             elif getattr(st, "agent_type", "") == "patcher":
-                # v7.1i (maintainer 2026-04-25): patcher 4-retry storm cost $5.56 today
+                # v7.1i (maintainer): patcher 4-retry storm cost $5.56 today
                 # alone (8 calls × $0.70). With mtime detection now in place
                 # claude's native Edit-tool work counts as success → patcher
                 # rarely needs retry. Cap at 1 retry max.
@@ -8749,7 +8777,7 @@ class Orchestrator:
         return bool(re.search(r"\b(?:merger|integrator|integration|assemble|assembly|merge)\b", str(node_label or ""), re.IGNORECASE))
 
     def _builder_is_merger_like_subtask(self, subtask: Optional[SubTask]) -> bool:
-        # v7.40 (maintainer 2026-04-29): accept agent_type 'merger' OR 'builder'
+        # v7.40 (maintainer): accept agent_type 'merger' OR 'builder'
         # (with merger node_key). The canonical map now sends merger nodes
         # through agent_type='merger' so downstream merger logic activates,
         # but we keep the legacy `agent_type == 'builder' + node_key=merger`
@@ -10081,8 +10109,8 @@ class Orchestrator:
         asset_mode = task_classifier.game_asset_pipeline_mode(plan.goal)
         builder_count = len([st for st in plan.subtasks if st.agent_type == "builder"])
         builder_focus_map = self._builder_focus_map(plan.goal, max(builder_count, 1))
-        # v6.1.14c (maintainer 2026-04-20): respect walkthrough_language setting.
-        # maintainer reported analyst handoff was all English even when walkthrough
+        # v6.1.14c (maintainer): respect walkthrough_language setting.
+        # User reported analyst handoff was all English even when walkthrough
         # was configured Chinese. The synthesized fallback sections were
         # hardcoded English.
         _lang_zh = (self._report_language() == "zh")
@@ -10254,7 +10282,7 @@ class Orchestrator:
                 "- https://github.com/gitbrent/PptxGenJS",
                 "- https://github.com/marp-team/marp-core",
             ])
-        # v6.4.23 (maintainer 2026-04-22) — synthesized fallback blueprint.
+        # v6.4.23 (maintainer) — synthesized fallback blueprint.
         # If analyst fails to emit <implementation_blueprint>, orchestrator
         # generates a minimal but valid skeleton so builder still has
         # something to translate. Architect/editor degrades gracefully: with
@@ -10309,7 +10337,7 @@ class Orchestrator:
                 "  #hero { first-fold full-viewport, gradient background }",
                 "  .btn-primary { brand accent, hover lift }",
             ])
-        # v6.4.24 (maintainer 2026-04-22) — critical_algorithms fallback.
+        # v6.4.24 (maintainer) — critical_algorithms fallback.
         # For games we seed minimal-but-working trajectory + control math so
         # builder has something to paste even if analyst skipped the section.
         # For non-game tasks we ship a stub indicating "no custom algorithms".
@@ -10533,7 +10561,7 @@ class Orchestrator:
             ("Design Direction", "design_direction"),
             ("Non-Negotiables", "non_negotiables"),
             ("Deliverables Contract", "deliverables_contract"),
-            # v6.4.23 (maintainer 2026-04-22) — Architect/editor split.
+            # v6.4.23 (maintainer) — Architect/editor split.
             # Analyst now produces an <implementation_blueprint> section (HTML
             # skeleton + JS signatures + CSS selector map + data shapes) that
             # the builder/merger can translate directly into code without
@@ -10541,7 +10569,7 @@ class Orchestrator:
             # half of the Aider-style architect/editor pattern; builder is
             # pinned to "editor" mode (no reasoning, straight translation).
             ("Implementation Blueprint", "implementation_blueprint"),
-            # v6.4.24 (maintainer 2026-04-22) — Algorithm snippet handoff.
+            # v6.4.24 (maintainer) — Algorithm snippet handoff.
             # Analyst mines raw source from github/docs and provides
             # complete, runnable function bodies for the hard-to-get-right
             # parts (bullet trajectory, collision, control mapping, parser
@@ -10729,7 +10757,7 @@ class Orchestrator:
         return downstream
 
     def _reviewer_has_unresolved_runtime_errors(self, reviewer_outputs: List[str]) -> bool:
-        """v7.8 (maintainer 2026-04-28): when reviewer's verdict body still mentions
+        """v7.8 (maintainer): when reviewer's verdict body still mentions
         actual JS runtime errors (Cannot read properties of null, ReferenceError,
         404 on critical asset, etc.), debugger MUST run regardless of any
         soft-pass sentinel. Was: reviewer REJECTED with `Cannot read properties
@@ -10755,7 +10783,7 @@ class Orchestrator:
             "browser smoke test failed",
             "interaction gate failed",
             "click handler did nothing",
-            # v7.8b (maintainer 2026-04-28): paraphrased interaction-failure idioms
+            # v7.8b (maintainer): paraphrased interaction-failure idioms
             # — reviewer LLM doesn't always say "interaction gate failed";
             # observed run_b3cc1099cc12 reviewer wrote "Game start/play
             # control does not appear to dismiss the menu" which is the same
@@ -10848,7 +10876,7 @@ class Orchestrator:
             elif task.agent_type == "tester" and output_text:
                 tester_outputs.append(output_text)
 
-        # v7.8 (maintainer 2026-04-28) HARD GATE: if reviewer found actual runtime
+        # v7.8 (maintainer) HARD GATE: if reviewer found actual runtime
         # errors (Cannot read properties / ReferenceError / 404 / etc.), the
         # artifact is broken — debugger MUST run and try to repair, regardless
         # of any soft-pass sentinel set by patcher/tester. Was: PvZ shipped
@@ -10861,7 +10889,7 @@ class Orchestrator:
             )
             return ""
 
-        # v7.2 (maintainer 2026-04-26) — debugger noop also fires when:
+        # v7.2 (maintainer) — debugger noop also fires when:
         #   reviewer was REJECTED (saved as soft-ship sentinel) + patcher
         #   produced a soft-pass + tester eventually passed. The original
         #   APPROVED-only check let the run reach debugger's LLM entry,
@@ -11130,7 +11158,7 @@ class Orchestrator:
         builders = [st for st in plan.subtasks if st.agent_type == "builder"]
         if len(builders) <= 1:
             return True
-        # v6.4.11 (maintainer 2026-04-22): in merger topology the FIRST-slot builder
+        # v6.4.11 (maintainer): in merger topology the FIRST-slot builder
         # (builder1) owns the root index.html; secondary peers (builder2+) only
         # own their named secondary pages. Previously both builders were denied
         # root-index ownership (v5.1 "merger assembles index from scratch"),
@@ -15018,7 +15046,7 @@ class Orchestrator:
         )
         # Allow up to 3 console errors (favicon 404, polyfill warnings, etc. are common)
         CONSOLE_ERROR_TOLERANCE = 3
-        # v6.4.61-B (maintainer 2026-04-23): PAGE_ERROR_TOLERANCE 0→2.
+        # v6.4.61-B (maintainer): PAGE_ERROR_TOLERANCE 0→2.
         # Observed Apr 23 16:22-16:28: tester failed 6 times with 2-6 page
         # errors. Tester's job is to DETECT and REPORT — not to demand a
         # zero-error build when even a perfect deliverable can have 1-2
@@ -15043,7 +15071,7 @@ class Orchestrator:
                 f"{blocking_failed_request_count} blocking failed network request(s) "
                 f"(tolerance={FAILED_REQUEST_TOLERANCE})."
             )
-        # v7.7 (maintainer 2026-04-28): critical script (.js/.mjs/.cjs) failures
+        # v7.7 (maintainer): critical script (.js/.mjs/.cjs) failures
         # have their own zero-tolerance gate. Symptom this fixes: PvZ-class
         # games shipped with `assets/sprites.js` 404 + `assets/loader.js`
         # 404 (only 2 failures, well under FAILED_REQUEST_TOLERANCE=5) →
@@ -16228,7 +16256,7 @@ class Orchestrator:
                     j = json.loads(json_match.group(1))
                     if isinstance(j, dict):
                         v = str(j.get("verdict") or j.get("decision") or "").strip().upper()
-                        # v6.1.15 (maintainer 2026-04-20): APPROVED_WITH_NOTES is
+                        # v6.1.15 (maintainer): APPROVED_WITH_NOTES is
                         # a third tier — treat as APPROVED internally but
                         # preserve the suffix for reporting.
                         if v in ("APPROVED", "REJECTED", "APPROVE", "REJECT",
@@ -17747,7 +17775,7 @@ class Orchestrator:
                     "You own the first playable core shell and may write /tmp/evermind_output/index.html in this pass."
                 )
                 return primary_desc, support_desc
-            # v7.1i (maintainer 2026-04-26): PROPER 2-builder parallelism (not rollback).
+            # v7.1i (maintainer): PROPER 2-builder parallelism (not rollback).
             # builder1 = primary_desc (writes complete index.html with engine)
             # builder2 = _pro_builder_focus(goal)[1] support module (game_features.js,
             #            HUD/menu/audio/VFX, EXPLICITLY NOT index.html)
@@ -18601,7 +18629,7 @@ class Orchestrator:
     def _report_language(self) -> str:
         """Return 'zh' or 'en' for walkthrough output.
 
-        v6.1.3 (maintainer 2026-04-18): look up a DEDICATED `walkthrough_language`
+        v6.1.3 (maintainer): look up a DEDICATED `walkthrough_language`
         setting first; fall back to the UI language. Lets the user run the app
         in English but still receive Chinese walkthroughs (or vice versa).
         Code identifiers / file paths always stay English regardless.
@@ -18641,7 +18669,7 @@ class Orchestrator:
         builder_count = len(builder_tags)
         task_type = task_classifier.classify(plan.goal).task_type
 
-        # v6.1.3 (maintainer 2026-04-19): slimmed analyst policy block. Previously
+        # v6.1.3 (maintainer): slimmed analyst policy block. Previously
         # 16 lines + 1KB hardcoded URL list + 4 redundant source-quality rules.
         # Research shows top agents (Perplexity / Claude Code) use ~3-4 line
         # policies, let the model's training pick good sources. Concrete seed
@@ -18890,7 +18918,7 @@ class Orchestrator:
             deployer_id = str(next_id + (3 if include_polisher else 2))
             tester_id = str(next_id + (4 if include_polisher else 3))
             debugger_id = str(next_id + (5 if include_polisher else 4))
-            # v6.3 (maintainer 2026-04-20): patcher = dormant DAG node, only fires
+            # v6.3 (maintainer): patcher = dormant DAG node, only fires
             # when reviewer rejects with ≤6 localizable issues in round 1.
             # Default path (reviewer APPROVED) skips it via the _execute_subtask
             # gate. See _patcher_can_handle_reviewer_issues + the requeue path
@@ -18932,7 +18960,7 @@ class Orchestrator:
                     id=deployer_id,
                     agent_type="deployer",
                     description=deployer_desc,
-                    # v6.3.14 (maintainer 2026-04-21): deployer now waits for
+                    # v6.3.14 (maintainer): deployer now waits for
                     # BOTH reviewer AND patcher. Patcher skip-gate makes this
                     # near-instant when reviewer APPROVED; when reviewer
                     # REJECTED, patcher runs udiffs (or is requeued) before
@@ -18941,7 +18969,7 @@ class Orchestrator:
                     # producing race conditions and wasted cycles.
                     depends_on=[reviewer_id, patcher_id],
                 ),
-                # v7.8 (maintainer 2026-04-28): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
+                # v7.8 (maintainer): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
                 SubTask(
                     id=debugger_id,
                     agent_type="debugger",
@@ -19061,7 +19089,7 @@ class Orchestrator:
                     id=deployer_id,
                     agent_type="deployer",
                     description=deployer_desc,
-                    # v6.3.14 (maintainer 2026-04-21): deployer now waits for
+                    # v6.3.14 (maintainer): deployer now waits for
                     # BOTH reviewer AND patcher. Patcher skip-gate makes this
                     # near-instant when reviewer APPROVED; when reviewer
                     # REJECTED, patcher runs udiffs (or is requeued) before
@@ -19070,7 +19098,7 @@ class Orchestrator:
                     # producing race conditions and wasted cycles.
                     depends_on=[reviewer_id, patcher_id],
                 ),
-                # v7.8 (maintainer 2026-04-28): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
+                # v7.8 (maintainer): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
                 SubTask(
                     id=debugger_id,
                     agent_type="debugger",
@@ -19159,11 +19187,11 @@ class Orchestrator:
                 id=deployer_id,
                 agent_type="deployer",
                 description=deployer_desc,
-                # v6.3.14 (maintainer 2026-04-21): deployer waits for patcher too.
+                # v6.3.14 (maintainer): deployer waits for patcher too.
                 # See the identical note on the earlier DAG branches.
                 depends_on=[reviewer_id, patcher_id],
             ),
-            # v7.8 (maintainer 2026-04-28): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
+            # v7.8 (maintainer): plan-only tester subtask removed. reviewer + drag-drop gate now subsumes interaction testing.
             SubTask(
                 id=debugger_id,
                 agent_type="debugger",
@@ -20719,7 +20747,7 @@ class Orchestrator:
         }
 
     # ────────────────────────────────────────────────────────────────────
-    # v6.4.26 (maintainer 2026-04-22) — DECLARATIVE QUALITY GATES
+    # v6.4.26 (maintainer) — DECLARATIVE QUALITY GATES
     # ────────────────────────────────────────────────────────────────────
     # Registry of all quality check ids. Planner + analyst select from this
     # list per node; validator calls the matching function. Adding a new
@@ -21303,7 +21331,7 @@ class Orchestrator:
         }
 
     def _is_goal_simple_enough_for_single_builder(self, goal: str) -> bool:
-        """v6.2 (maintainer 2026-04-20): True when a 2-builder peer split would
+        """v6.2 (maintainer): True when a 2-builder peer split would
         waste compute — e.g. a tiny utility / todo app / single-page form.
 
         Signals (ALL must hold for the override):
@@ -21344,7 +21372,7 @@ class Orchestrator:
         return len(goal_text) < 40
 
     def _maybe_collapse_peer_builders(self, plan: Plan) -> bool:
-        """v6.2 (maintainer 2026-04-20): if the goal is simple enough, collapse
+        """v6.2 (maintainer): if the goal is simple enough, collapse
         multiple builder subtasks into a single builder. Returns True iff
         collapse happened. Called by planner post-processing.
 
@@ -23800,7 +23828,7 @@ class Orchestrator:
         self._current_goal = goal  # F7-1: Store for continuation detection
         history = conversation_history or []
         self._current_conversation_history = history
-        # v7.1 (maintainer 2026-04-24): accept "ultra" as a valid difficulty
+        # v7.1 (maintainer): accept "ultra" as a valid difficulty
         difficulty = difficulty if difficulty in ("simple", "standard", "pro", "ultra") else "standard"
         self.difficulty = difficulty
         self._reviewer_requeues = 0
@@ -23844,6 +23872,17 @@ class Orchestrator:
         # _is_continuation_request can detect category switches.
         self._previous_task_type = getattr(self, "_current_task_type", None)
         self._current_task_type = task_classifier.classify(goal).task_type
+        # v7.55 (maintainer): mirror frozen task type into AIBridge so
+        # every downstream node (including patcher whose prompt contains
+        # reviewer brief that may include "tool/editor" keywords) sees the
+        # same classification as the orchestrator. Without this, ai_bridge
+        # _classify_task_type re-ran the regex per prompt and silently
+        # flipped task_type mid-run.
+        try:
+            if getattr(self, "ai_bridge", None) is not None:
+                setattr(self.ai_bridge, "_frozen_task_type", str(self._current_task_type or ""))
+        except Exception as _ft_err:
+            logger.debug("frozen task_type mirror failed: %s", _ft_err)
         logger.info(f"Orchestrator starting [{difficulty}] type={self._current_task_type} model={model}: {goal[:80]}... (history: {len(history)} msgs)")
         self._log_thinking_depth_profile()
 
@@ -23891,13 +23930,13 @@ class Orchestrator:
         self._prepare_output_dir_for_run()
         self._hydrate_stable_preview_from_disk()
 
-        # v7.1g (maintainer 2026-04-24): write a project-level AGENTS.md into the
+        # v7.1g (maintainer): write a project-level AGENTS.md into the
         # workspace so all 3 CLIs (Claude/Gemini/Codex) read the SAME context
         # file. Gemini is configured (settings.json `context.fileName`) to
         # accept any of GEMINI.md / AGENTS.md / CLAUDE.md, Codex defaults to
         # AGENTS.md, Claude reads CLAUDE.md but also picks up AGENTS.md when
         # added via --add-dir + cwd. One file, three CLIs, zero drift.
-        # v7.1g (maintainer 2026-04-25): asset prefetch BEFORE AGENTS.md.
+        # v7.1g (maintainer): asset prefetch BEFORE AGENTS.md.
         # Detects accuracy-critical imagery domains (sign language, etc) from
         # the goal and pre-downloads authoritative images via httpx into
         # frontend/public/assets/<domain>/. This eliminates the LLM
@@ -24017,7 +24056,7 @@ class Orchestrator:
                         node_label=node_label,
                         depends_on=deps,
                     ))
-                # v7.41 (maintainer 2026-04-29): cycle-break for custom canvas DAGs.
+                # v7.41 (maintainer): cycle-break for custom canvas DAGs.
                 # User-drawn graphs frequently include `reviewer ← patcher` AND
                 # `patcher ← reviewer` simultaneously (semantically: "patcher
                 # fixes what reviewer flagged, then reviewer re-audits"). In a
@@ -24282,7 +24321,7 @@ class Orchestrator:
                 "]}\n"
             )
         elif difficulty == "ultra":
-            # v7.1g (maintainer 2026-04-25) ULTRA MODE — strict directory structure
+            # v7.1g (maintainer) ULTRA MODE — strict directory structure
             # so builders can't drift to root paths. Each builder OWNS a
             # specific subtree. Builder 4 also handles accuracy-critical
             # image scraping (sign language / anatomy / flags / etc).
@@ -24716,11 +24755,11 @@ class Orchestrator:
             return
 
         if difficulty == "pro" or difficulty == "ultra":
-            # v7.1i (maintainer 2026-04-25): ultra 也走 pro plan 14-NE 拓扑。
+            # v7.1i (maintainer): ultra 也走 pro plan 14-NE 拓扑。
             # 之前 ultra fallback 没分支匹配 → 留下 deterministic 4-NE plan
             # (builder + reviewer + deployer + tester) → 没有 analyst /
             # uidesign / 4 builder lane / merger / polisher / patcher，
-            # reviewer 拒绝就是死路。今天 cycle 12 实战看到 gemini run
+            # reviewer 拒绝就是死路。observed in production cycle gemini run
             # 退化成 4-NE，前端做完后端为空。
             analyst_desc = ""
             for st in plan.subtasks:
@@ -24825,13 +24864,13 @@ class Orchestrator:
         await self.emit("phase_change", {"phase": "planning", "message": f"AI is analyzing the goal ({difficulty} mode)..."})
 
         # v3.5: Enrich user goal before planning (pro/deep modes)
-        # v6.1.14 (maintainer 2026-04-20): 45s timeout was dominating cold-start
+        # v6.1.14 (maintainer): 45s timeout was dominating cold-start
         # latency when relay was slow (observed 45s wait before planner).
         # Tighter default + env override + user-visible progress event +
         # circuit breaker: if the last enrichment call just timed out in the
         # same process, skip the next N minutes to avoid compounded waste.
         if difficulty in ("pro", "deep"):
-            # v7.8 (maintainer 2026-04-28): default 25→8s. enrichment is a NICE-TO-HAVE
+            # v7.8 (maintainer): default 25→8s. enrichment is a NICE-TO-HAVE
             # that expands short goals ("做PvZ") into 1.8K char briefs. When relay
             # is slow we'd rather start planner 17s sooner with the raw goal.
             # Override via EVERMIND_ENRICHMENT_TIMEOUT_SEC=N.
@@ -24839,7 +24878,7 @@ class Orchestrator:
             _enrich_cooldown = max(60, min(3600, int(os.getenv("EVERMIND_ENRICHMENT_COOLDOWN_SEC", "600"))))
             _last_fail = float(getattr(type(self), "_enrichment_last_failure_ts", 0.0) or 0.0)
             _cooldown_left = _enrich_cooldown - (time.time() - _last_fail) if _last_fail else 0
-            # v7.42 → v7.48 (maintainer 2026-04-30): threshold 120 → 50 chars.
+            # v7.42 → v7.48 (maintainer): threshold 120 → 50 chars.
             # Observed run_679d34ebb1b3 with 80-char goal still triggered
             # enrichment and wasted 8s (relay-slow timeout). 50 chars is the
             # realistic floor — anything shorter ("build pvz", "tell me a
@@ -24975,7 +25014,7 @@ class Orchestrator:
             plan.subtasks = self._fallback_plan_for_difficulty(goal, difficulty)
 
         self._enforce_plan_shape(plan, goal, difficulty)
-        # v6.2 (maintainer 2026-04-20): collapse 2-builder split when goal is trivial.
+        # v6.2 (maintainer): collapse 2-builder split when goal is trivial.
         # Saves tokens + wall-clock on simple utilities (todo/timer/calculator).
         try:
             if self._maybe_collapse_peer_builders(plan):
@@ -25028,7 +25067,7 @@ class Orchestrator:
         except Exception as _ws_err:
             logger.warning("Workspace isolation skipped: %s", _ws_err)
         results = {}
-        # v7.10 (maintainer 2026-04-28): expose completed/succeeded as instance
+        # v7.10 (maintainer): expose completed/succeeded as instance
         # attributes so patcher post-exec can discard reviewer + downstream
         # for true multi-round re-audit. Local references kept for hot-loop
         # readability — they alias the same sets.
@@ -25040,10 +25079,10 @@ class Orchestrator:
         failed = self._sched_failed
 
         while not self._cancel:
-            # v7.10 (maintainer 2026-04-28): when reviewer multi-round is active
+            # v7.10 (maintainer): when reviewer multi-round is active
             # (`_pending_reviewer_requeue_id` set), pause non-loop downstream
             # nodes so deployer/debugger can't dispatch ahead of reviewer's
-            # second verdict. Per maintainer's directive: "每一次补丁师又改好了
+            # second verdict. Per the user's directive: "每一次补丁师又改好了
             # 都再次给到我们的审查员去审查，然后审查员觉得不合格那就再次打回".
             # Only reviewer (re-audit) + patcher (the loop members) are
             # allowed to run while requeue is pending. v7.8c's reset path
@@ -25332,7 +25371,7 @@ class Orchestrator:
                         "requeue_requested": True,
                         "error": result.get("error", ""),
                     }
-                    # v6.4.13 (maintainer 2026-04-22) FIX: the requester subtask
+                    # v6.4.13 (maintainer) FIX: the requester subtask
                     # itself MUST be marked COMPLETED here, otherwise the
                     # scheduler re-pops it on the next tick and the requeue
                     # target (patcher) never gets a chance to run.
@@ -25914,7 +25953,7 @@ class Orchestrator:
                 )
                 model = "kimi-k2.6-code-preview"
         # v6.7 (2026-04-23): builder/merger/polisher under gpt-5.4 via
-        # relay.cn run 3-10x slower than kimi on identical prompts because
+        # relay run 3-10x slower than kimi on identical prompts because
         # the gateway throttles reasoning chunks. Observed run_69495533723c:
         # builder took 10m (2300 lines text-only streaming), polisher failed
         # on 90s pre-write, reviewer took 5+ min. Pre-promote these three
@@ -25928,11 +25967,11 @@ class Orchestrator:
                 and self._has_key_for("kimi-k2.6-code-preview")
             ):
                 logger.info(
-                    "%s model pre-promotion (v6.7): %s → kimi-k2.6-code-preview (avoid slow relay.cn stream)",
+                    "%s model pre-promotion (v6.7): %s → kimi-k2.6-code-preview (avoid slow relay stream)",
                     subtask.agent_type, model,
                 )
                 model = "kimi-k2.6-code-preview"
-        # v6.7c (maintainer 2026-04-24 00:35): universal gpt→kimi promotion for
+        # v6.7c (maintainer 00:35): universal gpt→kimi promotion for
         # ALL remaining node types. Observed run_6cef28077a5e: tester retry
         # landed on model=gpt-5.4 (via _augment_candidates_for_compatible_gateway
         # which appends _legacy_model_fallback_chain → may contain gpt-5.x even
@@ -25940,7 +25979,7 @@ class Orchestrator:
         # patcher. Extend to tester/reviewer/debugger/deployer/analyst/uidesign/
         # merger/scribe/imagegen/spritesheet/assetimport/planner/router — any
         # agent whose current model starts with `gpt-` gets force-switched to
-        # kimi as long as the kimi key is present. Kimi is maintainer's official
+        # kimi as long as the kimi key is present. Kimi is the user's official
         # Moonshot Coding Plan (reference_kimi_official_plan.md), always primary.
         _OTHER_PROMOTE_NODES = (
             "tester", "reviewer", "debugger", "deployer", "analyst", "uidesign",
@@ -25954,20 +25993,20 @@ class Orchestrator:
                 and self._has_key_for("kimi-k2.6-code-preview")
             ):
                 logger.info(
-                    "%s model pre-promotion (v6.7c universal): %s → kimi-k2.6-code-preview (avoid relay relay)",
+                    "%s model pre-promotion (v6.7c universal): %s → kimi-k2.6-code-preview (avoid relay/relay relay)",
                     subtask.agent_type, model,
                 )
                 model = "kimi-k2.6-code-preview"
         node_key = self._subtask_node_key(subtask)
         node_label = self._subtask_node_label(subtask)
 
-        # v6.3 (maintainer 2026-04-20): Patcher skip gate. The patcher node is now
+        # v6.3 (maintainer): Patcher skip gate. The patcher node is now
         # always present in the pro DAG (depends_on=[reviewer]) so that the
         # reviewer-rejection path has an `eligible_patchers_for_udiff` target
         # to requeue. But it is a conditional node: execute only when the
         # MOST RECENT reviewer verdict is REJECTED.
         #
-        # v6.3.13 (maintainer 2026-04-21) HOTFIX: Previously this gate only checked
+        # v6.3.13 (maintainer) HOTFIX: Previously this gate only checked
         # self._reviewer_requeues — which is a *cumulative* counter. When
         # reviewer rejected in the first pass (bumping the counter to ≥1) but
         # then APPROVED after builder/merger REBUILD, the gate wrongly let
@@ -26039,8 +26078,8 @@ class Orchestrator:
             f"task={subtask.description[:140]}"
         )
 
-        # v6.4.20 (maintainer 2026-04-22) MERGER FAST-PATH PRE-COPY.
-        # v6.4.26 (maintainer 2026-04-22) BUG FIX: the merger subtask's
+        # v6.4.20 (maintainer) MERGER FAST-PATH PRE-COPY.
+        # v6.4.26 (maintainer) BUG FIX: the merger subtask's
         # `agent_type` is actually `"builder"` (the merger is the final
         # builder slot in a 2-builder+merger topology; only `node_key` is
         # "merger"). The original v6.4.20 gate checked agent_type == "merger"
@@ -26136,7 +26175,7 @@ class Orchestrator:
                         len(_copied),
                         _survey,
                     )
-                    # v7.1i (maintainer 2026-04-26): SKIP-LLM-MERGER fast path.
+                    # v7.1i (maintainer): SKIP-LLM-MERGER fast path.
                     # Observed run_c0928c9c85b8: kimi-k2.6 merger ran 11+ min
                     # in pure thinking mode (chunks=17710 content_chars=0)
                     # because input context was 105KB+ (builder1 63KB + builder2
@@ -26211,7 +26250,7 @@ class Orchestrator:
                                                 pass
                             if not _secondaries_support_only:
                                 break
-                        # v7.13 (maintainer 2026-04-28): never NOOP when builder2 wrote
+                        # v7.13 (maintainer): never NOOP when builder2 wrote
                         # substantive HTML — even if primary "won" by size, the
                         # secondary likely has unique modules (weapon system,
                         # enemy AI, controls module) that must be merged. Was:
@@ -26265,7 +26304,7 @@ class Orchestrator:
                     except Exception as _skip_err:
                         logger.debug("[v7.1i] skip-LLM fast path eval failed: %s", _skip_err)
                 else:
-                    # v6.7 (maintainer 2026-04-23) ROOT-FALLBACK: when no task_*/
+                    # v6.7 (maintainer) ROOT-FALLBACK: when no task_*/
                     # dirs exist (builders wrote directly to root, which
                     # happens when full-rewrite guard trips mid-stream), check
                     # whether the root index.html is already a complete,
@@ -26385,7 +26424,7 @@ class Orchestrator:
                                 )
                         except Exception as _hc_err:
                             logger.debug("Merger health check crashed: %s", _hc_err)
-                    # v7.0 (maintainer 2026-04-24): Merger = quality guardian.
+                    # v7.0 (maintainer): Merger = quality guardian.
                     # Only HARD-SKIP when health check is CLEAN. If Python
                     # static check found structural issues (unbalanced tags,
                     # placeholders, broken refs), inject them as a targeted
@@ -26411,7 +26450,7 @@ class Orchestrator:
                         )
                         # Fall through to the normal LLM merger path (no HARD-SKIP).
                     elif _root_ready:
-                        # v6.7 (maintainer 2026-04-23) HARD-SKIP merger subtask.
+                        # v6.7 (maintainer) HARD-SKIP merger subtask.
                         # Earlier v6.7 attempt injected a NOOP manifest into
                         # subtask.description; but the merger subtask has
                         # agent_type="builder" and loads builder.yaml (not
@@ -26439,7 +26478,7 @@ class Orchestrator:
                             _root_size,
                         )
                         try:
-                            # v6.7c fix (maintainer 2026-04-24): NE state must go
+                            # v6.7c fix (maintainer): NE state must go
                             # queued→running→passed, not queued→passed
                             # directly — `_transition_node_if_needed` rejects
                             # the shortcut and leaves NE in queued. Emit a
@@ -26474,7 +26513,7 @@ class Orchestrator:
                                 output_summary=_skip_msg[:200],
                                 phase="merge_noop_root_fallback",
                             )
-                            # v7.3.7 (maintainer 2026-04-26) — when merger HARD-SKIPs
+                            # v7.3.7 (maintainer) — when merger HARD-SKIPs
                             # because builder1 already wrote the full root
                             # index.html, the sibling support builder
                             # (builder2/3/...) is doing wasted work. Auto-mark
@@ -26539,12 +26578,12 @@ class Orchestrator:
             except Exception as _merger_hook_err:
                 logger.warning("Merger pre-copy hook crashed: %s — falling back to LLM-driven merge.", _merger_hook_err)
 
-        # v6.3 (maintainer 2026-04-20): imagegen pre-flight — emit one explicit log
+        # v6.3 (maintainer): imagegen pre-flight — emit one explicit log
         # line showing which asset-production mode we're in, so the user can
         # tell at a glance whether real images will be rendered or whether we
         # silently degraded to SVG/brief fallback.
         #
-        # v6.3.3 (maintainer 2026-04-21): added FAST-PATH for no-key mode. When
+        # v6.3.3 (maintainer): added FAST-PATH for no-key mode. When
         # no image-gen key is configured, we previously let the LLM run
         # a 4-5 round tool-loop writing visuals.css / sprites_visual.svg /
         # brief md files — at kimi's ~100s per tool_call that cost 7-10 min
@@ -26614,7 +26653,7 @@ class Orchestrator:
                         "Imagegen FAST-PATH: wrote %d files in %.1fs (no LLM invoked) — core=%d companion=%d",
                         len(_produced), _elapsed, len(_core), len(_companion),
                     )
-                    # v6.4.26 (maintainer 2026-04-22) — richer walkthrough so UI
+                    # v6.4.26 (maintainer) — richer walkthrough so UI
                     # shows a real report instead of an empty panel.
                     _done_msg = self._fast_path_walkthrough_markdown(
                         "imagegen", _produced, _elapsed,
@@ -26624,7 +26663,7 @@ class Orchestrator:
                             f"core pack: {len(_core)} files · companion docs: {len(_companion)} files",
                         )],
                     )
-                    # v6.3.8 (maintainer 2026-04-21) HOTFIX: fast-path bypasses the
+                    # v6.3.8 (maintainer) HOTFIX: fast-path bypasses the
                     # outer scheduler's NE sync + UI broadcast path entirely
                     # (line 23593 _sync_ne_status("running"), line 27668+
                     # success branch that flips status to "passed"). Left
@@ -26634,7 +26673,7 @@ class Orchestrator:
                     # lifecycle manually here so the canvas reflects
                     # reality: running → passed with the produced files.
                     try:
-                        # v6.4.1 (maintainer 2026-04-21) HOTFIX: UI was showing
+                        # v6.4.1 (maintainer) HOTFIX: UI was showing
                         # imagegen as "0s, 0 files, no walkthrough". Root
                         # cause: fast-path emitted lifecycle events in wrong
                         # order — sync_ne_status("passed") fired FIRST,
@@ -26744,7 +26783,7 @@ class Orchestrator:
                         _fp_err,
                     )
 
-        # v6.4.25 (maintainer 2026-04-22) — Spritesheet + Assetimport fast_path.
+        # v6.4.25 (maintainer) — Spritesheet + Assetimport fast_path.
         # Kimi tool_call was spending 11-15 min writing sprites.js +
         # sprite_config.json (spritesheet) and loader.js + manifest.json
         # (assetimport). These are pure deterministic templates; Python can
@@ -26996,7 +27035,7 @@ class Orchestrator:
                 # path is the only one that extracts <reference_code_snippets>,
                 # <game_mechanics_spec>, <control_frame_contract> from analyst
                 # output. The thin handoff packet summary strips those tags.
-                # Skipping caused the "10% quality loss on 3D games" maintainer
+                # Skipping caused the "10% quality loss on 3D games" the maintainer
                 # flagged. For analyst edges, emit packet as LIGHT context
                 # then fall through so _build_analyst_handoff_context runs too.
                 analyst_preserve_path = (
@@ -27008,7 +27047,7 @@ class Orchestrator:
                         packet = HandoffPacket.from_dict(upstream_handoff)
                         packet.target_node = self._subtask_node_key(subtask)
                         packet.target_node_type = subtask.agent_type
-                        # v6.1.5 (maintainer 2026-04-19): ChatDev-style edge payload
+                        # v6.1.5 (maintainer): ChatDev-style edge payload
                         # processor — strip fields downstream doesn't need.
                         processor = self._pick_edge_payload_processor(
                             dep_task.agent_type, subtask.agent_type
@@ -27087,6 +27126,49 @@ class Orchestrator:
                     context_parts.append(
                         f"[Fallback from {dep_task.agent_type} #{dep_id}]:\n{fallback_handoff[:MAX_DEP_CONTEXT_CHARS]}"
                     )
+
+        # v7.57 (maintainer): inject PLANNER BLUEPRINT into builder /
+        # merger / polisher / patcher / debugger context. Pro template's
+        # builder.depends_on=[analyst, uidesign, scribe] does NOT include
+        # planner, so the detailed multi-step plan written by planner
+        # (typically 6-8K chars) NEVER reaches builder. Builder only sees
+        # analyst's interpretation (research notes), losing the precise
+        # "do these N pages with X/Y/Z elements" structure planner
+        # produced. Result: builder freelances → quality drops → user
+        # complains "builder doesn't follow the plan".
+        #
+        # Solution: when current node is a downstream code-producing node
+        # (builder/merger/polisher/patcher/debugger), and the plan has
+        # a planner subtask with output, prepend that planner output as
+        # an authoritative "PLANNER BLUEPRINT" section. The builder then
+        # has both: (a) analyst's how-to notes, (b) planner's what-to-do
+        # blueprint as the source of truth.
+        try:
+            _bridging_roles = {"builder", "merger", "polisher", "patcher", "debugger"}
+            if subtask.agent_type in _bridging_roles:
+                _planner_subtask = next(
+                    (st for st in (plan.subtasks or [])
+                     if st.agent_type == "planner" and str(getattr(st, "output", "") or "").strip()),
+                    None,
+                )
+                if _planner_subtask is not None:
+                    _planner_blueprint = str(_planner_subtask.output or "").strip()
+                    if _planner_blueprint and "PLANNER BLUEPRINT" not in (context_parts and " ".join(context_parts) or ""):
+                        # Cap at 6K chars — full planner outputs run 6-10K
+                        # but we already have analyst handoff downstream.
+                        _planner_section = (
+                            "=== v7.57 PLANNER BLUEPRINT (authoritative — follow these steps exactly) ===\n"
+                            + _planner_blueprint[:6000]
+                            + ("\n[truncated]" if len(_planner_blueprint) > 6000 else "")
+                            + "\n=== END PLANNER BLUEPRINT ===\n"
+                            + "Treat the blueprint above as the PRECISE delivery contract. "
+                            + "Analyst notes (below) are research material — they explain "
+                            + "HOW to implement; the blueprint defines WHAT to deliver. "
+                            + "If they conflict, follow the blueprint."
+                        )
+                        context_parts.insert(0, _planner_section)
+        except Exception as _bp_err:
+            logger.debug("[v7.57] planner blueprint injection skipped: %s", _bp_err)
 
         context = "\n\n".join(context_parts)
         debugger_noop_reason = self._debugger_noop_reason(plan, subtask, prev_results)
@@ -27539,7 +27621,7 @@ class Orchestrator:
         try:
             preferred_model = self.ai_bridge.preferred_model_for_node(agent_node, model)
             preferred_provider = str(self.ai_bridge._resolve_model(preferred_model).get("provider", "") or "")
-            # v7.1g (maintainer 2026-04-25): if CLI mode is active and this node is
+            # v7.1g (maintainer): if CLI mode is active and this node is
             # CLI-eligible, surface the chosen CLI in assigned_model BEFORE
             # the LLM call starts — UI showed "kimi-k2.6-code-preview" for the
             # full duration of every CLI-routed node because the pre-fill came
@@ -28189,7 +28271,7 @@ class Orchestrator:
             heartbeat_sec = self._configured_progress_heartbeat()
             start_ts = time.time()
 
-            # v7.1i (maintainer 2026-04-26): SKIP-LLM merger fast path.
+            # v7.1i (maintainer): SKIP-LLM merger fast path.
             # When primary builder wrote complete shippable index.html AND
             # secondary builders only wrote support modules (.js/.css/.json,
             # auto-wired by deterministic injector), there is nothing for the
@@ -28320,7 +28402,7 @@ class Orchestrator:
                     "partial_output": partial,
                     "loaded_skills": loaded_skills,
                 })
-                # v6.4.9 (maintainer 2026-04-22): tighten the "meaningful output" check
+                # v6.4.9 (maintainer): tighten the "meaningful output" check
                 # for multi-target direct_text builders. If the node is assigned
                 # 2+ named HTML targets, a stream of unnamed HTML blocks does NOT
                 # count as progress — the extractor drops them, so the watchdog
@@ -28952,6 +29034,22 @@ class Orchestrator:
                     timeout_msg = (
                         f"{subtask.agent_type} execution timeout after {elapsed}s."
                     )
+                    # v7.54 (maintainer): drop cached httpx clients on
+                    # hard timeout. Without this, the dead stream's
+                    # underlying socket keeps living in the OpenAI client
+                    # cache; the NEXT request on the same client picks up
+                    # that phantom connection and hangs immediately.
+                    # Observed 2026-04-30: reviewer round 3 hung 36min →
+                    # timeout → retry also hung 45min → new run's router
+                    # also hung at startup. Clean drop on timeout breaks
+                    # this poison-pill chain. ~80ms cost per endpoint to
+                    # rebuild client on next call — well worth it.
+                    try:
+                        _drop = getattr(self.ai_bridge, "drop_openai_clients_after_hang", None)
+                        if callable(_drop):
+                            _drop(reason=f"{subtask.agent_type}_timeout_{elapsed}s")
+                    except Exception as _drop_err:
+                        logger.debug("client-drop after timeout failed: %s", _drop_err)
                     result = {"success": False, "output": last_partial_output or "", "error": timeout_msg, "tool_results": []}
                     # Store partial output for continuation retry
                     subtask.last_partial_output = last_partial_output
@@ -29661,7 +29759,7 @@ class Orchestrator:
                 # round.  Fail early so the builder can retry and actually
                 # produce file artifacts.
                 if not files_created and not self._builder_is_merger_like_subtask(subtask):
-                    # v6.1.13 (maintainer 2026-04-20): before demoting, try one last
+                    # v6.1.13 (maintainer): before demoting, try one last
                     # salvage. Observed run_3fa9bbe97673 where minimax direct_text
                     # streamed 40KB HTML, postprocess saved it, score=100, but
                     # `files_created` stayed empty until _validate_builder_quality
@@ -29710,7 +29808,7 @@ class Orchestrator:
                     })
 
                 if preview_gate_result is not None and not preview_gate_result.get("ok"):
-                    # v6.4.17 (maintainer 2026-04-22): JS syntax errors alone must
+                    # v6.4.17 (maintainer): JS syntax errors alone must
                     # NOT kill a builder run. Observed 2026-04-22 17:33: both
                     # kimi and gpt-5.4 generated `app.js` with "missing ) after
                     # argument list" → validation failed → builder retried
@@ -30008,7 +30106,7 @@ class Orchestrator:
                                     if promoted:
                                         preview_ready_payload.update(promoted)
                                 await self.emit("preview_ready", preview_ready_payload)
-                                # v6.4.3 (maintainer 2026-04-21): explicit deploy
+                                # v6.4.3 (maintainer): explicit deploy
                                 # activity log so the user (and the reviewer
                                 # agent in its next round) sees the preview
                                 # was refreshed with the merged/built bytes.
@@ -30019,7 +30117,7 @@ class Orchestrator:
                                     f"{_stage_tag} 已完成，预览已自动部署到 http://127.0.0.1:8765/preview/ (共 {len(files_created)} 文件). 审查员将看到最新代码。",
                                     entry_type="ok",
                                 )
-                                # v6.4.61-F (maintainer 2026-04-23): Merger file-count
+                                # v6.4.61-F (maintainer): Merger file-count
                                 # pre/post check. Observed Apr 23 14:45 session:
                                 # builder1 produced 4 files, builder2 produced 3,
                                 # merger output had only 5 — 2 pages silently
@@ -30052,7 +30150,7 @@ class Orchestrator:
                                             _merge_chk_err,
                                         )
 
-            # v6.4 (maintainer 2026-04-21): Patcher post-execution.
+            # v6.4 (maintainer): Patcher post-execution.
             # Architecture: patcher is now the SOLE repair node. It may fix
             # the artifact via (a) file_ops edit/write (preferred, what the
             # v6.4 prompt tells it), or (b) a ```diff unified-diff block
@@ -30081,7 +30179,7 @@ class Orchestrator:
                     or _patcher_out_raw.lstrip().startswith("--- ")
                 )
                 _files_touched = [p for p in (files_created or []) if p]
-                # v7.1i (maintainer 2026-04-25): mtime-based detection.
+                # v7.1i (maintainer): mtime-based detection.
                 # Claude/Gemini/Codex CLIs use their native Edit/Write tools to
                 # modify files in place — orchestrator never sees a `file_ops`
                 # event for these. Walk OUTPUT_DIR and find any file whose
@@ -30114,7 +30212,7 @@ class Orchestrator:
                             _files_touched = _native_edits[:30]
                 except Exception as _mt_err:
                     logger.debug("[v7.1i] mtime check failed: %s", _mt_err)
-                # v7.1i (maintainer 2026-04-25 from Aider research): udiff fallback.
+                # v7.1i (maintainer from Aider research): udiff fallback.
                 # Aider data: udiff 61% success vs SEARCH/REPLACE 20% on
                 # GPT-4 Turbo (similar gap on Claude/Gemini). If patcher emits
                 # ```diff blocks or unified-diff markers, parse + apply BEFORE
@@ -30139,7 +30237,7 @@ class Orchestrator:
                             "[v7.1i] Patcher udiff parse/apply failed (will try SEARCH/REPLACE next): %s",
                             str(_u_err)[:200],
                         )
-                # v7.1i (maintainer 2026-04-25): SEARCH/REPLACE parser for patcher.
+                # v7.1i (maintainer): SEARCH/REPLACE parser for patcher.
                 # CLI patchers (claude/gemini/codex) cannot emit file_ops virtual
                 # tool calls — they emit SEARCH/REPLACE blocks per patcher.yaml
                 # CLI MODE OVERRIDE. If we see those blocks, apply them now and
@@ -30160,7 +30258,7 @@ class Orchestrator:
                             _sr_apply_summary = apply_search_replace(
                                 str(OUTPUT_DIR), _blocks, on_miss="log"
                             ) or {}
-                            # v7.33 (maintainer 2026-04-29): bug fix — apply_search_replace
+                            # v7.33 (maintainer): bug fix — apply_search_replace
                             # returns the patched-files map under key "files" (a dict
                             # of {path: replacement_count}), NOT "files_patched". The
                             # orchestrator was reading the wrong key, so even when the
@@ -30241,7 +30339,7 @@ class Orchestrator:
                         }
                 else:
                     # No diff, no file_ops, and reviewer had rejected.
-                    # v6.7 (maintainer 2026-04-23) SOFT-PASS: if the root artifact
+                    # v6.7 (maintainer) SOFT-PASS: if the root artifact
                     # is shippable (≥10KB, complete HTML), treat this as a
                     # tolerated miss and let deployer/tester continue on
                     # what we have. Observed in run_f90b35a5de35: kimi went
@@ -30249,9 +30347,84 @@ class Orchestrator:
                     # blocks delivery. Better to ship reviewer-rejected but
                     # functional base than to run-fail on polish issues.
                     _root_ok_for_softpass = False
+                    # v7.54 (maintainer) — BLOCK conditions for SOFT-PASS:
+                    #
+                    # (a) SHORT-LAZY: output<500 chars after reviewer requeue
+                    #     — LLM said "looks fine" without trying. Observed
+                    #     run 10:54-11:01: round 1 wrote 5218 chars + 1 SR
+                    #     block applied → round 2 wrote 217 chars 0 edits.
+                    #
+                    # (b) LATE-ROUND-NO-EDITS: 0 edits in round≥2 with budget
+                    #     remaining — even if output is large. Observed run
+                    #     18:05-18:08: round 1 patcher fail correctly →
+                    #     round 2 wrote 13586 chars (finish=length, token
+                    #     capped) but 0 SR blocks → SOFT-PASS shipped a still
+                    #     reviewer-rejected artifact instead of using the
+                    #     remaining budget. (b) catches "long but empty" cases
+                    #     that (a) misses. Only blocks when budget remains;
+                    #     final round still falls through to SOFT-PASS to
+                    #     avoid a deadlock.
+                    _patcher_out_len = len(str(_patcher_out_raw or "").strip())
+                    _curr_requeues = int(getattr(self, "_reviewer_requeues", 0) or 0)
+                    try:
+                        _max_rej_for_block = int(self._configured_max_reviewer_rejections() or 3)
+                    except Exception:
+                        _max_rej_for_block = 3
+                    _short_lazy_output = (
+                        _patcher_out_len < 500 and _curr_requeues > 0
+                    )
+                    _late_round_no_edits = (
+                        _curr_requeues >= 2
+                        and _curr_requeues < _max_rej_for_block
+                        and _patcher_out_len >= 500
+                    )
+                    _block_softpass_v754 = _short_lazy_output or _late_round_no_edits
+                    if _block_softpass_v754:
+                        _reason = "short_lazy" if _short_lazy_output else "late_round_no_edits"
+                        logger.warning(
+                            "[v7.54] Patcher SOFT-PASS BLOCKED (%s): output=%d chars, "
+                            "requeues=%d/%d. Failing patcher so multi-round re-audit (v7.10) "
+                            "can engage instead of silent skip.",
+                            _reason, _patcher_out_len, _curr_requeues, _max_rej_for_block,
+                        )
+                        # v7.55 (maintainer): UX clarity — when v7.54
+                        # BLOCK fires, patcher.success=False shows up as "失败"
+                        # in the canvas/timeline. But this is NOT a real
+                        # failure — it's a deliberate fail-to-trigger
+                        # reviewer re-audit (v7.10 multi-round). Emit a
+                        # progress event + NE entry so the UI shows
+                        # "等待 Reviewer 第 N+1 轮重审" instead of bare "失败".
+                        try:
+                            _zh_reason = (
+                                "本轮输出过短（< 500 字符），疑似敷衍"
+                                if _short_lazy_output else
+                                f"已是第 {_curr_requeues} 轮且未产出修改，需要 Reviewer 重审决定是否还有可改空间"
+                            )
+                            _next_round = _curr_requeues + 1
+                            self._append_ne_activity(
+                                subtask.id,
+                                f"补丁师本轮 0 改动（{_zh_reason}），让 Reviewer 第 {_next_round} 轮重审 — "
+                                f"这不是失败，是质量门控（v7.54）。",
+                                entry_type="warn",
+                            )
+                            await self.emit("subtask_progress", {
+                                "subtask_id": subtask.id,
+                                "stage": "patcher_block_for_reaudit",
+                                "message": f"补丁师等待 Reviewer 第 {_next_round} 轮重审（v7.54 质量门控）",
+                                "block_reason": _reason,
+                                "current_round": _curr_requeues,
+                                "next_round": _next_round,
+                                "max_rounds": _max_rej_for_block,
+                            })
+                        except Exception as _ux_err:
+                            logger.debug("[v7.55] BLOCK UX message emit failed: %s", _ux_err)
                     try:
                         _root_idx_sp = OUTPUT_DIR / "index.html"
-                        if _root_idx_sp.exists() and _root_idx_sp.stat().st_size >= 10_000:
+                        if (
+                            not _block_softpass_v754
+                            and _root_idx_sp.exists()
+                            and _root_idx_sp.stat().st_size >= 10_000
+                        ):
                             _sp_text = _root_idx_sp.read_text(encoding="utf-8", errors="replace")
                             if "<!doctype" in _sp_text[:300].lower() and "</html>" in _sp_text[-500:].lower():
                                 _root_ok_for_softpass = True
@@ -30281,7 +30454,7 @@ class Orchestrator:
                                             "will be marked failed so reviewer can keep rejecting.",
                                             "; ".join(_tool_failures)[:200],
                                         )
-                                # v7.11 (maintainer 2026-04-28): block SOFT-PASS when
+                                # v7.11 (maintainer): block SOFT-PASS when
                                 # reviewer reported unresolved runtime errors. Was:
                                 # patcher saw runtime error like "Cannot read
                                 # properties of null" / "click handler did nothing"
@@ -30338,7 +30511,7 @@ class Orchestrator:
                         }
                 if not patch_outcome.get("ok"):
                     fail_reason = str(patch_outcome.get("error") or "patcher applied no valid hunks")
-                    # v7.1k.3 (maintainer 2026-04-26): if patcher's diff was rolled
+                    # v7.1k.3 (maintainer): if patcher's diff was rolled
                     # back (anchor-tag check / 80% volume floor / unparseable
                     # HTML), the original artifact is unchanged and still
                     # shippable. Don't fail the run on patcher's bad attempt
@@ -30355,7 +30528,7 @@ class Orchestrator:
                                 _root_softpass_after_rollback = True
                     except Exception:
                         _root_softpass_after_rollback = False
-                    # v7.12 (maintainer 2026-04-28): same gate as v7.11 SOFT-PASS:
+                    # v7.12 (maintainer): same gate as v7.11 SOFT-PASS:
                     # if reviewer flagged unresolved runtime errors, this
                     # SOFT-PASS-after-rollback path must also fail so the
                     # multi-round re-audit loop can engage. Was: v7.11 BLOCK
@@ -30378,6 +30551,39 @@ class Orchestrator:
                                 )
                         except Exception as _v712_err:
                             logger.debug("[v7.12] runtime-error gate failed: %s", _v712_err)
+                    # v7.55 (maintainer): mirror v7.54 BLOCK conditions
+                    # on this fallback path. Without this, v7.54 set
+                    # `_block_softpass_v754=True` on the primary SOFT-PASS
+                    # branch (line ~30292) but `patch_outcome.ok=False` then
+                    # fell through to v7.1k.3 here and silently SOFT-PASSed
+                    # anyway. Observed run 2026-04-30 18:14: patcher round 1
+                    # produced 206 chars 0 edits → v7.54 BLOCK fired in
+                    # primary path (good!) → v7.1k.3 took over and shipped
+                    # the rejected artifact (bad). Now both paths agree.
+                    if _root_softpass_after_rollback:
+                        _patcher_out_len_rb = len(str(_patcher_out_raw or "").strip())
+                        _curr_requeues_rb = int(getattr(self, "_reviewer_requeues", 0) or 0)
+                        try:
+                            _max_rej_rb = int(self._configured_max_reviewer_rejections() or 3)
+                        except Exception:
+                            _max_rej_rb = 3
+                        _short_lazy_rb = (
+                            _patcher_out_len_rb < 500 and _curr_requeues_rb > 0
+                        )
+                        _late_no_edits_rb = (
+                            _curr_requeues_rb >= 2
+                            and _curr_requeues_rb < _max_rej_rb
+                            and _patcher_out_len_rb >= 500
+                        )
+                        if _short_lazy_rb or _late_no_edits_rb:
+                            _reason_rb = "short_lazy" if _short_lazy_rb else "late_round_no_edits"
+                            _root_softpass_after_rollback = False
+                            logger.warning(
+                                "[v7.55] Patcher SOFT-PASS-after-rollback BLOCKED (%s): "
+                                "output=%d chars, requeues=%d/%d. Failing patcher so "
+                                "multi-round re-audit (v7.10) can engage.",
+                                _reason_rb, _patcher_out_len_rb, _curr_requeues_rb, _max_rej_rb,
+                            )
                     if _root_softpass_after_rollback:
                         logger.warning(
                             "[v7.1k.3] Patcher SOFT-PASS after rollback: %s — root artifact is still shippable.",
@@ -30431,7 +30637,7 @@ class Orchestrator:
                         "hunks_applied": patch_outcome.get("hunks_applied", 0),
                         "files_patched": patch_outcome.get("files_patched", [])[:12],
                     })
-                    # v6.4.3 (maintainer 2026-04-21): patcher writes directly into
+                    # v6.4.3 (maintainer): patcher writes directly into
                     # /tmp/evermind_output/ via file_ops, which IS the preview
                     # root — refresh is automatic. Tell the user + reviewer
                     # explicitly so there's no confusion about stale bytes.
@@ -30445,7 +30651,7 @@ class Orchestrator:
                         "stage": "patcher_deployed",
                         "files_patched": patch_outcome.get("files_patched", [])[:12],
                     })
-                    # v6.7d (maintainer 2026-04-24) FIX — DO NOT re-run reviewer
+                    # v6.7d (maintainer) FIX — DO NOT re-run reviewer
                     # after patcher. Observed run_cccf88d7c324 and 4 prior
                     # runs: reviewer was reset to PENDING but the scheduler
                     # never re-executed it because deployer/tester/debugger
@@ -30457,8 +30663,8 @@ class Orchestrator:
                     # remained pending" → run marked FAILED despite every
                     # node passing.
                     #
-                    # v7.0 (maintainer 2026-04-24) RESTORE reviewer re-audit.
-                    # Per maintainer's clarification "补丁师结束后应该再次回到 reviewer 审查":
+                    # v7.0 (maintainer) RESTORE reviewer re-audit.
+                    # Per the user's clarification "补丁师结束后应该再次回到 reviewer 审查":
                     # patcher-only closure is too lenient — the patched artifact
                     # should go through reviewer ONE MORE TIME to confirm the
                     # fix and catch any regressions the patcher introduced.
@@ -30467,14 +30673,14 @@ class Orchestrator:
                     # fixes the scheduler side by ALSO invalidating downstream
                     # (deployer/tester/debugger) so they re-queue properly.
                     pending_rv_id = getattr(self, "_pending_reviewer_requeue_id", None)
-                    # v7.1k (maintainer 2026-04-26): SKIP re-audit when patcher
+                    # v7.1k (maintainer): SKIP re-audit when patcher
                     # produced no actual edits (soft-pass). Re-running reviewer
                     # against unchanged bytes will reject again → infinite loop
                     # / scheduler deadlock that ends in "1 subtask pending"
                     # → run marked failed despite tester pass. Observed in
                     # run_2e86ab303e13 (coffee shop pro). Soft-pass path keeps
                     # reviewer COMPLETED and lets downstream finish.
-                    # v7.1k.2 (maintainer 2026-04-26): observed in run_a34403a10093
+                    # v7.1k.2 (maintainer): observed in run_a34403a10093
                     # that even when patcher did real edits (files=1), the
                     # scheduler still couldn't recover from reviewer reset to
                     # PENDING — deployer/tester/debugger had already started
@@ -30527,17 +30733,17 @@ class Orchestrator:
                     except Exception as _v729b_err:
                         logger.debug("[v7.29b] orphan asset check failed: %s", _v729b_err)
 
-                    # v7.10 (maintainer 2026-04-28): RE-ENABLE multi-round re-audit
+                    # v7.10 (maintainer): RE-ENABLE multi-round re-audit
                     # now that scheduler gate (line ~24897) blocks deployer/
                     # debugger while `_pending_reviewer_requeue_id` is set.
                     # The scheduler-side gate prevents the race that caused
                     # v7.8c to deadlock (downstream finishing before reset).
                     # Trigger condition: reviewer rejected + patcher made
-                    # real edits + budget remaining. Per maintainer: "每一次补丁师
+                    # real edits + budget remaining. Per User: "每一次补丁师
                     # 又改好了都再次给到我们的审查员去审查".
                     _max_rej_for_loop = self._configured_max_reviewer_rejections()
                     _budget_remaining = int(getattr(self, "_reviewer_requeues", 0) or 0) < _max_rej_for_loop
-                    # v7.31 (maintainer 2026-04-29): also re-audit when patcher
+                    # v7.31 (maintainer): also re-audit when patcher
                     # SOFT-PASSED with 0 effective edits AND reviewer had real
                     # blocking_issues. User feedback: silently skipping after
                     # 1 patcher attempt feels like "I don't know if it passed
@@ -30604,6 +30810,65 @@ class Orchestrator:
                                 target.output = ""
                                 target.completed_at = 0
                                 target.error = ""
+                                # v7.61 (maintainer): inject round-N
+                                # signal into reviewer's description so it
+                                # doesn't write the same verdict 3 rounds
+                                # in a row. Observed run 14:50-14:56:
+                                # reviewer wrote IDENTICAL 2957-char output
+                                # all 3 rounds because patcher made no
+                                # changes → file was identical → reviewer
+                                # input was identical → LLM produced
+                                # identical output. Patcher then wrote
+                                # near-identical 1755/1762/1756 chars 0
+                                # edits each round. Pure death-spiral.
+                                #
+                                # Fix: append a round-N specific block to
+                                # the reviewer's description on each
+                                # re-audit. The block tells reviewer:
+                                # (a) which round this is, (b) that
+                                # patcher's previous round produced N
+                                # edits (likely 0), (c) be MORE specific
+                                # this time so patcher has actionable
+                                # SEARCH/REPLACE anchors. Splice on a
+                                # marker so multi-rounds don't pile up.
+                                try:
+                                    _round_n = int(getattr(self, "_reviewer_requeues", 0) or 0) + 1
+                                    _max_rounds = int(self._configured_max_reviewer_rejections() or 3)
+                                    _last_patcher_files = 0
+                                    try:
+                                        if isinstance(result, dict):
+                                            _last_patcher_files = len(result.get("files_created") or [])
+                                    except Exception:
+                                        pass
+                                    _base_desc = target.description or ""
+                                    _marker = "## v7.61 ROUND-N RE-AUDIT"
+                                    _idx_marker = _base_desc.find(_marker)
+                                    if _idx_marker > 0:
+                                        _base_desc = _base_desc[:_idx_marker].rstrip()
+                                    _round_block = (
+                                        f"\n\n{_marker} (round {_round_n}/{_max_rounds})\n"
+                                        f"This is your re-audit pass after patcher round {_round_n - 1}. "
+                                        f"Patcher's previous round produced {_last_patcher_files} new file(s); "
+                                        f"if 0, the on-disk artifact is IDENTICAL to what you reviewed last time.\n"
+                                        f"\n"
+                                        f"YOUR DUTY THIS ROUND:\n"
+                                        f"1. Re-examine the same artifact with FRESH eyes — what actionable "
+                                        f"detail did you miss last round?\n"
+                                        f"2. Output the JSON verdict block FIRST (before prose) — last round "
+                                        f"the JSON was sometimes missing, breaking the patcher loop.\n"
+                                        f"3. blocking_issues MUST include `anchor_line_range` + "
+                                        f"`current_excerpt` (12-30 chars verbatim from disk) so patcher can "
+                                        f"build SEARCH/REPLACE blocks directly. Without these, patcher "
+                                        f"writes vague prose and changes nothing.\n"
+                                        f"4. If you genuinely think the artifact is APPROVED-quality, set "
+                                        f"verdict=APPROVED with empty blocking_issues — don't reject for "
+                                        f"polish issues if functionality + completeness are met.\n"
+                                        f"5. DO NOT reproduce your previous round's brief verbatim — be "
+                                        f"more specific or escalate to APPROVED.\n"
+                                    )
+                                    target.description = _base_desc + _round_block
+                                except Exception as _re_err:
+                                    logger.debug("[v7.61] reviewer round-N block injection failed: %s", _re_err)
                                 self._append_ne_activity(
                                     target.id,
                                     "Patcher 已完成修补，reviewer 即将二次审查（v7.0 quality-gate）。",
@@ -30676,7 +30941,7 @@ class Orchestrator:
                     "ok": not bool(gap_errors),
                     "issues": gap_errors[:4],
                 })
-                # v6.4.61-D (maintainer 2026-04-23): partial-ok tolerance.
+                # v6.4.61-D (maintainer): partial-ok tolerance.
                 # Observed: a single page with 1 empty visual block was
                 # failing the whole polisher (e.g. pricing.html x1 was
                 # blocking 7 other pages from advancing). New rule:
@@ -30829,7 +31094,7 @@ class Orchestrator:
                     browser_actions,
                     plan.goal,
                 )
-                # v7.0b (maintainer 2026-04-24): CLI mode cannot drive the
+                # v7.0b (maintainer): CLI mode cannot drive the
                 # internal browser plugin — the CLI subprocess (claude/
                 # codex/gemini) only has Read/Edit/Write/Bash tools, not
                 # the Evermind-managed browser window. Skip the visual
@@ -31009,7 +31274,7 @@ class Orchestrator:
                     visited_urls=visited_urls,
                 )
                 result["output"] = full_output
-                # v6.4.61-E (maintainer 2026-04-23): tier-aware warning.
+                # v6.4.61-E (maintainer): tier-aware warning.
                 # Tier-1 missing (implementation_blueprint / critical_
                 # algorithms / builder_1/2_handoff / deliverables_contract)
                 # is a HARD quality problem — builder will be blind. We
@@ -31050,20 +31315,20 @@ class Orchestrator:
                     # Hard-fail caused 3-4 retries (~9min waste) when models
                     # don't reliably call source_fetch tools.
 
-                # v7.0 ROI#4 / v6.7e (maintainer 2026-04-24): analyst quality gate.
+                # v7.0 ROI#4 / v6.7e (maintainer): analyst quality gate.
                 # Observed run_6cef28077a5e: analyst finished in 42s with only
                 # 6820 chars / 3-of-6 reference URLs off-topic (playwright,
                 # reg-viz, BackstopJS as "coffee shop references"). Enforce:
                 #   (a) output_chars >= EVERMIND_ANALYST_MIN_CHARS (default 15000)
                 #   (b) off-topic URL detection for website/marketing goals
                 # If either fails on first attempt (retries==0), force a retry
-                # with an explicit nudge — quality > speed per maintainer instructions.
+                # with an explicit nudge — quality > speed per the maintainer instructions.
                 _analyst_out = str(result.get("output") or "")
                 _analyst_chars = len(_analyst_out)
                 _min_chars = self._read_int_env(
                     "EVERMIND_ANALYST_MIN_CHARS", 15000, 5000, 30000
                 ) if hasattr(self, "_read_int_env") else 15000
-                # v7.1i (maintainer 2026-04-25): kimi-k2.6 output budget < claude/gpt.
+                # v7.1i (maintainer): kimi-k2.6 output budget < claude/gpt.
                 # 15000 char floor causes spurious retry (observed run_4a0d0282d4b3:
                 # 13051 chars). Lower the floor when the producing model is kimi.
                 _model_used = str(result.get("assigned_model","") or "").lower()
@@ -31098,7 +31363,7 @@ class Orchestrator:
                             f"偏题 URL {len(_offtopic)} 个 (如 {_offtopic[0][:60]})"
                         )
                 if _quality_issues:
-                    # v7.1i (maintainer 2026-04-25): 之前 retry 让 analyst 全部从零重写，
+                    # v7.1i (maintainer): 之前 retry 让 analyst 全部从零重写，
                     # 浪费已经研究好的 13K 字符 + 已访问的 N 个 URL。
                     # 现在改成"在原产出基础上扩展 / 补全缺失段落"——把 prior output
                     # 注入下一轮 user prompt，明确告诉 LLM "扩展，不要重写"。
@@ -31144,7 +31409,7 @@ class Orchestrator:
             ):
                 reviewer_output = (result.get("output") or "").strip()
                 reviewer_verdict = self._parse_reviewer_verdict(reviewer_output)
-                # v7.36 (maintainer 2026-04-29): track the BEST avg reviewer score
+                # v7.36 (maintainer): track the BEST avg reviewer score
                 # across all rounds. Used by v7.35 regression rollback at the
                 # budget-exhausted soft-pass site. Without this update here,
                 # the v7.35 check at soft-pass always saw `_best=0` and the
@@ -31167,7 +31432,7 @@ class Orchestrator:
                 except Exception as _bs_err:
                     logger.debug("[v7.36] best-score tracking failed: %s", _bs_err)
                 if reviewer_verdict == "UNKNOWN":
-                    # v6.4.2 (maintainer 2026-04-21) — HARD CAP on UNKNOWN retries.
+                    # v6.4.2 (maintainer) — HARD CAP on UNKNOWN retries.
                     # Previously retryable=True would keep reviewer spinning
                     # forever whenever the model's output didn't contain a
                     # parseable APPROVED/REJECTED. Observed 4+ runs in one
@@ -31283,7 +31548,7 @@ class Orchestrator:
                     upstream_builder_ids = {
                         str(st.id) for st in self._transitive_upstream_builders(plan, subtask)
                     }
-                    # v6.4 (maintainer 2026-04-21) — ARCHITECTURAL REWRITE.
+                    # v6.4 (maintainer) — ARCHITECTURAL REWRITE.
                     # Per user spec: "构建者在整一个流程中只跑一次". On
                     # reviewer REJECTED, we NEVER re-run builder/merger/
                     # polisher/assets. The ONLY repair path is:
@@ -31297,7 +31562,7 @@ class Orchestrator:
                     eligible_asset_tasks: List[SubTask] = []
                     eligible_polishers_for_patch: List[SubTask] = []
                     max_rejections = self._configured_max_reviewer_rejections()
-                    # v7.38 (maintainer 2026-04-29) — REPLACES v7.36 max_retries bump.
+                    # v7.38 (maintainer) — REPLACES v7.36 max_retries bump.
                     # The previous v7.36 fix bumped patcher.max_retries to
                     # max_rejections so eligibility (retries < max_retries)
                     # would pass after a fail. But this allowed orchestrator's
@@ -31332,7 +31597,7 @@ class Orchestrator:
 
                     _v728b_should_softpass = False
                     try:
-                        # v7.30 (maintainer 2026-04-29): bug fix — referenced
+                        # v7.30 (maintainer): bug fix — referenced
                         # `reviewer_outputs` (plural) which is undefined in
                         # this scope; the local var is `reviewer_output`
                         # (singular). NameError was silently caught by the
@@ -31427,7 +31692,7 @@ class Orchestrator:
                         # v6.2 patcher-udiff branch: add patcher to requeue
                         # with the reviewer blocking_issues as its input.
                         #
-                        # v6.4 (maintainer 2026-04-21) FIX — CIRCULAR DEPENDENCY.
+                        # v6.4 (maintainer) FIX — CIRCULAR DEPENDENCY.
                         # Previous v6.3.14b tried to add patcher to reviewer's
                         # depends_on so reviewer would re-run *after* patcher.
                         # That created a deadlock:
@@ -31445,7 +31710,7 @@ class Orchestrator:
                         # reset reviewer to PENDING so it re-audits. This
                         # avoids any circular dep while still guaranteeing
                         # patcher → re-review ordering.
-                        # v6.4.20 (maintainer 2026-04-22) PATCHER PRE-INJECT.
+                        # v6.4.20 (maintainer) PATCHER PRE-INJECT.
                         # Previous rounds: kimi patcher looped on 3 identical
                         # `file_ops read` calls (same signature hash), got
                         # loop-guard-broken, then PROSE-ABORTed at 8192 chars,
@@ -31458,7 +31723,16 @@ class Orchestrator:
                         try:
                             _snapshot_blocks: List[str] = []
                             _snapshot_paths: List[str] = []
-                            _snapshot_budget = 120_000  # ~30k tokens max for snapshots
+                            # v7.59 (maintainer): 120K → 40K. Observed
+                            # run 14:50-14:56: patcher user_chars=70468 with
+                            # 3 rounds × 1760 chars 0 edits identical output
+                            # — LLM lost in massive prompt, kept generating
+                            # the same shallow prose. 40K snapshot keeps the
+                            # most recent flagged file content + reviewer
+                            # brief but cuts the noise. patcher.yaml's
+                            # SEARCH/REPLACE format is the actual contract;
+                            # extra context just dilutes attention.
+                            _snapshot_budget = 40_000  # ~10k tokens — focused, not exhaustive
                             _snapshot_used = 0
                             _scan_root = OUTPUT_DIR
                             _preferred: List[Path] = []
@@ -31515,7 +31789,7 @@ class Orchestrator:
                                 "acceptance_criteria": acceptance_criteria[:10],
                                 "rejection_conclusion": rejection_details[:1200],
                             }, ensure_ascii=False, indent=2)
-                            # v6.4.28 (maintainer 2026-04-22): explicit absolute-
+                            # v6.4.28 (maintainer): explicit absolute-
                             # path contract. Observed bug: kimi resolved
                             # `index.html` against backend CWD (inside
                             # Evermind.app bundle), causing 20+ rejected
@@ -31545,12 +31819,53 @@ class Orchestrator:
                                 f"Do a SINGLE `file_ops list` on that path, then targeted `file_ops edit` "
                                 f"with ABSOLUTE paths (start with `{_output_root_abs}/...`).\n"
                             )
+                            # v7.53 (maintainer): strip previous round's
+                            # appended brief BEFORE re-appending. Without this,
+                            # round N's description = base + round-1 brief +
+                            # round-2 brief + ... + round-N brief, and snapshot
+                            # blocks (~80KB each) compound: observed user_chars
+                            # 85K → 168K → 251K across rounds 1/2/3 in
+                            # run_618eb91e0c3f, with round 2 hitting
+                            # finish=length token cap. Splice on the marker
+                            # "## REVIEWER REJECTED" so each round only carries
+                            # the freshest reject brief, keeping prompt size
+                            # roughly constant.
+                            _base_desc = patcher_task.description or ""
+                            _marker_idx = _base_desc.find("## REVIEWER REJECTED")
+                            if _marker_idx > 0:
+                                _base_desc = _base_desc[:_marker_idx].rstrip()
+                            # v7.54 (maintainer): round 2+ urgency block.
+                            # Round 1 LLM was lazy in observed run: 5218 chars
+                            # → 1 SR block applied → reviewer still rejected →
+                            # round 2 wrote 217 chars saying "looks fine to
+                            # me" and 0 edits. Tell the model EXPLICITLY this
+                            # is not the first round, prior round's edits
+                            # were INSUFFICIENT, and short responses get
+                            # rejected outright. Only include for rounds ≥ 2.
+                            _round_n = int(self._reviewer_requeues or 0)
+                            _urgency_block = ""
+                            if _round_n >= 2:
+                                _urgency_block = (
+                                    "\n## CRITICAL — ROUND %d (NOT FIRST ROUND)\n"
+                                    "Reviewer has REJECTED your output AGAIN. Your previous round's "
+                                    "edits did NOT resolve the blocking_issues above.\n"
+                                    "- DO NOT say \"the code looks mostly correct\" or \"no further "
+                                    "changes needed\" — reviewer disagrees and has flagged the issues "
+                                    "above as STILL BROKEN.\n"
+                                    "- Outputs under 500 chars will be REJECTED as lazy and the "
+                                    "patcher will be marked failed (v7.54 short-output guard).\n"
+                                    "- You MUST emit at least one new SEARCH/REPLACE block this "
+                                    "round, addressing one of the still-unresolved issues.\n"
+                                    "- If you genuinely cannot find a fix, say so explicitly with "
+                                    "the issue id — DO NOT silently produce a short summary.\n"
+                                ) % _round_n
                             patcher_task.description = (
-                                f"{patcher_task.description}\n\n"
+                                f"{_base_desc}\n\n"
                                 "## REVIEWER REJECTED — SURGICAL REPAIR (v6.4.20)\n"
                                 f"Round {self._reviewer_requeues}/{max_rejections}. Reviewer's issues (JSON):\n"
                                 f"```json\n{blocking_payload_json}\n```\n\n"
                                 f"{_preinject_block}\n"
+                                f"{_urgency_block}"
                                 "## YOUR MANDATE\n"
                                 "- Use file_ops (action=\"edit\" preferred, action=\"write\" only for tiny new files)\n"
                                 "  to surgically fix EACH blocking_issue above.\n"
@@ -31566,7 +31881,7 @@ class Orchestrator:
                                 f"收到 Reviewer 退回 brief（第 {self._reviewer_requeues} 轮）：{rejection_details[:600]}",
                                 entry_type="warn",
                             )
-                        # v6.4 (maintainer 2026-04-21): DEFER reviewer reset.
+                        # v6.4 (maintainer): DEFER reviewer reset.
                         # Keep reviewer in COMPLETED state here so patcher's
                         # depends_on=[reviewer] is satisfied and patcher can
                         # actually run. Store a sentinel so the patcher
@@ -31610,7 +31925,7 @@ class Orchestrator:
                             existing_html = self._current_run_html_artifacts()
                             has_usable_artifacts = bool(existing_html) or bool(restored_files)
                             if has_usable_artifacts:
-                                # v7.35 (maintainer 2026-04-29): regression check.
+                                # v7.35 (maintainer): regression check.
                                 # When the rejection budget is exhausted, the
                                 # current on-disk artifact is whatever patcher
                                 # last touched. If patcher's edits made things
@@ -31725,7 +32040,7 @@ class Orchestrator:
                                     entry_type="error",
                                 )
                         elif strict_game_delivery:
-                            # v6.1.3 (maintainer 2026-04-19): 3D game rejection budget
+                            # v6.1.3 (maintainer): 3D game rejection budget
                             # exhausted now SOFT-PASSES like websites do. Previous
                             # behaviour hard-FAILED the pipeline and blocked
                             # downstream deployer/tester/debugger — "two rejections
@@ -31876,7 +32191,7 @@ class Orchestrator:
                         })
                 else:
                     if interaction_error:
-                        # v6.7c (maintainer 2026-04-24 00:35): SOFT-PASS after 2
+                        # v6.7c (maintainer 00:35): SOFT-PASS after 2
                         # retries when deployer has succeeded. Observed in
                         # run_6cef28077a5e: tester failed the "must click or
                         # fill" gate 3 times × 5-9min each (24min total) on
@@ -31966,7 +32281,7 @@ class Orchestrator:
                 visual_status = str(visual_regression.get("status", "") or "").strip().lower()
                 visual_summary = str(visual_regression.get("summary", "") or "").strip()
                 visual_suggestions = visual_regression.get("suggestions") if isinstance(visual_regression.get("suggestions"), list) else []
-                # v7.1j (maintainer 2026-04-25): SOFT-PASS the visual gate when reviewer
+                # v7.1j (maintainer): SOFT-PASS the visual gate when reviewer
                 # has already exhausted budget (artifact shipped) AND deployer has
                 # verified preview reachability. The deterministic gate becomes
                 # supplementary in that state — triggering builder retry on it caused
@@ -32334,19 +32649,37 @@ class Orchestrator:
             # so it stops covering the Evermind main UI. Next node that needs a
             # browser will relaunch (~3-5s cost, acceptable for the UX win of
             # letting the user actually see their pipeline run).
+            # v7.53 (maintainer): in reviewer→patcher→reviewer loops the
+            # original always-shutdown caused 3-4 open/close cycles per run
+            # (reviewer round 1 → close → patcher → reviewer round 2 reopens →
+            # close → ... ). UX was poor (window flickered repeatedly). Now
+            # only shutdown when the reviewer has actually finished
+            # (verdict=APPROVED, budget exhausted, or non-reviewer QA roles)
+            # — i.e. when there is no pending requeue. result["requeue_requested"]
+            # is set to True at line ~31578 when reviewer rejects + patcher
+            # can be re-queued; in that case we KEEP the browser open so the
+            # next reviewer round inherits the existing instance (saves 3-5s
+            # per cycle and removes the flicker).
             if os.getenv("EVERMIND_BROWSER_KEEP_OPEN", "0").strip().lower() not in ("1", "true", "yes"):
                 if str(subtask.agent_type or "").lower() in {"reviewer", "tester", "debugger", "polisher"}:
-                    try:
-                        for _plug in (plugins or []):
-                            if getattr(_plug, "name", "") == "browser" and hasattr(_plug, "shutdown"):
-                                await _plug.shutdown()
-                                logger.info(
-                                    "BrowserPlugin shutdown after %s node — window will reopen on next use",
-                                    subtask.agent_type,
-                                )
-                                break
-                    except Exception as _bs_err:
-                        logger.debug("browser auto-shutdown skipped: %s", _bs_err)
+                    _will_requeue = bool(result.get("requeue_requested")) if isinstance(result, dict) else False
+                    if _will_requeue:
+                        logger.info(
+                            "[v7.53] BrowserPlugin kept open after %s node — requeue_requested=True; next round will reuse this instance.",
+                            subtask.agent_type,
+                        )
+                    else:
+                        try:
+                            for _plug in (plugins or []):
+                                if getattr(_plug, "name", "") == "browser" and hasattr(_plug, "shutdown"):
+                                    await _plug.shutdown()
+                                    logger.info(
+                                        "BrowserPlugin shutdown after %s node — window will reopen on next use",
+                                        subtask.agent_type,
+                                    )
+                                    break
+                        except Exception as _bs_err:
+                            logger.debug("browser auto-shutdown skipped: %s", _bs_err)
 
             # v3.1: Inject token/cost data into result dict so _build_run_summary
             # can aggregate them at the run level. Previously these values were only
@@ -32427,7 +32760,7 @@ class Orchestrator:
         files = []
         task_dir = OUTPUT_DIR / f"task_{subtask_id}"
         task_dir.mkdir(parents=True, exist_ok=True)
-        # v6.4.9 (maintainer 2026-04-22) — dedup noisy skip logs.
+        # v6.4.9 (maintainer) — dedup noisy skip logs.
         # During long streaming builders this function is invoked on every
         # multifile batch; when the model misses named-block format, three
         # "Skipping …" info lines were firing ~8 times per 10-second batch for
@@ -32475,7 +32808,7 @@ class Orchestrator:
                 if "Body lacks meaningful visible content" in str(err or ""):
                     return str(err)
 
-            # v6.4.26 (maintainer 2026-04-22) — declarative acceptance checks.
+            # v6.4.26 (maintainer) — declarative acceptance checks.
             # If the caller passed `acceptance_checks`, use those; they come
             # from plan.node_briefs or analyst's <build_checks> and are
             # authoritative. Otherwise fall back to hard-coded defaults that
@@ -33506,7 +33839,7 @@ class Orchestrator:
         # the guard here ensures it is always evaluated.
         if subtask.agent_type == "builder" and subtask.builder_invalid_salvage_tripped:
             loop_msg = subtask.builder_invalid_salvage_message or retry_error
-            # v6.1.9 (maintainer 2026-04-19): before giving up, try ONE more retry
+            # v6.1.9 (maintainer): before giving up, try ONE more retry
             # in direct_text mode — most salvage failures come from truncated
             # tool_call JSON arguments, and direct_text bypasses the JSON
             # wrapper entirely. Only eligible when the mode isn't already
@@ -33683,7 +34016,7 @@ class Orchestrator:
             subtask.output = fallback_msg
             subtask.error = ""
             subtask.completed_at = time.time()
-            # v6.7c (maintainer 2026-04-24): sync NE as "passed" not "failed" —
+            # v6.7c (maintainer): sync NE as "passed" not "failed" —
             # the subtask actually completes successfully (via soft-fall-
             # back to builder output). Showing "failed" on UI confused
             # users into thinking the run was broken. Internal bookkeeping
@@ -33701,7 +34034,7 @@ class Orchestrator:
                 "restored_files": restored_files[:12] if restored_files else [],
             })
             return True
-        # v7.38 (maintainer 2026-04-29): patcher 0-edit fail → bypass self-retry
+        # v7.38 (maintainer): patcher 0-edit fail → bypass self-retry
         # and trigger reviewer re-audit instead.
         # Observed in run_0b55b8bd93f4: kimi LLM produced 0 file_ops edits.
         # The orchestrator's generic retry loop re-ran patcher 3× with
@@ -33709,7 +34042,7 @@ class Orchestrator:
         # result every time. v7.36 inadvertently amplified this by bumping
         # max_retries=3.
         #
-        # Correct flow per maintainer's design intent: each reviewer rejection
+        # Correct flow per the user's design intent: each reviewer rejection
         # round = ONE fresh patcher attempt with NEW reviewer audit/
         # blocking_issues. Same input → same output retry is futile.
         # Here we:
@@ -33786,7 +34119,7 @@ class Orchestrator:
                                     self._run_results.pop(_rid, None)
                                 except Exception:
                                     pass
-                        # v7.50 (maintainer 2026-04-30): DO NOT increment
+                        # v7.50 (maintainer): DO NOT increment
                         # _reviewer_requeues here. The reviewer post-exec
                         # on the NEXT reviewer rejection will naturally
                         # increment it. Previously this was a double-count
@@ -33916,7 +34249,7 @@ class Orchestrator:
             await self._sync_ne_status(subtask.id, "failed", error_message=subtask.error[:300])
             return False
 
-        # ── v7.3 (maintainer 2026-04-26) Guard: 402 quota / membership errors are
+        # ── v7.3 (maintainer) Guard: 402 quota / membership errors are
         # account-level. Retrying with the same key returns the same 402.
         # Prior code burned 3 retries × ~2s = 6s + log spam per node.
         # Fail fast and surface a clear "configure API key" hint to the user.
@@ -35251,7 +35584,7 @@ class Orchestrator:
         if plan.total_retries >= plan.max_total_retries:
             await self.emit("orchestrator_max_retries", {"total_retries": plan.total_retries})
             return
-        # v7.1i (maintainer 2026-04-26): break reviewer→tester rebuild loop.
+        # v7.1i (maintainer): break reviewer→tester rebuild loop.
         # When reviewer's rejection budget is exhausted (_reviewer_requeues
         # already >= max_rejections) and tester subsequently fails, the legacy
         # path re-triggers builder→reviewer→patcher chain → reviewer rejects
@@ -35426,7 +35759,7 @@ class Orchestrator:
 
         # Explicit deterministic gate markers first (must override any stale/pass JSON text).
         if "__evermind_tester_gate__=fail" in lower or "deterministic visual gate failed" in lower:
-            # v7.1j (maintainer 2026-04-25): deterministic-gate failures are now NON-retryable.
+            # v7.1j (maintainer): deterministic-gate failures are now NON-retryable.
             # Why: reviewer already approved (or budget-shipped) and deployer verified the
             # preview URL is reachable; the gate is a supplementary structural check.
             # Triggering a builder retry on gate-only failure repeatedly caused 10+ min
@@ -35569,7 +35902,7 @@ class Orchestrator:
         if not text:
             return "UNKNOWN"
 
-        # v6.4.3 (maintainer 2026-04-21) — kimi sometimes wraps reasoning inside
+        # v6.4.3 (maintainer) — kimi sometimes wraps reasoning inside
         # <think>...</think>. Strip those so they don't confuse JSON / keyword
         # detection. Also strip common tag variants.
         try:
@@ -35661,7 +35994,7 @@ class Orchestrator:
         except Exception:
             pass
 
-        # v6.4.3 (maintainer 2026-04-21) — lenient keyword fallback.
+        # v6.4.3 (maintainer) — lenient keyword fallback.
         # Previously required literal `"rejected"` (with quotes). This missed
         # free-form outputs like "VERDICT: REJECTED" / "verdict=approved".
         # Now scan with word-boundary regex, case-insensitive.
@@ -35707,7 +36040,7 @@ class Orchestrator:
             if st.status in (TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.BLOCKED, TaskStatus.CANCELLED)
         )
         pending_count = len(plan.subtasks) - terminal_count
-        # v6.7d debug (maintainer 2026-04-24): log every non-terminal subtask so we
+        # v6.7d debug (maintainer): log every non-terminal subtask so we
         # can identify which one keeps run_status=failed despite all NE green.
         if pending_count > 0:
             _non_terminal = [

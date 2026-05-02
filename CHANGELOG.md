@@ -9,7 +9,7 @@ This project follows [Semantic Versioning](https://semver.org/) loosely; major r
 This is the inaugural public release. The release combines hardening from v7.5/v7.6 internal rounds with last-mile fixes for cross-task pollution, asset pipeline routing, and chat agent stability.
 
 ### Security
-- **Removed hardcoded private LLM relay endpoint (`api.private-relay.com`)** from `MODEL_REGISTRY`. Default `api_base` for the GPT family is now `api.openai.com/v1`. Users who want a relay (private-relay / relay / etc.) configure it explicitly in **Settings → API Keys** per provider.
+- **Removed hardcoded private LLM relay endpoint (`api.relay.com`)** from `MODEL_REGISTRY`. Default `api_base` for the GPT family is now `api.openai.com/v1`. Users who want a relay (relay / relay / etc.) configure it explicitly in **Settings → API Keys** per provider.
 - `.env.example` now defaults `HOST=127.0.0.1` (was `0.0.0.0`). The unencrypted backend port stays bound to localhost unless explicitly opted out.
 
 ### Added

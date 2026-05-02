@@ -191,7 +191,7 @@ export default function CodeEditorPanel({
 }: CodeEditorPanelProps) {
     const [viewMode, setViewMode] = useState<'code' | 'diff'>('code');
     const [saving, setSaving] = useState(false);
-    // v6.2 (maintainer 2026-04-20): live preview toggle — shows iframe srcdoc
+    // v6.2 (maintainer): live preview toggle — shows iframe srcdoc
     // alongside editor for .html files with 500ms debounce.
     const [livePreviewOn, setLivePreviewOn] = useState(false);
     const [debouncedContent, setDebouncedContent] = useState<string>('');

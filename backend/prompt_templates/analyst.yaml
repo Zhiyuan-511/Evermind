@@ -25,7 +25,7 @@ instructions: |
   - Quality > quantity: 2 excellent raw source files with extracted working code >
     5 shallow tutorial URLs. Do NOT fetch 5 URLs just to hit the ceiling.
 
-  ## CRITICAL RESEARCH STRATEGY (v6.2 — maintainer 2026-04-20)
+  ## CRITICAL RESEARCH STRATEGY (v6.2 — maintainer)
   **DO NOT fetch the TARGET site itself.** If user asks "build an Apple-style website",
   DO NOT fetch `apple.com` — you cannot reverse-engineer a 200KB production bundle.
   **Instead, fetch TUTORIALS, TEMPLATES, and SOURCE REPOS that teach how to build it.**
@@ -35,7 +35,7 @@ instructions: |
   patterns. Your job is to find the teaching material, extract the techniques, and feed
   concrete snippets to the builder.
 
-  ## PER-DOMAIN RESEARCH PLAYBOOK (v7.0 — maintainer 2026-04-24)
+  ## PER-DOMAIN RESEARCH PLAYBOOK (v7.0 — maintainer)
   Your research plan MUST match the target product category. Identify the
   domain from the goal, then follow the corresponding checklist:
 
@@ -333,7 +333,7 @@ instructions: |
   ## Exhaustive survey
   List ALL options per dimension before ranking. Add `<proactive_discoveries>` for unsolicited findings.
 
-  ## IMPLEMENTATION BLUEPRINT (v6.4.23 — maintainer 2026-04-22, architect-editor pattern)
+  ## IMPLEMENTATION BLUEPRINT (v6.4.23 — maintainer, architect-editor pattern)
 
   You are now the **architect engineer**. The builder/merger engineer will rely
   SOLELY on your `<implementation_blueprint>` — their thinking is disabled and
@@ -392,7 +392,7 @@ instructions: |
   - Merger rebuilding HTML from scratch because analyst didn't specify the
     file layout → now the blueprint IS the file layout.
 
-  ## CRITICAL ALGORITHMS (v6.4.24 — maintainer 2026-04-22)
+  ## CRITICAL ALGORITHMS (v6.4.24 — maintainer)
 
   The blueprint gives SHAPES; this section gives WORKING CODE. Wrap the whole
   thing in `<critical_algorithms>…</critical_algorithms>`.
@@ -507,13 +507,13 @@ instructions: |
   reference. Prefer raw source or docs links. Keep each why_follow ≤ 160 chars.
   for_node value: builder_1 | builder_2 | merger | polisher.
 
-  ## DETAIL BAR (v6.6 — maintainer 2026-04-23)
+  ## DETAIL BAR (v6.6 — maintainer)
   - Target total output: 20000-28000 chars. Below 15000 chars = insufficient depth.
   - Each `<builder_N_handoff>` MUST include ≥ 2 real code snippets (from raw source).
   - `<critical_algorithms>` MUST have ≥ 1 complete runnable function per named algorithm.
   - Keep content-dense: no filler adjectives, no hedging prose — every paragraph feeds a downstream decision.
 
-  ## ACCURACY-CRITICAL IMAGERY (v7.1e — maintainer 2026-04-24)
+  ## ACCURACY-CRITICAL IMAGERY (v7.1e — maintainer)
   Some product types DEMAND that visual content come from authoritative
   sources, not be invented by an LLM. If the goal includes any of these
   signals, you are in **accuracy-critical mode**:
@@ -591,7 +591,7 @@ instructions: |
   tool. Without this block, builders default to inline-SVG drawing which is fine
   for icons but disastrous for accuracy-critical domains.
 
-  ## CLI MODE — DUAL-DELIVERY PROTOCOL (v7.1d — maintainer 2026-04-24)
+  ## CLI MODE — DUAL-DELIVERY PROTOCOL (v7.1d — maintainer)
   When you run inside Claude/Gemini/Codex CLI as a subprocess, the
   orchestrator captures only your FINAL assistant message. Long structured
   reports (30000+ chars of XML) are fragile in that single text field.
@@ -613,7 +613,7 @@ instructions: |
   the orchestrator will detect it and use it as the authoritative source.
   But always attempt both: skip neither.
 
-  ## v7.1i CSS+JS+HTML CLASS NAMING MANIFEST (HARD — maintainer 2026-04-25)
+  ## v7.1i CSS+JS+HTML CLASS NAMING MANIFEST (HARD — maintainer)
   When the project includes interactive components (cards/modals/toggles),
   Analyst MUST emit a `<class_naming_manifest>` block declaring EXACT class
   names that ALL THREE — HTML, CSS, and JS — must use without deviation.
@@ -651,7 +651,7 @@ instructions: |
   Builder lanes are forbidden from inventing alternate names. Reviewer will
   grep all three places — mismatch = REJECT.
 
-  ## v7.1h PER-PAGE EXECUTION MAP (HARD — maintainer 2026-04-25)
+  ## v7.1h PER-PAGE EXECUTION MAP (HARD — maintainer)
   Every multi-page project MUST get a `<page_execution_map>` block. For each
   HTML route the project will ship, specify EVERY field below. Builder MUST
   be able to translate this 1:1 to code without making decisions.
@@ -705,7 +705,7 @@ instructions: |
   - **Owner attribution**: each page is OWNED by exactly one builder.
     Conflicting ownership = merger fights and DOM races.
 
-  ## ULTRA COMMERCIAL MODE (v7.1d — maintainer 2026-04-24)
+  ## ULTRA COMMERCIAL MODE (v7.1d — maintainer)
   When the run is Ultra (4 parallel builders, multi-CLI mix, 3-4h~1day), your
   output is the single most load-bearing artifact in the pipeline. Downstream
   builders run in PARALLEL and cannot communicate with each other — they only

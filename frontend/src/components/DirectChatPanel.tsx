@@ -27,7 +27,7 @@ interface DirectChatMessage {
     streaming?: boolean;
     filesModified?: string[];
     fileDiffs?: FileDiff[];
-    // v6.4.29 (maintainer 2026-04-22) — collapsible thinking bubble.
+    // v6.4.29 (maintainer) — collapsible thinking bubble.
     // `reasoning` accumulates reasoning_content stream deltas; `reasoningActive`
     // toggles between "thinking live" and "done — collapsed". When the first
     // main content token arrives, reasoningActive goes false and the bubble
@@ -409,7 +409,7 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
         if (ws?.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'chat_stop' }));
         }
-        // v6.4.36 (maintainer 2026-04-23): flip the last assistant message to
+        // v6.4.36 (maintainer): flip the last assistant message to
         // NOT streaming locally so subsequent chat_token events (which
         // may still arrive before backend acks the stop) are ignored by
         // the WS handler (it checks last?.streaming before appending).
