@@ -9,7 +9,7 @@
 const { app, BrowserWindow, dialog, shell, ipcMain } = require('electron');
 const { spawn, execSync } = require('child_process');
 
-// v6.4.8 (maintainer 2026-04-22): CDP port is OPT-IN ONLY.
+// v6.4.8 (2026-04-22): CDP port is OPT-IN ONLY.
 // Rationale: previously we auto-opened port 19222 for Chrome DevTools Protocol
 // so the Python browser_use runner could attach to Evermind's embedded
 // Chromium. In practice this made the AI agent hijack the user's visible
@@ -1029,7 +1029,7 @@ function createMainWindow() {
     });
 
     // §2.1: Pass instance type to frontend so UI can display DEV/PACKAGED badge
-    // v7.2 (maintainer 2026-04-26): land on the Launchpad (`/`) instead of jumping
+    // v7.2 (2026-04-26): land on the Launchpad (`/`) instead of jumping
     // straight into `/editor`, so users see the recent-tasks list + Open
     // Workspace / Browse Templates / Clone Repository CTAs first. The
     // launchpad routes them to /editor when they pick a workspace/template.
