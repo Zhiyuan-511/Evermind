@@ -6168,11 +6168,33 @@ class ShellPlugin(Plugin):
     async def execute(self, params: Dict[str, Any], context: Dict = None) -> PluginResult:
         try:
             command = params.get("command", "")
-            cwd = params.get("cwd", context.get("workspace", "/tmp") if context else "/tmp")
+            requested_cwd = params.get("cwd", context.get("workspace", "/tmp") if context else "/tmp")
             timeout = min(params.get("timeout", 30), context.get("max_timeout", 60) if context else 60)
 
-            # Security: block dangerous commands
-            blocked = ["rm -rf /", "sudo rm", "mkfs", ": () {", "dd if="]
+            # Security: scope cwd to allowed roots only. Even though the chat agent's
+            # blocklist below would catch obvious payloads, a shell with cwd=$HOME can
+            # still exfiltrate files via curl/scp/etc. Force cwd to OUTPUT_DIR or an
+            # explicitly-configured workspace root.
+            try:
+                from pathlib import Path as _Path
+                import os as _os
+                output_dir = _Path(_os.environ.get("OUTPUT_DIR") or "/tmp/evermind_output").resolve()
+                home_evermind = (_Path.home() / ".evermind").resolve()
+                allowed_cwd_roots = [output_dir, home_evermind, _Path("/tmp").resolve()]
+                requested_resolved = _Path(requested_cwd).expanduser().resolve()
+                cwd_ok = any(
+                    requested_resolved == r or str(requested_resolved).startswith(str(r) + _os.sep)
+                    for r in allowed_cwd_roots
+                )
+                cwd = str(requested_resolved) if cwd_ok else str(output_dir)
+            except Exception:
+                cwd = "/tmp/evermind_output"
+
+            # Security: block dangerous commands. NOTE: this blocklist is not robust
+            # against motivated attackers (`${IFS}`, `\x72m`, `r''m`, etc. all bypass).
+            # The real defence is the cwd scoping above; this list catches obvious
+            # accidents and serves as a "don't bother trying" hint to the LLM.
+            blocked = ["rm -rf /", "sudo rm", "mkfs", ": () {", "dd if=", ":(){"]
             if any(b in command for b in blocked):
                 return PluginResult(success=False, error="Command blocked by security policy")
 

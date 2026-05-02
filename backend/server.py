@@ -3202,17 +3202,19 @@ _ARTIFACT_SYNC_MANIFEST = ".evermind-artifact-sync.json"
 
 
 def _is_safe_workspace_root(target: Path) -> bool:
-    """Security: only allow browsing under HOME, Desktop, Documents, or OUTPUT_DIR."""
+    """Security gate: only allow workspace operations inside the run-output directory,
+    the user's ~/.evermind folder, or roots the user has explicitly added via Settings.
+
+    Previously this also whitelisted the entire $HOME, $HOME/Desktop, $HOME/Documents,
+    $HOME/Downloads, $HOME/Projects, and /tmp. That was far too permissive for an
+    unauthenticated localhost server: any process or browser tab on the same machine
+    could read/write anywhere under ~/. This now defaults to a tight set; users who
+    need broader access add explicit roots via the Workspace Roots setting.
+    """
     resolved = target.resolve()
-    home = Path.home().resolve()
     safe_roots = [
-        home / "Desktop",
-        home / "Documents",
-        home / "Downloads",
-        home / "Projects",
-        home,
         OUTPUT_DIR.resolve(),
-        Path("/tmp").resolve(),
+        (Path.home() / ".evermind").resolve(),
     ]
     for allowed in _WORKSPACE_ALLOWED_ROOTS:
         try:
@@ -3220,7 +3222,7 @@ def _is_safe_workspace_root(target: Path) -> bool:
         except Exception:
             pass
     return any(
-        resolved == safe_root or str(resolved).startswith(str(safe_root) + "/")
+        resolved == safe_root or str(resolved).startswith(str(safe_root) + os.sep)
         for safe_root in safe_roots
     )
 

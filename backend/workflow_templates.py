@@ -58,7 +58,7 @@ BUILT_IN_TEMPLATES: Dict[str, Dict] = {
     },
     "ultra": {
         "id": "ultra",
-        "label": "Ultra (顶级玩家，3-4h~1day)",
+        "label": "Ultra (heavy long-running, 3-4h up to 1 day)",
         "description": (
             "Product-grade long-task mode: 4 builder 并行 + 多轮 review "
             "(max 5 reject) + 多文件项目脚手架 + 图片/资源 + 打包部署。"
@@ -70,7 +70,7 @@ BUILT_IN_TEMPLATES: Dict[str, Dict] = {
             {"key": "uidesign", "label": "UI Designer", "depends_on": ["analyst"]},
             {"key": "scribe",   "label": "Scribe (spec 文档)", "depends_on": ["analyst"]},
             # 4 builder 并行：frontend / backend-ish / assets / tests-or-docs
-            {"key": "builder1", "label": "Builder 1 (主页 / Landing)",    "depends_on": ["uidesign", "scribe"]},
+            {"key": "builder1", "label": "Builder 1 (Home / Landing)",    "depends_on": ["uidesign", "scribe"]},
             {"key": "builder2", "label": "Builder 2 (分页 / sub-routes)", "depends_on": ["uidesign", "scribe"]},
             {"key": "builder3", "label": "Builder 3 (共享组件/样式)",     "depends_on": ["uidesign", "scribe"]},
             {"key": "builder4", "label": "Builder 4 (交互/资源/脚本)",    "depends_on": ["uidesign", "scribe"]},
@@ -709,7 +709,7 @@ def _build_pro_template(goal: str = "") -> Dict[str, Any]:
         _patcher_deps = list(_reviewer_node.get("depends_on") or ["reviewer"])
         nodes.append({
             "key": "patcher",
-            "label": "补丁师",
+            "label": "Patcher",
             "depends_on": _patcher_deps,
         })
 
@@ -951,7 +951,7 @@ def _build_ultra_template_for_goal(goal: str) -> Dict:
         ],
         # default = website (existing labels)
         "website": [
-            "Builder 1 (主页 / Landing)",
+            "Builder 1 (Home / Landing)",
             "Builder 2 (分页 / sub-routes)",
             "Builder 3 (共享组件/样式)",
             "Builder 4 (交互/资源/脚本)",

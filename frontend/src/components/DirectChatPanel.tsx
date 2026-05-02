@@ -277,7 +277,7 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                                 ...last,
                                 reasoningActive: true,
                                 reasoningStartedAt: last.reasoningStartedAt || Date.now(),
-                                reasoning: last.reasoning || '（长任务进行中…）',
+                                reasoning: last.reasoning || '(Long task running…)',
                             }];
                         }
                         return prev;
@@ -422,7 +422,7 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                     streaming: false,
                     reasoningActive: false,
                     reasoningEndedAt: Date.now(),
-                    content: (last.content || '') + '\n\n[已停止]',
+                    content: (last.content || '') + '\n\n[Stopped]',
                 }];
             }
             return prev;
@@ -526,20 +526,20 @@ export default function DirectChatPanel({ wsRef, connected, lang, sessionId, onO
                                 } catch { /* ignore */ }
                                 const fileName = parsedPath ? parsedPath.split('/').slice(-1)[0] : '';
                                 const labels: Record<string, string> = {
-                                    write: `正在编写 ${fileName || '文件'}…`,
-                                    edit: `正在修改 ${fileName || '文件'}…`,
-                                    read: `正在读取 ${fileName || '文件'}…`,
-                                    list: '正在列目录…',
-                                    search: `正在搜索 ${parsedPath ? `「${parsedPath}」` : ''}…`,
-                                    delete: `正在删除 ${fileName || '文件'}…`,
-                                    navigate: `正在访问 ${parsedPath || '网页'}…`,
-                                    observe: '正在观察页面…',
-                                    click: `正在点击 ${parsedPath || '元素'}…`,
-                                    screenshot: '正在截图…',
-                                    press: '正在按键…',
-                                    fill: '正在填写表单…',
+                                    write: `Writing ${fileName || 'file'}…`,
+                                    edit: `Editing ${fileName || 'file'}…`,
+                                    read: `Reading ${fileName || 'file'}…`,
+                                    list: 'Listing directory…',
+                                    search: `Searching ${parsedPath ? `"${parsedPath}"` : ''}…`,
+                                    delete: `Deleting ${fileName || 'file'}…`,
+                                    navigate: `Navigating to ${parsedPath || 'page'}…`,
+                                    observe: 'Observing page…',
+                                    click: `Clicking ${parsedPath || 'element'}…`,
+                                    screenshot: 'Taking screenshot…',
+                                    press: 'Pressing key…',
+                                    fill: 'Filling form…',
                                 };
-                                const label = labels[parsedAction] || `正在执行 ${pendingTc.name}${parsedAction ? '.' + parsedAction : ''}…`;
+                                const label = labels[parsedAction] || `Running ${pendingTc.name}${parsedAction ? '.' + parsedAction : ''}…`;
                                 const isWrite = parsedAction === 'write' || parsedAction === 'edit';
                                 return (
                                     <div style={{

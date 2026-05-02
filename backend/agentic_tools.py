@@ -1022,21 +1022,38 @@ def _extract_ddg_url(url: str) -> str:
     return url
 
 def _resolve_safe_path(path: str) -> Optional[Path]:
-    """Resolve a path, ensuring it's within allowed directories."""
+    """Resolve a path, ensuring it's within allowed directories.
+
+    Tightened security model: only allow OUTPUT_DIR, ~/.evermind, /tmp variants,
+    and explicit user-configured workspace roots. The previous version whitelisted
+    Path.home() entirely, which let chat-tool prompt injections read ~/.ssh/,
+    ~/.aws/, etc. Users who need broader chat-tool access must explicitly add
+    a workspace root via Settings.
+    """
     if not path:
         return None
     p = Path(path).expanduser()
     if not p.is_absolute():
         p = OUTPUT_DIR / p
-    # Allow access to output dir, /tmp, home directories for repos
     # macOS: /tmp is a symlink to /private/tmp, so include /private variants
     allowed_roots = [
         Path("/tmp"),
         Path("/private/tmp"),
         Path("/private/var/folders"),
         OUTPUT_DIR,
-        Path.home(),
+        Path.home() / ".evermind",
     ]
+    # Optional: extend with user-configured workspace roots
+    try:
+        from settings import load_settings  # type: ignore
+        cfg = load_settings() or {}
+        for extra in (cfg.get("workspace_allowed_roots") or []):
+            try:
+                allowed_roots.append(Path(extra).expanduser())
+            except Exception:
+                continue
+    except Exception:
+        pass
     resolved = p.resolve()
     for root in allowed_roots:
         try:

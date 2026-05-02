@@ -212,16 +212,44 @@ app.on('second-instance', () => {
     }
 });
 
+/**
+ * Path validation guard for IPC reveal/open handlers.
+ * Only allow paths under the user's known workspace roots so a compromised
+ * preview iframe cannot launch arbitrary apps via shell.openPath.
+ */
+function isAllowedRevealTarget(p) {
+    if (typeof p !== 'string' || !p.trim()) return false;
+    let abs;
+    try {
+        abs = path.resolve(p);
+    } catch (e) {
+        return false;
+    }
+    const allowedRoots = [
+        path.resolve(app.getPath('temp'), 'evermind_output'),
+        path.resolve(app.getPath('home'), '.evermind'),
+        path.resolve(app.getPath('home'), 'Desktop'),
+        path.resolve(app.getPath('home'), 'Documents'),
+        path.resolve(app.getPath('home'), 'Downloads'),
+        path.resolve('/tmp/evermind_output'),
+    ];
+    return allowedRoots.some(root => abs === root || abs.startsWith(root + path.sep));
+}
+
 ipcMain.handle('evermind:reveal-in-finder', async (_event, targetPath) => {
     const resolvedPath = typeof targetPath === 'string' ? targetPath.trim() : '';
     if (!resolvedPath) return false;
+    if (!isAllowedRevealTarget(resolvedPath)) {
+        console.warn('[Electron] reveal-in-finder blocked: path outside allowed roots:', resolvedPath);
+        return false;
+    }
     try {
         if (fs.existsSync(resolvedPath)) {
             shell.showItemInFolder(resolvedPath);
             return true;
         }
         const parentDir = path.dirname(resolvedPath);
-        if (parentDir && fs.existsSync(parentDir)) {
+        if (parentDir && isAllowedRevealTarget(parentDir) && fs.existsSync(parentDir)) {
             shell.openPath(parentDir);
             return true;
         }
@@ -235,9 +263,13 @@ ipcMain.handle('evermind:reveal-in-finder', async (_event, targetPath) => {
 ipcMain.handle('evermind:open-path', async (_event, targetPath) => {
     const resolvedPath = typeof targetPath === 'string' ? targetPath.trim() : '';
     if (!resolvedPath) return false;
+    if (!isAllowedRevealTarget(resolvedPath)) {
+        console.warn('[Electron] open-path blocked: path outside allowed roots:', resolvedPath);
+        return false;
+    }
     try {
         const openTarget = fs.existsSync(resolvedPath) ? resolvedPath : path.dirname(resolvedPath);
-        if (!openTarget || !fs.existsSync(openTarget)) return false;
+        if (!openTarget || !isAllowedRevealTarget(openTarget) || !fs.existsSync(openTarget)) return false;
         const result = await shell.openPath(openTarget);
         return result === '';
     } catch (error) {
@@ -625,7 +657,7 @@ function waitForService(port, label, timeoutMs = 90000) {
             });
             req.on('error', () => {
                 if (Date.now() - start > timeoutMs) {
-                    reject(new Error(`${label} 未能在 ${timeoutMs / 1000} 秒内启动`));
+                    reject(new Error(`${label} did not start within ${timeoutMs / 1000}s`));
                 } else {
                     setTimeout(check, 800);
                 }
@@ -916,12 +948,12 @@ function startFrontend() {
         cwd = path.join(RESOURCES, 'frontend');
     } else {
         dialog.showErrorBox(
-            '前端构建缺失',
-            'Evermind 桌面版需要 Next.js standalone 构建。\n\n'
-            + '请在项目目录中运行：\n'
+            'Frontend build missing',
+            'Evermind desktop requires the Next.js standalone build.\n\n'
+            + 'In the project directory, run:\n'
             + '  cd frontend && npm run build\n\n'
-            + '然后重新打包 Electron 应用。\n\n'
-            + '已检查以下路径：\n'
+            + 'Then repackage the Electron app.\n\n'
+            + 'Looked in these paths:\n'
             + resolvedStandalone.candidates.map((candidate) => `  - ${path.join(candidate, 'server.js')}`).join('\n')
         );
         app.quit();
@@ -1144,26 +1176,27 @@ app.whenReady().then(async () => {
     showSplash();
 
     // 1.5. Prefer reusing healthy services instead of killing active runs.
-    updateSplashStatus('正在检查现有服务...', 10);
+    updateSplashStatus('Checking existing services...', 10);
 
     // 2. Find Python
-    updateSplashStatus('正在检查 Python...', 24);
+    updateSplashStatus('Checking Python...', 24);
     const pythonCmd = findPython();
     if (!pythonCmd) {
         dialog.showErrorBox(
-            'Python 未安装',
-            'Evermind 需要 Python 3.10+ 来运行 AI 后端。\n\n'
-            + '请安装 Python：\n'
+            'Python not installed',
+            'Evermind needs Python 3.10+ to run the AI backend.\n\n'
+            + 'Please install Python:\n'
             + '• macOS: brew install python3\n'
-            + '• 或者从 https://python.org 下载\n\n'
-            + '安装后重新打开 Evermind。'
+            + '• Windows: winget install Python.Python.3.12 (or download from https://python.org)\n'
+            + '• Or download from https://python.org\n\n'
+            + 'Reopen Evermind after installing.'
         );
         app.quit();
         return;
     }
 
     // 3. Install deps if needed
-    updateSplashStatus('正在检查依赖...', 38);
+    updateSplashStatus('Checking dependencies...', 38);
     ensurePythonDeps(pythonCmd);
 
     // 4. Start services
@@ -1177,7 +1210,7 @@ app.whenReady().then(async () => {
         if (reuseExistingBackend) {
             const runtimeId = backendDiagnostics.runtime?.runtime_id || 'unknown';
             const outputDir = backendDiagnostics.output_dir || '(unknown)';
-            updateSplashStatus('检测到现有后端，正在复用...', 56);
+            updateSplashStatus('Reusing existing backend...', 56);
             console.log(`[Electron] Reusing healthy backend ${runtimeId} on port ${BACKEND_PORT}`);
             console.log(`[Electron] Existing backend output dir: ${outputDir}`);
             rememberManagedService('backend', backendDiagnostics.runtime?.pid, 'reused');
@@ -1189,7 +1222,7 @@ app.whenReady().then(async () => {
                 console.log(`[Electron] Expected build=${DESKTOP_BUILD_ID}`);
                 console.log(`[Electron] Expected output=${expectedOutputDir}`);
             }
-            updateSplashStatus('正在启动后端服务...', 56);
+            updateSplashStatus('Starting backend service...', 56);
             killPortProcess(BACKEND_PORT);
             startBackend(pythonCmd);
             await waitForService(BACKEND_PORT, 'Backend', 90000);
@@ -1197,7 +1230,7 @@ app.whenReady().then(async () => {
 
         const frontendIdentity = await probeFrontendIdentity();
         if (frontendIdentity.ok) {
-            updateSplashStatus('检测到当前前端，正在复用...', 76);
+            updateSplashStatus('Reusing existing frontend...', 76);
             console.log(`[Electron] Reusing healthy frontend build ${frontendIdentity.detectedBuildId} on port ${FRONTEND_PORT}`);
             const frontendPid = listPortPids(FRONTEND_PORT)[0] || 0;
             if (frontendPid) {
@@ -1211,31 +1244,31 @@ app.whenReady().then(async () => {
                 console.log(`[Electron] Existing frontend build=${frontendIdentity.detectedBuildId || '(missing)'}`);
                 console.log(`[Electron] Expected frontend build=${FRONTEND_BUILD_ID}`);
             }
-            updateSplashStatus('正在启动前端服务...', 76);
+            updateSplashStatus('Starting frontend service...', 76);
             killPortProcess(FRONTEND_PORT);
             startFrontend();
             await waitForService(FRONTEND_PORT, 'Frontend', 90000);
             const startedFrontendIdentity = await probeFrontendIdentity();
             if (!startedFrontendIdentity.ok) {
                 throw new Error(
-                    `前端已启动，但 build 校验失败（expected ${FRONTEND_BUILD_ID}, got ${startedFrontendIdentity.detectedBuildId || 'unknown'}）`
+                    `Frontend started but build verification failed (expected ${FRONTEND_BUILD_ID}, got ${startedFrontendIdentity.detectedBuildId || 'unknown'})`
                 );
             }
         }
 
         // 5. Show main window
-        updateSplashStatus('正在加载编辑器...', 92);
+        updateSplashStatus('Loading editor...', 92);
         createMainWindow();
     } catch (err) {
         console.error('[Electron] Startup error:', err);
         dialog.showErrorBox(
-            '启动失败',
-            `Evermind 服务启动失败：\n\n${err.message}\n\n`
-            + '请检查：\n'
-            + '1. Python3 是否已安装 (python3 --version)\n'
-            + '2. Python 依赖是否已安装 (pip install -r requirements.txt)\n'
-            + '3. Node.js 是否已安装 (node --version)\n\n'
-            + `当前 PATH:\n${process.env.PATH.split(':').slice(0, 10).join('\n')}`
+            'Startup failed',
+            `Evermind failed to start:\n\n${err.message}\n\n`
+            + 'Checks:\n'
+            + '1. Python3 installed? (python3 --version)\n'
+            + '2. Python deps installed? (pip install -r requirements.txt)\n'
+            + '3. Node.js installed? (node --version)\n\n'
+            + `Current PATH:\n${process.env.PATH.split(path.delimiter).slice(0, 10).join('\n')}`
         );
         await cleanup('startup-error');
         app.exit(1);

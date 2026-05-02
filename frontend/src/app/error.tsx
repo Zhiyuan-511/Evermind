@@ -58,10 +58,10 @@ export default function GlobalError({
           Evermind Recovery
         </div>
         <h1 style={{ margin: 0, fontSize: 28, lineHeight: 1.15 }}>
-          编辑器加载失败
+          Editor failed to load
         </h1>
         <p style={{ marginTop: 12, marginBottom: 0, color: '#b8c0d4', lineHeight: 1.7, fontSize: 14 }}>
-          这通常是旧前端缓存或本地持久化状态与当前版本不兼容导致的。可以先重试；如果还是失败，再清理本地界面状态并重新加载。
+          This is usually old frontend cache or persisted local state being incompatible with the current version. Try reloading first; if it still fails, clear local UI state and reload.
         </p>
         <div
           style={{
@@ -91,7 +91,7 @@ export default function GlobalError({
               cursor: 'pointer',
             }}
           >
-            重试加载
+            Retry
           </button>
           <button
             onClick={() => {
@@ -108,7 +108,7 @@ export default function GlobalError({
               cursor: 'pointer',
             }}
           >
-            清理本地状态后重载
+            Clear local state and reload
           </button>
         </div>
       </div>

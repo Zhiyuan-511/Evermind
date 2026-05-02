@@ -1,17 +1,23 @@
 # ═══════════════════════════════════════════
 # Evermind — Docker Compose
-# 一键部署: docker compose up --build
-# 前端: http://localhost:3000/editor
-# 后端: http://localhost:8765
+# One-shot deploy: docker compose up --build
+# Frontend: http://127.0.0.1:3000/editor
+# Backend:  http://127.0.0.1:8765
+#
+# SECURITY: ports are bound to 127.0.0.1 only.
+# The backend has NO authentication and exposes shell / file_ops /
+# chat-agent tools to anyone who can reach the port. If you need to
+# expose this to LAN, you MUST add an auth middleware first.
 # ═══════════════════════════════════════════
 
 services:
   backend:
     build: ./backend
     ports:
-      - "8765:8765"
+      - "127.0.0.1:8765:8765"
     environment:
-      - HOST=0.0.0.0
+      # Bind only inside the container's localhost interface.
+      - HOST=127.0.0.1
       - PORT=8765
       - WORKSPACE=/workspace
       - OUTPUT_DIR=/tmp/evermind_output
@@ -23,7 +29,7 @@ services:
       - evermind_settings:/app/data
     restart: unless-stopped
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8765/api/health" ]
+      test: [ "CMD", "curl", "-f", "http://127.0.0.1:8765/api/health" ]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -31,11 +37,11 @@ services:
   frontend:
     build: ./frontend
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - HOSTNAME=0.0.0.0
+      - HOSTNAME=127.0.0.1
     depends_on:
       backend:
         condition: service_healthy

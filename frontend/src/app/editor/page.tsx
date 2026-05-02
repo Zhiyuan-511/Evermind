@@ -170,7 +170,19 @@ export default function EditorPage() {
 
 function EditorPageInner() {
     // ── Theme + Lang ──
-    const [lang, setLang] = useState<'en' | 'zh'>('zh');
+    // Default to English; users in Chinese-speaking locales can switch via the
+    // toolbar EN/中 toggle. Persisted in localStorage so the choice sticks.
+    const [lang, setLang] = useState<'en' | 'zh'>(() => {
+        if (typeof window === 'undefined') return 'en';
+        try {
+            const saved = window.localStorage.getItem('evermind.lang');
+            return saved === 'zh' ? 'zh' : 'en';
+        } catch { return 'en'; }
+    });
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        try { window.localStorage.setItem('evermind.lang', lang); } catch { /* ignore */ }
+    }, [lang]);
     const [theme, setTheme] = useState<'dark' | 'light'>(() => {
         if (typeof window === 'undefined') return 'dark';
         try {
