@@ -4792,14 +4792,14 @@ class TestAINarrativeReport(unittest.TestCase):
             full_output='{"architecture": "Three.js shooter"}',
             files_list=[],
             result={"success": True},
-            model_used="gpt-5.4-mini",
+            model_used="gpt-4o-mini",
             duration_seconds=45.0,
         )
         self.assertIn("执行概述", result)
         self.assertIn("Three.js", result)
         mock_bridge.quick_completion.assert_called_once()
         call_args = mock_bridge.quick_completion.call_args
-        self.assertEqual(call_args.kwargs.get("model"), "gpt-5.4-mini")
+        self.assertEqual(call_args.kwargs.get("model"), "gpt-4o-mini")
 
     def test_generate_ai_narrative_returns_empty_on_short_response(self):
         mock_bridge = MagicMock()
@@ -13276,7 +13276,7 @@ class TestBuilderRootOwnership(unittest.TestCase):
         self.assertGreaterEqual(len(prefs1), 2)
         self.assertEqual(prefs1[0], "kimi-coding")
         # V5.1: builder2 and merger are both merger-like, so they use the
-        # viable chain starting with kimi-coding (no gpt-5.4-mini in chain).
+        # viable chain starting with kimi-coding (no gpt-4o-mini in chain).
         self.assertEqual(prefs2[0], "kimi-coding")
         self.assertIn("gpt-5.4", prefs2)
         self.assertEqual(prefs3[0], "kimi-coding")

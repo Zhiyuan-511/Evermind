@@ -900,7 +900,7 @@ CLI_MODEL_OPTIONS: Dict[str, List[Dict[str, str]]] = {
         # GPT-5 family
         {"id": "gpt-5", "name": "GPT-5"},
         {"id": "gpt-5.4", "name": "GPT-5.4"},
-        {"id": "gpt-5.4-mini", "name": "GPT-5.4 Mini"},
+        {"id": "gpt-4o-mini", "name": "GPT-5.4 Mini"},
         {"id": "gpt-5.3-codex", "name": "GPT-5.3 Codex"},
         {"id": "gpt-5.2-codex", "name": "GPT-5.2 Codex"},
         # o series
@@ -930,7 +930,7 @@ CLI_MODEL_OPTIONS: Dict[str, List[Dict[str, str]]] = {
         {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
         {"id": "claude-opus-4-6", "name": "Claude Opus 4.6"},
         {"id": "gpt-5.4", "name": "GPT-5.4"},
-        {"id": "gpt-5.4-mini", "name": "GPT-5.4 Mini"},
+        {"id": "gpt-4o-mini", "name": "GPT-5.4 Mini"},
         {"id": "gpt-4.1", "name": "GPT-4.1"},
         {"id": "gemini/gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
         {"id": "deepseek-chat", "name": "DeepSeek Chat"},
@@ -1401,7 +1401,7 @@ class CLIExecutor:
             )
 
             # v7.1g: Codex output-schema per node-type (kills narration).
-            # Maps node_type → schema file in ~/.openclaw/workspace/codex_schemas/
+            # Maps node_type → schema file in ~/.evermind/workspace/codex_schemas/
             _output_schema_path = ""
             if cli_name == "codex":
                 _CODEX_SCHEMA_MAP = {
@@ -1414,7 +1414,7 @@ class CLIExecutor:
                 _schema_name = _CODEX_SCHEMA_MAP.get(node_type, "")
                 if _schema_name:
                     _candidate = (
-                        Path.home() / ".openclaw" / "workspace"
+                        Path.home() / ".evermind" / "workspace"
                         / "codex_schemas" / f"{_schema_name}.json"
                     )
                     if _candidate.exists():

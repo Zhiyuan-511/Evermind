@@ -24,7 +24,6 @@ services:
       - ALLOWED_DIRS=/workspace,/tmp/evermind_output,/tmp
       - SHELL_TIMEOUT=30
     volumes:
-      - ./evermind_godmode_final.html:/evermind_godmode_final.html:ro
       - /tmp/evermind_output:/tmp/evermind_output
       - evermind_settings:/app/data
     restart: unless-stopped

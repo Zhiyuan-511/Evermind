@@ -13,7 +13,7 @@ This is the inaugural public release. The release combines hardening from v7.5/v
 - `.env.example` now defaults `HOST=127.0.0.1` (was `0.0.0.0`). The unencrypted backend port stays bound to localhost unless explicitly opted out.
 
 ### Added
-- `LICENSE` (Apache 2.0)
+- `LICENSE` (MIT)
 - `INSTALL.md` (end-user installation, permission popups, troubleshooting)
 - `BUILD.md` (build-from-source steps, dev stack, env vars)
 - `CHANGELOG.md` (this file)

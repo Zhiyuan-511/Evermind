@@ -5518,9 +5518,9 @@ async def validate_keys(data: Dict = Body(...)):
 
 
 # NOTE: v6.2 initially shipped a server-side Demo Library + shared-key quota
-# endpoint (`/api/demos`, `/api/demos/try`, `/api/demos/report-cost`). That
-# design put the project author on the hook for API costs. Removed per the maintainer
-# 2026-04-20. Quick-start templates now live client-side in TemplateGallery.tsx
+# endpoint (`/api/demos`, `/api/demos/try`, `/api/demos/report-cost`). That design
+# coupled API costs to whoever ran the server, which broke the local-first model.
+# Removed in v6.x. Quick-start templates now live client-side in TemplateGallery.tsx
 # and run entirely with the user's own configured API key.
 
 
@@ -8677,7 +8677,7 @@ async def websocket_endpoint(ws: WebSocket):
                 # Resolve model: frontend "Auto" sends empty string
                 _raw_chat_model = str(msg.get("model", "")).strip()
                 if not _raw_chat_model:
-                    _raw_chat_model = str(_saved_settings.get("default_model", "")).strip() or "gpt-5.4-mini"
+                    _raw_chat_model = str(_saved_settings.get("default_model", "")).strip() or "gpt-4o-mini"
                 chat_model = _raw_chat_model
                 conv_id = str(msg.get("conversation_id", ""))
                 session_id = str(msg.get("session_id", ""))

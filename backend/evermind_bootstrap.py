@@ -116,7 +116,7 @@ approval_policy = "never"
 sandbox_mode = "workspace-write"
 
 [profiles.evermind-merger]
-model = "gpt-5.4-mini"
+model = "gpt-4o-mini"
 model_reasoning_effort = "minimal"
 model_provider = "gmn"
 approval_policy = "never"
@@ -605,7 +605,7 @@ def bootstrap_user_configs(home: Optional[Path] = None, force: bool = False) -> 
             return None
 
     # 1) Codex schemas
-    schemas_dir = home / ".openclaw" / "workspace" / "codex_schemas"
+    schemas_dir = home / ".evermind" / "workspace" / "codex_schemas"
     for name, schema in _CODEX_SCHEMAS.items():
         path = schemas_dir / f"{name}.json"
         if path.exists() and not force:

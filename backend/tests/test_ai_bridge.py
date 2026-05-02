@@ -7407,7 +7407,7 @@ class TestQuickCompletion(unittest.TestCase):
         result = bridge.quick_completion(
             "write a report",
             system="you are a writer",
-            model="gpt-5.4-mini",
+            model="gpt-4o-mini",
             max_tokens=500,
             timeout_sec=15,
         )
@@ -7439,7 +7439,7 @@ class TestQuickCompletion(unittest.TestCase):
         mock_litellm.completion.return_value = [chunk]
         bridge._litellm = mock_litellm
 
-        bridge.quick_completion("prompt only", model="gpt-5.4-mini")
+        bridge.quick_completion("prompt only", model="gpt-4o-mini")
         call_kwargs = mock_litellm.completion.call_args.kwargs
         self.assertEqual(len(call_kwargs["messages"]), 1)
         self.assertEqual(call_kwargs["messages"][0]["role"], "user")
@@ -7451,7 +7451,7 @@ class TestQuickCompletionFallback(unittest.TestCase):
     def test_fallback_tries_next_model_on_failure(self):
         bridge = AIBridge(config={})
         mock_litellm = MagicMock()
-        # First call (gpt-5.4-mini) raises, second call (kimi-coding) succeeds
+        # First call (gpt-4o-mini) raises, second call (kimi-coding) succeeds
         chunk = MagicMock()
         chunk.choices = [MagicMock()]
         chunk.choices[0].delta = MagicMock(content="kimi response")
@@ -7459,7 +7459,7 @@ class TestQuickCompletionFallback(unittest.TestCase):
         bridge._litellm = mock_litellm
 
         result = bridge.quick_completion(
-            "test", model="gpt-5.4-mini", fallback_models=["kimi-coding"],
+            "test", model="gpt-4o-mini", fallback_models=["kimi-coding"],
         )
         self.assertEqual(result, "kimi response")
         self.assertEqual(mock_litellm.completion.call_count, 2)
@@ -7471,7 +7471,7 @@ class TestQuickCompletionFallback(unittest.TestCase):
         bridge._litellm = mock_litellm
 
         result = bridge.quick_completion(
-            "test", model="gpt-5.4-mini", fallback_models=["kimi-coding"],
+            "test", model="gpt-4o-mini", fallback_models=["kimi-coding"],
         )
         self.assertEqual(result, "")
 
@@ -7485,7 +7485,7 @@ class TestQuickCompletionFallback(unittest.TestCase):
         bridge._litellm = mock_litellm
 
         result = bridge.quick_completion(
-            "test", model="gpt-5.4-mini",
+            "test", model="gpt-4o-mini",
             fallback_models=["nonexistent-xyz", "kimi-coding"],
         )
         self.assertEqual(result, "ok")
@@ -7505,9 +7505,9 @@ class TestPreflightApiProbe(unittest.TestCase):
         mock_litellm.completion.return_value = [chunk]
         bridge._litellm = mock_litellm
 
-        results = bridge.preflight_api_probe(models=["gpt-5.4-mini"])
-        self.assertTrue(results["gpt-5.4-mini"]["ok"])
-        self.assertGreaterEqual(results["gpt-5.4-mini"]["latency_ms"], 0)
+        results = bridge.preflight_api_probe(models=["gpt-4o-mini"])
+        self.assertTrue(results["gpt-4o-mini"]["ok"])
+        self.assertGreaterEqual(results["gpt-4o-mini"]["latency_ms"], 0)
 
     def test_probe_marks_failing_model(self):
         bridge = AIBridge(config={})
@@ -7515,10 +7515,10 @@ class TestPreflightApiProbe(unittest.TestCase):
         mock_litellm.completion.side_effect = Exception("connection refused")
         bridge._litellm = mock_litellm
 
-        results = bridge.preflight_api_probe(models=["gpt-5.4-mini"])
-        self.assertFalse(results["gpt-5.4-mini"]["ok"])
+        results = bridge.preflight_api_probe(models=["gpt-4o-mini"])
+        self.assertFalse(results["gpt-4o-mini"]["ok"])
         # quick_completion swallows exceptions and returns "", so probe sees "empty reply"
-        self.assertTrue(len(results["gpt-5.4-mini"]["error"]) > 0)
+        self.assertTrue(len(results["gpt-4o-mini"]["error"]) > 0)
 
     def test_probe_unknown_model(self):
         bridge = AIBridge(config={})
@@ -7532,7 +7532,7 @@ class TestRecordGatewayTimeout(unittest.TestCase):
 
     def test_timeout_sets_rejection_cooldown(self):
         bridge = AIBridge(config={})
-        model_info = MODEL_REGISTRY.get("gpt-5.4-mini")
+        model_info = MODEL_REGISTRY.get("gpt-4o-mini")
         bridge._record_gateway_timeout(model_info, "test timeout")
         # The model-specific key should have a rejection cooldown
         model_key = bridge._compatible_gateway_key(model_info, model_specific=True)

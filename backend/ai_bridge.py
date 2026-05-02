@@ -585,7 +585,7 @@ MODEL_REGISTRY = {
     # traffic through the project owner's personal relay, leaking keys
     # and prompt content. Now defaults to official OpenAI; relay opt-in
     # is per-user via Settings.
-    "gpt-5.4-mini": {"provider": "openai", "litellm_id": "openai/gpt-5.4-mini", "supports_tools": True, "supports_cua": True,
+    "gpt-4o-mini": {"provider": "openai", "litellm_id": "openai/gpt-4o-mini", "supports_tools": True, "supports_cua": True,
                       "api_base": "https://api.openai.com/v1", "fallback_api_bases": []},
     "gpt-5.4": {"provider": "openai", "litellm_id": "openai/gpt-5.4", "supports_tools": True, "supports_cua": True,
                  "supports_reasoning_effort": True, "api_base": "https://api.openai.com/v1", "fallback_api_bases": []},
@@ -3974,7 +3974,7 @@ class AIBridge:
             state["circuit_open_until"] = 0.0
             # P0 FIX 2026-04-13: Only write rejection cooldown to MODEL-SPECIFIC key,
             # NOT the gateway-level key. A gpt-5.4 "model not found" must NOT block
-            # gpt-5.3-codex/gpt-5.4-mini on the same gateway for 300s.
+            # gpt-5.3-codex/gpt-4o-mini on the same gateway for 300s.
             model_key = self._compatible_gateway_key(model_info, model_specific=True)
             # v6.1.15 quota-exhausted → always lock gateway-level too.
             if _is_quota_exhausted:
@@ -3998,7 +3998,7 @@ class AIBridge:
                 ms_state["last_error"] = state["last_error"]
                 # V4.2 FIX (Codex #1): Do NOT set gateway-level last_rejection_at
                 # when the rejection is model-specific.  Otherwise sibling models
-                # on the same gateway (e.g. gpt-5.4-mini after gpt-5.4 "model not
+                # on the same gateway (e.g. gpt-4o-mini after gpt-5.4 "model not
                 # found") are incorrectly skipped by _next_fallback_candidate.
             else:
                 # No model-specific key — fall back to gateway-level as before

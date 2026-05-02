@@ -105,14 +105,14 @@ class SettingsPersistenceTests(unittest.TestCase):
 
     def test_default_models_prioritize_kimi_for_heavy_nodes_and_gpt_for_planner(self):
         loaded = settings.load_settings()
-        self.assertEqual(loaded['default_model'], 'gpt-5.4-mini')
-        self.assertEqual(loaded['node_model_preferences']['router'][:2], ['gpt-5.4-mini', 'kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-5.4-mini', 'kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['builder'][:1], ['gpt-5.4-mini'])
-        self.assertEqual(loaded['node_model_preferences']['polisher'][:1], ['gpt-5.4-mini'])
-        self.assertEqual(loaded['node_model_preferences']['imagegen'], ['gpt-5.4-mini', 'kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['spritesheet'], ['gpt-5.4-mini', 'kimi-coding'])
-        self.assertEqual(loaded['node_model_preferences']['assetimport'], ['gpt-5.4-mini', 'kimi-coding'])
+        self.assertEqual(loaded['default_model'], 'gpt-4o-mini')
+        self.assertEqual(loaded['node_model_preferences']['router'][:2], ['gpt-4o-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-4o-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['builder'][:1], ['gpt-4o-mini'])
+        self.assertEqual(loaded['node_model_preferences']['polisher'][:1], ['gpt-4o-mini'])
+        self.assertEqual(loaded['node_model_preferences']['imagegen'], ['gpt-4o-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['spritesheet'], ['gpt-4o-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['assetimport'], ['gpt-4o-mini', 'kimi-coding'])
 
     def test_node_model_preferences_round_trip(self):
         sample = settings.load_settings()
@@ -126,7 +126,7 @@ class SettingsPersistenceTests(unittest.TestCase):
 
         self.assertEqual(loaded['node_model_preferences']['builder'], ['gpt-5.4', 'claude-4-sonnet', 'kimi-coding'])
         self.assertEqual(loaded['node_model_preferences']['reviewer'], ['claude-4-sonnet'])
-        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-5.4-mini', 'kimi-coding'])
+        self.assertEqual(loaded['node_model_preferences']['planner'][:2], ['gpt-4o-mini', 'kimi-coding'])
 
     def test_analyst_settings_round_trip(self):
         sample = settings.load_settings()

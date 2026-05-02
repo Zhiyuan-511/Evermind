@@ -165,7 +165,7 @@ planner → analyst ──────────────────┼─
 | **11. Debug** | debugger | Inspect browser console errors / runtime exceptions; suggest fixes | 30s–2 min |
 | **12. Test** | tester | Programmatic interaction tests (click each button, fill each form, drag each draggable) | 1–3 min |
 
-Total Pro-mode wall-clock time: **30–50 minutes** for a typical multi-page website. **Standard mode** (no patcher loop, no asset pipeline) is **8–15 minutes**. **Simple mode** (4 nodes) is **3–5 minutes**.
+Total Pro-mode wall-clock time: **30–50 minutes** for a typical multi-page website. **Standard mode** (no patcher loop, no asset pipeline) is **8–15 minutes**. **Simple mode** (3 nodes) is **3–5 minutes**.
 
 ### Mode comparison
 
@@ -317,8 +317,8 @@ There is **no Evermind-operated server**. There is **no telemetry endpoint**. Th
 
 | Platform | Build available? | Tested? | Status |
 |---|---|---|---|
-| **macOS** (Apple Silicon) | ✅ DMG | ✅ Daily | **Supported** |
-| **macOS** (Intel) | ✅ DMG | 🟡 Occasionally | **Supported** (untested often, but no known issues) |
+| **macOS** (Apple Silicon, arm64) | ✅ DMG | ✅ Daily | **Supported** |
+| **macOS** (Intel, x64) | ❌ No x64 build target yet | ❌ Never built | **Not supported yet** — `electron-builder` config currently only has an `arm64` target. Adding `x64` is one config line; PRs welcome. |
 | **Windows 10/11** | ❌ No `.exe` artifact | ❌ Never built | **Not supported yet** — `electron-builder` config has no `win` target, and several internals (`lsof`, `codesign`, `xattr`, `/Library/Frameworks` paths) are macOS-coded. A Windows port is planned but not done. |
 | **Linux** | ❌ No `.AppImage` | ❌ Never built | **Not supported yet** — same reason as Windows. |
 
@@ -360,14 +360,15 @@ API keys are stored Fernet-encrypted at `~/.evermind/config.json` with the symme
 
 ### 3. Write a prompt and run
 
-**Simple mode** (4 nodes, 3–5 min):
+**Simple mode** (3 nodes, 3–5 min): router → builder → deployer.
 For simple pages, e.g. "a counter web page" or "a three-page coffee shop site".
 
-**Standard mode** (6–8 nodes, 8–15 min):
+**Standard mode** (5 nodes, 8–15 min): router → planner → builder → reviewer → deployer.
 Mid-complexity work, includes reviewer but no patcher loop.
 
-**Pro mode** (11 nodes, 30–50 min):
-Full pipeline including reviewer↔patcher loop and the asset pipeline.
+**Pro mode** (8–13 nodes, 30–50 min): full pipeline including reviewer↔patcher loop and the asset pipeline.
+Activates router, planner, analyst, optionally imagegen + spritesheet + assetimport (asset-heavy tasks),
+builder1 + builder2 in parallel, merger, reviewer, patcher, deployer, plus tester + debugger when needed.
 Best for: 3D WebGL sites, multi-page commercial sites, web games, complex dashboards.
 
 **Ultra mode**: experimental, long-running tasks (24h ceiling).
@@ -397,7 +398,7 @@ You can also start from a blank canvas and build your own DAG by dragging nodes 
 
 ## Known limitations (full disclosure before open-source)
 
-- **Platform**: only tested on macOS (arm64 + x64). Windows/Linux are untested; in theory the Python backend should run, but the Electron frontend would need to be repackaged.
+- **Platform**: only tested on macOS Apple Silicon (arm64). Intel macOS, Windows, and Linux are untested; in theory the Python backend should run on all of them, but the Electron build chain currently has no Intel/Windows/Linux targets configured.
 - **3D site quality**: after v7.62 the builder really does write Three.js code, but the end result is around "Awwwards-mid" level. It's not yet top award-winning (that needs the lygia GLSL library and GSAP ScrollTrigger to be merged in — planned for the next release after open-sourcing).
 - **Polisher occasional timeout**: when the deterministic gap gate fails, polisher fails — but the pipeline skips and continues, so it doesn't block final delivery.
 - **JSON output stability across LLMs**: despite multiple safety nets (v7.56b ESCAPE HATCH + v7.59 top-of-prompt forced JSON directive + forced-synthesis fallback), some LLMs still occasionally fail to emit JSON.

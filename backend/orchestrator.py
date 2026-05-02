@@ -3591,7 +3591,7 @@ class Orchestrator:
         model_used: str = "",
         duration_seconds: float = 0,
     ) -> str:
-        """Call gpt-5.4-mini to write a professional Chinese narrative report.
+        """Call gpt-4o-mini to write a professional Chinese narrative report.
 
         Returns clean markdown string, or empty string on failure (non-critical).
         The caller falls back to template-based narrative if this returns empty.
@@ -3859,7 +3859,7 @@ class Orchestrator:
             report = self.ai_bridge.quick_completion(
                 prompt,
                 system=system,
-                model="gpt-5.4-mini",
+                model="gpt-4o-mini",
                 max_tokens=6000,
                 timeout_sec=90,
                 fallback_models=["kimi-coding", "deepseek-v3"],
@@ -6088,7 +6088,7 @@ class Orchestrator:
             summary_md_lines.append(f"| {_L('重试', 'Retries')} | {iterations} |")
 
         # Detailed analysis
-        # v4.1: AI Narrative Report (Plan B) — call gpt-5.4-mini to write
+        # v4.1: AI Narrative Report (Plan B) — call gpt-4o-mini to write
         # a professional Chinese narrative report. Falls back to template on failure.
         _ai_narrative = ""
         try:
@@ -7571,19 +7571,19 @@ class Orchestrator:
     # v5.8.6: kimi-coding (legacy K2.5 endpoint) returns 401 Invalid Auth in prod.
     # Promote kimi-k2.6-code-preview as the primary.
     # v5.8.6 (late): GPT relay is also out of quota (403 insufficient_user_quota on
-    # api.relay.com, balance $-0.001372). Demote gpt-5.4 / gpt-5.4-mini / codex
+    # api.relay.com, balance $-0.001372). Demote gpt-5.4 / gpt-4o-mini / codex
     # below the working non-OpenAI alternates so _first_available picks something
     # that actually responds. OpenAI entries stay at the tail for environments with
     # a funded key; the gateway circuit breaker will skip them on 403.
     _FAST_MODELS = [
         "kimi-k2.6-code-preview", "deepseek-v3", "gemini-2.0-flash", "qwen-max",
-        "gpt-5.4-mini", "kimi-coding",
+        "gpt-4o-mini", "kimi-coding",
     ]
     _STRONG_MODELS = [
         "kimi-k2.6-code-preview", "deepseek-v3", "gemini-2.5-pro", "qwen-max",
-        "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "claude-4-sonnet", "o3", "kimi-coding",
+        "gpt-5.4", "gpt-4o-mini", "gpt-5.3-codex", "claude-4-sonnet", "o3", "kimi-coding",
     ]
-    # v6.7: removed gpt-5.4 / gpt-5.4-mini / gpt-5.3-codex.
+    # v6.7: removed gpt-5.4 / gpt-4o-mini / gpt-5.3-codex.
     # Those route via relay.com which currently returns 502/503 ("账号池负载较高"
     # / "模型名称配置错误") for every call, wasting 30s-2min per retry before
     # falling back. Kimi is the user's OFFICIAL Moonshot Coding Plan (not a relay) —
@@ -7591,7 +7591,7 @@ class Orchestrator:
     _DOWNGRADE_CHAIN = ["kimi-k2.6-code-preview", "kimi-coding", "deepseek-v3", "qwen-max", "gemini-2.0-flash"]
 
     _MODEL_KEY_MAP: Dict[str, str] = {
-        "gpt-5.4-mini": "OPENAI_API_KEY", "gpt-5.3-codex": "OPENAI_API_KEY", "gpt-5.2-codex": "OPENAI_API_KEY",
+        "gpt-4o-mini": "OPENAI_API_KEY", "gpt-5.3-codex": "OPENAI_API_KEY", "gpt-5.2-codex": "OPENAI_API_KEY",
         "gpt-5.4": "OPENAI_API_KEY", "gpt-4.1": "OPENAI_API_KEY", "gpt-4o": "OPENAI_API_KEY", "o3": "OPENAI_API_KEY",
         "claude-4-sonnet": "ANTHROPIC_API_KEY", "claude-4-opus": "ANTHROPIC_API_KEY", "claude-3.5-sonnet": "ANTHROPIC_API_KEY",
         "gemini-2.5-pro": "GEMINI_API_KEY", "gemini-2.0-flash": "GEMINI_API_KEY",
@@ -8228,7 +8228,7 @@ class Orchestrator:
         C1 NODE_TYPE_PREFERRED_MODELS pick the reviewer model instead. Previously
         C2 built a candidate chain via _legacy_model_fallback_chain that put
         kimi-coding first — but kimi-k2.5 cannot drive a browser review nor emit
-        verdict JSON. The models reviewer actually needs (gpt-5.4-mini /
+        verdict JSON. The models reviewer actually needs (gpt-4o-mini /
         gpt-5.4 / claude-4-sonnet) are already configured upstream.
         """
         # C2 no longer constructs the reviewer chain — upstream config owns it.
@@ -15595,11 +15595,11 @@ class Orchestrator:
                 out.append(_L(
                     f"[警告] Planner 输出仅 **{output_chars}** 字符,低于可执行蓝图的最低阈值。"
                     "推测模型未完整吐出 9 段规划,节点已自动触发 retry。若看到此消息,请在 Settings 检查"
-                    " planner 模型是否过载,或切换到 `claude-opus-4-7` / `gpt-5.4-mini` 等规划能力更强的模型。\n",
+                    " planner 模型是否过载,或切换到 `claude-opus-4-7` / `gpt-4o-mini` 等规划能力更强的模型。\n",
                     f"[警告] Planner only produced **{output_chars}** characters — below the viable-blueprint "
                     "threshold. The model likely failed to emit the 9-section plan in full; orchestrator "
                     "auto-retried. If you see this warning, consider switching the planner model to "
-                    "`claude-opus-4-7` / `gpt-5.4-mini` in Settings.\n",
+                    "`claude-opus-4-7` / `gpt-4o-mini` in Settings.\n",
                 ))
             else:
                 _chain_preview = " → ".join(roles_found[:5]) + (" → …" if len(roles_found) > 5 else "")
